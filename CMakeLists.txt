@@ -25,6 +25,10 @@ set_property(SOURCE ${middleware_include_dir} PROPERTY GENERATED 1)
 append_srcs_dir(middleware_src_dir  ${middleware_src_path}/v2/sample/common
                                     ${middleware_src_path}/v2/component/isp/sensor/sg200x/lontium_lt6911
                                     )
+# The vendor LT6911 control file treats a readable but unsupported chip-ID
+# register as a sensor failure, although it deliberately continues.  Keep the
+# sensor integration sources, but use our maintained control implementation.
+list(FILTER middleware_src_dir EXCLUDE REGEX "/lt6911_sensor_ctl\\.c$")
 list(APPEND ADD_SRCS        ${middleware_src_dir}
                             "${source_dir}/kvm_mmf.cpp")
 set_property(SOURCE ${middleware_src_dir} PROPERTY GENERATED 1)
