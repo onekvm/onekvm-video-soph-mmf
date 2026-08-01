@@ -1,4 +1,4 @@
-# OneKVM NanoKVM MMF
+# onekvm-device-nanokvm-mmf
 
 OneKVM 维护的 NanoKVM/SG2002 多媒体运行库，提供 HDMI 视频采集以及
 H.264、H.265、MJPEG 硬件编码。
