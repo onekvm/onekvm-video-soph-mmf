@@ -34,6 +34,7 @@
 #define MMF_VENC_STREAM_BUF_SIZE	(1024 * 1024)
 #define MMF_JPEG_STREAM_BUF_SIZE	(2 * 1024 * 1024)
 #define MMF_VI_MAP_CACHE_SIZE	4
+#define ONEKVM_SENSOR_CONFIG_PATH "/usr/share/onekvm/nanokvm/sensor_cfg.ini"
 
 #define MMF_VB_VI_ID			0
 
@@ -605,11 +606,23 @@ static int cvi_rgb2nv21(uint8_t *src, int input_w, int input_h)
 	return 0;
 }
 
+static CVI_S32 _set_sensor_config_path(void)
+{
+	const char *path = getenv("ONEKVM_NANOKVM_SENSOR_CONFIG");
+	if (path == NULL || path[0] == '\0')
+		path = ONEKVM_SENSOR_CONFIG_PATH;
+	return SAMPLE_COMM_VI_SetIniPath(path);
+}
+
 static int _try_release_sys(void)
 {
 	CVI_S32 s32Ret = CVI_FAILURE;
 	SAMPLE_INI_CFG_S	   	stIniCfg;
 	SAMPLE_VI_CONFIG_S 		stViConfig;
+	if (_set_sensor_config_path() != CVI_SUCCESS) {
+		SAMPLE_PRT("invalid OneKVM sensor configuration path\n");
+		return s32Ret;
+	}
 	if (SAMPLE_COMM_VI_ParseIni(&stIniCfg)) {
 		SAMPLE_PRT("Parse complete\n");
 		return s32Ret;
@@ -907,6 +920,10 @@ static CVI_S32 _mmf_init(void)
 	CVI_LOG_SetLevelConf(&log_conf);
 
 	// Get config from ini if found.
+	if (_set_sensor_config_path() != CVI_SUCCESS) {
+		SAMPLE_PRT("invalid OneKVM sensor configuration path\n");
+		return CVI_FAILURE;
+	}
 	if (SAMPLE_COMM_VI_ParseIni(&stIniCfg)) {
 		SAMPLE_PRT("Parse complete\n");
 	}
