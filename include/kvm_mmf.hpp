@@ -57,12 +57,14 @@ int mmf_enc_jpg_deinit(int ch);
 int mmf_enc_jpg_push(int ch, uint8_t *data, int w, int h, int format);
 int mmf_enc_jpg_push_with_quality(int ch, uint8_t *data, int w, int h, int format, int quality);
 int mmf_enc_jpg_pop(int ch, uint8_t **data, int *size);
+int mmf_enc_jpg_pop_into(int ch, uint8_t *dst, int capacity);
 int mmf_enc_jpg_free(int ch);
 int mmf_add_venc_channel(int ch, mmf_venc_cfg_t *cfg);
 int mmf_del_venc_channel(int ch);
 int mmf_del_venc_channel_all();
 int mmf_venc_push(int ch, uint8_t *data, int w, int h, int format);
 int mmf_venc_pop(int ch, mmf_stream_t *stream);
+int mmf_venc_pop_into(int ch, uint8_t *dst, int capacity);
 int mmf_venc_free(int ch);
 
 #endif // __KVM_MMF_HPP__

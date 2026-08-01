@@ -2083,6 +2083,59 @@ int mmf_enc_jpg_pop(int ch, uint8_t **data, int *size)
 	return s32Ret;
 }
 
+// Copy the vendor packs directly into a caller-owned output buffer. Unlike
+// mmf_enc_jpg_pop, this never consolidates a multi-pack JPEG in the process-
+// global enc_jpeg_buffer first, so callers can pass a shared-memory ring slot.
+int mmf_enc_jpg_pop_into(int ch, uint8_t *dst, int capacity)
+{
+	if (!dst || capacity <= 0 || !priv.enc_jpg_running)
+		return -1;
+
+	VENC_CHN_STATUS_S status;
+	CVI_S32 ret = CVI_VENC_QueryStatus(ch, &status);
+	if (ret != CVI_SUCCESS || status.u32CurPacks == 0 ||
+		status.u32CurPacks > MMF_VENC_INTERNAL_PACKS)
+		return -1;
+
+	memset(priv.enc_jpeg_packs, 0, sizeof(priv.enc_jpeg_packs));
+	priv.enc_jpeg_frame.pstPack = priv.enc_jpeg_packs;
+	ret = CVI_VENC_GetStream(ch, &priv.enc_jpeg_frame, 1000);
+	if (ret != CVI_SUCCESS)
+		return -1;
+	if (priv.enc_jpeg_frame.u32PackCount == 0 ||
+		priv.enc_jpeg_frame.u32PackCount > MMF_VENC_INTERNAL_PACKS) {
+		CVI_VENC_ReleaseStream(ch, &priv.enc_jpeg_frame);
+		priv.enc_jpg_running = 0;
+		return -1;
+	}
+
+	CVI_U32 total = 0;
+	for (CVI_U32 index = 0; index < priv.enc_jpeg_frame.u32PackCount; ++index) {
+		VENC_PACK_S *pack = &priv.enc_jpeg_frame.pstPack[index];
+		if (pack->u32Offset > pack->u32Len) {
+			CVI_VENC_ReleaseStream(ch, &priv.enc_jpeg_frame);
+			priv.enc_jpg_running = 0;
+			return -1;
+		}
+		CVI_U32 pack_size = pack->u32Len - pack->u32Offset;
+		if (pack_size > (CVI_U32)capacity - total) {
+			CVI_VENC_ReleaseStream(ch, &priv.enc_jpeg_frame);
+			priv.enc_jpg_running = 0;
+			return -2;
+		}
+		if (pack_size > 0) {
+			if (!pack->pu8Addr) {
+				CVI_VENC_ReleaseStream(ch, &priv.enc_jpeg_frame);
+				priv.enc_jpg_running = 0;
+				return -1;
+			}
+			memcpy(dst + total, pack->pu8Addr + pack->u32Offset, pack_size);
+		}
+		total += pack_size;
+	}
+	return (int)total;
+}
+
 int mmf_enc_jpg_free(int ch)
 {
 	CVI_S32 s32Ret = CVI_SUCCESS;
@@ -2569,6 +2622,73 @@ int mmf_venc_pop(int ch, mmf_stream_t *stream) {
 	}
 
 	return 0;
+}
+
+// Pop one access unit directly into caller storage. This mirrors mmf_venc_pop
+// but bypasses both mmf_stream_t's eight-pack ABI limit and stream_buffer.
+int mmf_venc_pop_into(int ch, uint8_t *dst, int capacity) {
+	if (!dst || capacity <= 0 || ch < 0 || ch >= MMF_VENC_MAX_CHN ||
+		!priv.venc[ch].is_inited)
+		return -1;
+
+	venc_info_t *info = (venc_info_t *)&priv.venc[ch];
+	VENC_STREAM_S *stream = &info->capture_stream;
+	if (!info->is_running)
+		return 0;
+
+	int fd = CVI_VENC_GetFd(ch);
+	if (fd < 0)
+		return -1;
+	fd_set read_fds;
+	struct timeval timeout = {0, 80 * 1000};
+	FD_ZERO(&read_fds);
+	FD_SET(fd, &read_fds);
+	CVI_S32 ret = select(fd + 1, &read_fds, NULL, NULL, &timeout);
+	if (ret <= 0)
+		return 0;
+
+	VENC_CHN_STATUS_S status;
+	ret = CVI_VENC_QueryStatus(ch, &status);
+	if (ret != CVI_SUCCESS || status.u32CurPacks == 0 ||
+		status.u32CurPacks > MMF_VENC_INTERNAL_PACKS)
+		return -1;
+
+	memset(info->capture_packs, 0, sizeof(info->capture_packs));
+	stream->pstPack = info->capture_packs;
+	ret = CVI_VENC_GetStream(ch, stream, 1000);
+	if (ret != CVI_SUCCESS)
+		return -1;
+	if (stream->u32PackCount == 0 || stream->u32PackCount > MMF_VENC_INTERNAL_PACKS) {
+		CVI_VENC_ReleaseStream(ch, stream);
+		info->is_running = 0;
+		return -1;
+	}
+
+	CVI_U32 total = 0;
+	for (CVI_U32 index = 0; index < stream->u32PackCount; ++index) {
+		VENC_PACK_S *pack = &stream->pstPack[index];
+		if (pack->u32Offset > pack->u32Len) {
+			CVI_VENC_ReleaseStream(ch, stream);
+			info->is_running = 0;
+			return -1;
+		}
+		CVI_U32 size = pack->u32Len - pack->u32Offset;
+		if (size > (CVI_U32)capacity - total) {
+			CVI_VENC_ReleaseStream(ch, stream);
+			info->is_running = 0;
+			return -2;
+		}
+		if (size > 0) {
+			if (!pack->pu8Addr) {
+				CVI_VENC_ReleaseStream(ch, stream);
+				info->is_running = 0;
+				return -1;
+			}
+			memcpy(dst + total, pack->pu8Addr + pack->u32Offset, size);
+		}
+		total += size;
+	}
+	return (int)total;
 }
 
 int mmf_venc_free(int ch) {

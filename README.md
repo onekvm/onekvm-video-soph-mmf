@@ -20,7 +20,9 @@ Sophgo middleware、LT6911 sensor glue 和交叉工具链仍由 NanoKVM/MaixCDK
 
 - VI 映射按物理地址缓存，避免逐帧 mmap/munmap。
 - VI 帧可直接送入 VENC，外部缓冲区仍走兼容复制路径。
-- VENC/JPEG pack 使用通道级复用缓冲，避免逐帧 malloc/free。
+- VENC/JPEG 提供 `*_pop_into`，可把 vendor packs 直接合并到调用方的
+  memfd slot，避免先合并到进程内缓冲再复制一次。
+- 兼容 `pop` ABI 仍复用通道缓冲，避免逐帧 malloc/free。
 - 每个编码通道最多保留一帧在途，避免实时视频积压旧帧。
 - vendor pack 超过公共 ABI 的 8 项时安全合并编码数据。
 
