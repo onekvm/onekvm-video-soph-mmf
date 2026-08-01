@@ -34,7 +34,6 @@
 #define MMF_VENC_STREAM_BUF_SIZE	(1024 * 1024)
 #define MMF_JPEG_STREAM_BUF_SIZE	(2 * 1024 * 1024)
 #define MMF_VI_MAP_CACHE_SIZE	4
-#define ONEKVM_SENSOR_CONFIG_PATH "/usr/share/onekvm/nanokvm/sensor_cfg.ini"
 
 #define MMF_VB_VI_ID			0
 
@@ -606,12 +605,19 @@ static int cvi_rgb2nv21(uint8_t *src, int input_w, int input_h)
 	return 0;
 }
 
-static CVI_S32 _set_sensor_config_path(void)
+static void _nanokvm_sensor_config(SAMPLE_INI_CFG_S *config)
 {
-	const char *path = getenv("ONEKVM_NANOKVM_SENSOR_CONFIG");
-	if (path == NULL || path[0] == '\0')
-		path = ONEKVM_SENSOR_CONFIG_PATH;
-	return SAMPLE_COMM_VI_SetIniPath(path);
+	static const CVI_S16 lanes[5] = {2, 4, 3, 1, 0};
+
+	memset(config, 0, sizeof(*config));
+	config->enSource = VI_PIPE_FRAME_SOURCE_DEV;
+	config->devNum = 1;
+	config->enSnsType[0] = LONTIUM_LT6911_2M_60FPS_8BIT;
+	config->enWDRMode[0] = WDR_MODE_NONE;
+	config->s32BusId[0] = 4;
+	config->s32SnsI2cAddr[0] = 0x2b;
+	config->MipiDev[0] = 0;
+	memcpy(config->as16LaneId[0], lanes, sizeof(lanes));
 }
 
 static int _try_release_sys(void)
@@ -619,14 +625,7 @@ static int _try_release_sys(void)
 	CVI_S32 s32Ret = CVI_FAILURE;
 	SAMPLE_INI_CFG_S	   	stIniCfg;
 	SAMPLE_VI_CONFIG_S 		stViConfig;
-	if (_set_sensor_config_path() != CVI_SUCCESS) {
-		SAMPLE_PRT("invalid OneKVM sensor configuration path\n");
-		return s32Ret;
-	}
-	if (SAMPLE_COMM_VI_ParseIni(&stIniCfg)) {
-		SAMPLE_PRT("Parse complete\n");
-		return s32Ret;
-	}
+	_nanokvm_sensor_config(&stIniCfg);
 
 	priv.sensor_type = stIniCfg.enSnsType[0];
 
@@ -919,14 +918,7 @@ static CVI_S32 _mmf_init(void)
 	log_conf.s32Level = CVI_DBG_DEBUG;
 	CVI_LOG_SetLevelConf(&log_conf);
 
-	// Get config from ini if found.
-	if (_set_sensor_config_path() != CVI_SUCCESS) {
-		SAMPLE_PRT("invalid OneKVM sensor configuration path\n");
-		return CVI_FAILURE;
-	}
-	if (SAMPLE_COMM_VI_ParseIni(&stIniCfg)) {
-		SAMPLE_PRT("Parse complete\n");
-	}
+	_nanokvm_sensor_config(&stIniCfg);
 
 	//Set sensor number
 	CVI_VI_SetDevNum(stIniCfg.devNum);
