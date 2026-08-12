@@ -1,8 +1,8 @@
-# onekvm-device-nanokvm-mmf
+# onekvm-nanokvm-mmf
 
 [English](README.md) | 简体中文
 
-`onekvm-device-nanokvm-mmf` 是 OneKVM 面向 NanoKVM 的视频与加密硬件后端。
+`onekvm-nanokvm-mmf` 是 OneKVM 面向 NanoKVM 的视频与加密硬件后端。
 它将 SG2002 多媒体处理链路接入 OneKVM Backend ABI，并将设备相关实现隔离在
 独立动态库中，避免 `onekvm-server` 直接依赖 NanoKVM 专用代码。
 

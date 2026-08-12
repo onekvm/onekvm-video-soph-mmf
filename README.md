@@ -1,8 +1,8 @@
-# onekvm-device-nanokvm-mmf
+# onekvm-nanokvm-mmf
 
 English | [简体中文](README.zh-CN.md)
 
-`onekvm-device-nanokvm-mmf` provides the NanoKVM video and crypto hardware
+`onekvm-nanokvm-mmf` provides the NanoKVM video and crypto hardware
 backend for OneKVM. It integrates the SG2002 multimedia pipeline with the
 OneKVM backend ABI while keeping device-specific implementation details out of
 `onekvm-server`.
