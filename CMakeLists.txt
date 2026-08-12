@@ -1,70 +1,158 @@
+cmake_minimum_required(VERSION 3.16)
 
-list(APPEND ADD_REQUIREMENTS basic ini)
-list(APPEND ADD_INCLUDE "include")
+project(onekvm_device_nanokvm_mmf LANGUAGES C CXX)
 
-# sophgo-middleware
-set(middleware_src_path "${CMAKE_CURRENT_SOURCE_DIR}/../3rd_party/sophgo-middleware/sophgo-middleware")
+option(BUILD_TESTING "Build host-side unit tests" OFF)
+include(CTest)
+include(GNUInstallDirs)
 
+option(ONEKVM_BUILD_MMF_BACKEND "Build the NanoKVM MMF backend" ON)
 
-set(source_dir "src")
-append_srcs_dir(ADD_SRCS "${source_dir}")
+function(onekvm_enable_warnings target)
+    target_compile_options(${target} PRIVATE
+        $<$<COMPILE_LANGUAGE:C,CXX>:-Wall>
+        $<$<COMPILE_LANGUAGE:C,CXX>:-Wextra>
+        $<$<COMPILE_LANGUAGE:C,CXX>:-Wpedantic>)
+endfunction()
 
-# middleware
-set(middleware_include_dir .
-    ${middleware_src_path}/v2/component/panel/${CONFIG_SOPHGO_MIDDLEWARE_CHIP}
-    ${middleware_src_path}/v2/include
-    ${middleware_src_path}/v2/include/isp/${CONFIG_SOPHGO_MIDDLEWARE_CHIP}
-    ${middleware_src_path}/v2/sample/common
-    ${middleware_src_path}/v2/uapi
-    ${middleware_src_path}/v2/3rdparty/inih
-    ${middleware_src_path}/v2/modules/ive/include/
-)
-list(APPEND ADD_INCLUDE ${middleware_include_dir})
-set_property(SOURCE ${middleware_include_dir} PROPERTY GENERATED 1)
+if(BUILD_TESTING)
+    add_executable(input_resolution_tracker_test
+        tests/input-resolution-tracker-test.cpp)
+    target_include_directories(input_resolution_tracker_test PRIVATE include)
+    target_compile_features(input_resolution_tracker_test PRIVATE cxx_std_17)
+    onekvm_enable_warnings(input_resolution_tracker_test)
+    add_test(NAME input-resolution-tracker COMMAND input_resolution_tracker_test)
 
-append_srcs_dir(middleware_src_dir  ${middleware_src_path}/v2/sample/common
-                                    ${middleware_src_path}/v2/component/isp/sensor/sg200x/lontium_lt6911
-                                    )
-# The vendor LT6911 control file treats a readable but unsupported chip-ID
-# register as a sensor failure, although it deliberately continues.  Keep the
-# sensor integration sources, but use our maintained control implementation.
-list(FILTER middleware_src_dir EXCLUDE REGEX "/lt6911_sensor_ctl\\.c$")
-list(APPEND ADD_SRCS        ${middleware_src_dir}
-                            "${source_dir}/kvm_mmf.cpp")
-set_property(SOURCE ${middleware_src_dir} PROPERTY GENERATED 1)
+    add_executable(vi_fps_parser_test tests/vi-fps-parser-test.cpp)
+    target_compile_features(vi_fps_parser_test PRIVATE cxx_std_17)
+    onekvm_enable_warnings(vi_fps_parser_test)
+    add_test(NAME vi-fps-parser COMMAND vi_fps_parser_test)
 
-set(middleware_static_lib_file  "")
-    list(APPEND ADD_STATIC_LIB ${middleware_static_lib_file})
-set_property(SOURCE ${middleware_static_lib_file} PROPERTY GENERATED 1)
-
-set(mmf_lib_dir ${middleware_src_path}/v2/lib)
-
-if(CONFIG_SOPHGO_MIDDLEWARE_C_LIBRARY STREQUAL "musl")
-    set(middleware_dynamic_lib_file     ${mmf_lib_dir}/libcvi_bin.so
-                                        ${mmf_lib_dir}/libae.so
-                                        ${mmf_lib_dir}/libaf.so
-                                        ${mmf_lib_dir}/libawb.so
-                                        ${mmf_lib_dir}/libcvi_bin_isp.so
-                                        ${mmf_lib_dir}/libisp_algo.so
-                                        ${mmf_lib_dir}/libisp.so
-                                        ${mmf_lib_dir}/libsys.so
-                                        ${mmf_lib_dir}/libvdec.so
-                                        ${mmf_lib_dir}/libvenc.so
-                                        ${mmf_lib_dir}/libvpu.so
-                                        ${mmf_lib_dir}/3rd/libini.so)
-elseif(CONFIG_SOPHGO_MIDDLEWARE_C_LIBRARY STREQUAL "glibc")
-    set(middleware_dynamic_lib_file     ${mmf_lib_dir}/libcvi_vb.so
-                                        ${mmf_lib_dir}/libcvi_sys.so
-                                        ${mmf_lib_dir}/libcvi_debug.so
-    )
-else()
-    message(FATAL_ERROR "No sophgo middleware c library support, please check menuoconfig to select c library")
+    add_executable(no_signal_frame_test
+        tests/no-signal-frame-test.cpp
+        src/no_signal.cpp)
+    target_include_directories(no_signal_frame_test PRIVATE include)
+    target_compile_features(no_signal_frame_test PRIVATE cxx_std_17)
+    onekvm_enable_warnings(no_signal_frame_test)
+    add_test(NAME no-signal-frame COMMAND no_signal_frame_test)
 endif()
-list(APPEND ADD_DYNAMIC_LIB ${middleware_dynamic_lib_file})
-set_property(SOURCE ${middleware_dynamic_lib_file} PROPERTY GENERATED 1)
 
-list(APPEND ADD_DEFINITIONS_PRIVATE -DSENSOR_LONTIUM_LT6911
-                                -DSENSOR2_TYPE=LONTIUM_LT6911_2M_60FPS_8BIT)
+if(NOT ONEKVM_BUILD_MMF_BACKEND)
+    return()
+endif()
 
+set(CVI_MPI_ROOT "" CACHE PATH "Built Sophgo cvi_mpi tree")
+if(NOT CVI_MPI_ROOT)
+    message(FATAL_ERROR "CVI_MPI_ROOT must point to a built Sophgo cvi_mpi tree")
+endif()
 
-register_component(DYNAMIC)
+set(CVI_MPI_SENSOR_DIR
+    "${CVI_MPI_ROOT}/component/isp/sensor/cv182x/lontium_lt6911")
+
+set(MMF_SOURCES
+    src/mmf_runtime.cpp
+    src/mmf_jpeg.cpp
+    src/mmf_h26x.cpp
+    src/mmf_capture.cpp
+    src/lt6911_sample_platform.c
+    src/lt6911_sample_sensor.c
+    src/lt6911_sensor_ctl.c
+    src/no_signal.cpp
+    src/onekvm_crypto_backend.cpp
+    src/onekvm_video_backend.cpp
+    src/onekvm_video_encoder.cpp
+    src/onekvm_video_source.cpp)
+
+add_library(kvm_mmf SHARED
+    ${MMF_SOURCES}
+    "${CVI_MPI_ROOT}/sample/common/sample_common_sys.c"
+    "${CVI_MPI_ROOT}/sample/common/sample_common_vpss.c"
+    "${CVI_MPI_ROOT}/sample/common/sample_common_vi.c"
+    "${CVI_MPI_ROOT}/sample/common/sample_common_isp.c"
+    "${CVI_MPI_SENSOR_DIR}/lt6911_cmos.c")
+
+target_include_directories(kvm_mmf PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${CVI_MPI_ROOT}/component/panel/cv181x"
+    "${CVI_MPI_ROOT}/include"
+    "${CVI_MPI_ROOT}/modules/isp/include/cv181x"
+    "${CVI_MPI_ROOT}/sample/common"
+    "${CVI_MPI_ROOT}/component/isp/common"
+    "${CVI_MPI_ROOT}/3rdparty/inih"
+    "${CVI_MPI_SENSOR_DIR}")
+
+target_compile_definitions(kvm_mmf PRIVATE
+    USE_USER_SEN_DRIVER=1
+    SENSOR_LONTIUM_LT6911
+    SENSOR2_TYPE=LONTIUM_LT6911_2M_60FPS_8BIT)
+target_compile_options(kvm_mmf PRIVATE
+    -mcpu=c906fdv
+    -march=rv64imafdcv0p7xthead
+    -mcmodel=medany
+    -mabi=lp64d
+    -Os)
+target_compile_features(kvm_mmf PRIVATE cxx_std_17)
+onekvm_enable_warnings(kvm_mmf)
+set_target_properties(kvm_mmf PROPERTIES
+    C_VISIBILITY_PRESET hidden
+    CXX_VISIBILITY_PRESET hidden
+    CXX_EXTENSIONS OFF
+    OUTPUT_NAME "nanokvm-mmf"
+    PREFIX ""
+    POSITION_INDEPENDENT_CODE ON
+    VISIBILITY_INLINES_HIDDEN ON)
+
+set(CVI_MPI_LIB_DIR "${CVI_MPI_ROOT}/lib")
+target_link_libraries(kvm_mmf PRIVATE
+    "${CVI_MPI_LIB_DIR}/libcvi_bin.so"
+    "${CVI_MPI_LIB_DIR}/libae.so"
+    "${CVI_MPI_LIB_DIR}/libaf.so"
+    "${CVI_MPI_LIB_DIR}/libawb.so"
+    "${CVI_MPI_LIB_DIR}/libcvi_bin_isp.so"
+    "${CVI_MPI_LIB_DIR}/libisp_algo.so"
+    "${CVI_MPI_LIB_DIR}/libisp.so"
+    "${CVI_MPI_LIB_DIR}/libsys.so"
+    "${CVI_MPI_LIB_DIR}/libvi.so"
+    "${CVI_MPI_LIB_DIR}/libvpss.so"
+    "${CVI_MPI_LIB_DIR}/libvo.so"
+    "${CVI_MPI_LIB_DIR}/librgn.so"
+    "${CVI_MPI_LIB_DIR}/libgdc.so"
+    "${CVI_MPI_LIB_DIR}/libvdec.so"
+    "${CVI_MPI_LIB_DIR}/libvenc.so"
+    "${CVI_MPI_LIB_DIR}/3rd/libini.so"
+    pthread)
+
+# Keep vendor sample-common and LT6911 references bound inside this DSO. The
+# version script makes the two OneKVM query functions its only public ABI.
+set(ONEKVM_BACKEND_VERSION_SCRIPT
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/onekvm_backend.map")
+target_link_options(kvm_mmf PRIVATE
+    "-Wl,-Bsymbolic"
+    "-Wl,--version-script=${ONEKVM_BACKEND_VERSION_SCRIPT}"
+    "-Wl,--wrap=CVI_ISP_SensorRegCallBack")
+set_property(TARGET kvm_mmf APPEND PROPERTY
+    LINK_DEPENDS "${ONEKVM_BACKEND_VERSION_SCRIPT}")
+
+# Sophgo's GCC 10 linker places .riscv.attributes immediately after a full
+# program-header table. Newer binutils tries to add PT_RISCV_ATTRIBUTES while
+# stripping and cannot grow that table. The dynamic loader uses e_flags for
+# the RVC/double-float ABI; removing this descriptive section keeps the ELF
+# compatible with Yocto's strip and objcopy.
+if(NOT CMAKE_OBJCOPY)
+    message(FATAL_ERROR "CMAKE_OBJCOPY is required for the RISC-V ELF fixup")
+endif()
+add_custom_command(TARGET kvm_mmf POST_BUILD
+    COMMAND "${CMAKE_OBJCOPY}" --remove-section=.riscv.attributes
+        "$<TARGET_FILE:kvm_mmf>"
+    VERBATIM)
+
+set(ONEKVM_VIDEO_BACKEND_INSTALL_DIR
+    "${CMAKE_INSTALL_LIBDIR}/onekvm/video-backends"
+    CACHE STRING "Install directory for OneKVM video backend DSOs")
+install(TARGETS kvm_mmf
+    LIBRARY DESTINATION "${ONEKVM_VIDEO_BACKEND_INSTALL_DIR}")
+install(FILES
+    include/onekvm/crypto_backend_v1.h
+    include/onekvm/video_backend_v1.h
+    DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/onekvm")

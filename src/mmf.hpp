@@ -1,0 +1,82 @@
+#pragma once
+
+// Internal MMF implementation interface. This is not part of the OneKVM ABI.
+
+#include <cstdint>
+
+extern "C" {
+int render_no_signal_nv21(uint8_t *data, int capacity, int width, int height);
+int lt6911_get_input_size(int pipe, uint32_t *width, uint32_t *height);
+int lt6911_get_capture_size(uint32_t *width, uint32_t *height);
+int onekvm_lt6911_set_active_size(uint32_t width, uint32_t height);
+void onekvm_lt6911_get_active_size(uint32_t *width, uint32_t *height);
+}
+
+namespace onekvm::mmf {
+
+enum class H26xCodec : uint8_t {
+    H265 = 1,
+    H264 = 2,
+};
+
+struct H26xEncoderConfig {
+    H26xCodec codec;
+    int width;
+    int height;
+    int pixel_format;
+    int gop;
+    int input_fps;
+    int output_fps;
+    int bitrate_kbps;
+};
+
+struct RateControl {
+    int initial_qp;
+    int min_qp;
+    int max_qp;
+};
+
+// init sys
+int initialize(void);
+int shutdown(void);
+
+// manage vi channels(vi->vpssgroup->vpss->frame)
+int find_free_capture_channel(void);
+int start_capture_pipeline(void);
+int stop_capture_pipeline(void);
+int open_capture_channel(int ch, int width, int height, int format, int fps);
+int close_capture_channel(int ch);
+int close_all_capture_channels(void);
+int reset_capture_channel(int ch, int width, int height, int format, int fps);
+bool capture_channel_open(int ch);
+void set_capture_mirror(int ch, bool en);
+void set_capture_flip(int ch, bool en);
+
+// get vi frame
+int acquire_capture_frame(int ch, void **data, int *len, int *width, int *height, int *format);
+void release_capture_frame(int ch);
+
+// venc
+int open_jpeg_encoder(int ch, int w, int h, int format, int quality);
+int close_jpeg_encoder(int ch);
+int submit_jpeg_frame(int ch, uint8_t *data, int w, int h, int format, int quality);
+int read_jpeg_packet(int ch, uint8_t *dst, int capacity);
+int release_jpeg_packet(int ch);
+int open_h26x_encoder(int ch, const H26xEncoderConfig &config,
+    const RateControl &rate_control);
+int close_h26x_encoder(int ch);
+int close_all_h26x_encoders();
+int submit_h26x_frame(int ch, uint8_t *data, int w, int h, int format);
+int read_h26x_packet(int ch, uint8_t *dst, int capacity);
+// Copy and release exactly one access unit. H.26x reference frames must remain
+// ordered; callers that drain stale units must request an IDR before resuming.
+int read_latest_h26x_packet(int ch, uint8_t *dst, int capacity);
+int read_latest_h26x_packet_nowait(int ch, uint8_t *dst, int capacity);
+// Release every access unit already queued without waiting for a new one.
+int drain_h26x_packets(int ch, uint8_t *scratch, int capacity);
+int release_h26x_packet(int ch);
+int request_h26x_idr(int ch);
+int bind_h26x_to_capture(int ch, int vpss_group, int vpss_channel);
+int unbind_h26x_from_capture(int ch);
+
+} // namespace onekvm::mmf

@@ -1,0 +1,7 @@
+{
+    global:
+        onekvm_video_backend_query;
+        onekvm_crypto_backend_query;
+    local:
+        *;
+};

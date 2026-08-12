@@ -1,0 +1,461 @@
+#include "onekvm_video_backend_internal.hpp"
+
+#pragma GCC visibility push(hidden)
+namespace onekvm::video_backend {
+
+/* All VI/VPSS/VENC objects share one vendor MMF context. Resolution changes
+ * tear that context down, so serialize every MMF operation across sources and
+ * encoders. Recursive locking keeps the existing small helper boundaries. */
+std::recursive_mutex g_mmf_mutex;
+std::atomic<uint64_t> g_mmf_generation{1};
+
+void set_error(char *error, uint32_t capacity, const char *format, ...) {
+    if (error == nullptr || capacity == 0) {
+        return;
+    }
+    va_list args;
+    va_start(args, format);
+    std::vsnprintf(error, capacity, format, args);
+    va_end(args);
+    error[capacity - 1] = '\0';
+}
+
+std::pair<int, int> resolution_size(int resolution) {
+    switch (resolution) {
+    case 720:
+        return {1280, 720};
+    case 480:
+        return {640, 480};
+    default:
+        return {1920, 1080};
+    }
+}
+
+bool read_vi_fps(double *fps) {
+    FILE *file = std::fopen(kVideoDebugPath, "r");
+    if (file == nullptr) {
+        return false;
+    }
+    char line[256];
+    bool found = false;
+    while (std::fgets(line, sizeof(line), file) != nullptr) {
+        if (parse_vi_fps_line(line, fps)) {
+            found = true;
+            break;
+        }
+    }
+    std::fclose(file);
+    return found;
+}
+
+uint64_t monotonic_ns() {
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+
+bool nv21_size(int width, int height, size_t *size) {
+    if (size == nullptr || width <= 0 || height <= 0 ||
+        (width & 1) != 0 || (height & 1) != 0) {
+        return false;
+    }
+    const uint64_t pixels = static_cast<uint64_t>(width) *
+        static_cast<uint64_t>(height);
+    const uint64_t bytes = pixels + pixels / 2;
+    if (bytes > static_cast<uint64_t>(SIZE_MAX) || bytes > INT32_MAX) {
+        return false;
+    }
+    *size = static_cast<size_t>(bytes);
+    return true;
+}
+
+bool read_supported_input_resolution(onekvm::InputResolution *resolution) {
+    uint32_t width = 0;
+    uint32_t height = 0;
+    if (resolution == nullptr || lt6911_get_input_size(0, &width, &height) != 0)
+        return false;
+    const onekvm::InputResolution value{width, height};
+    if (!onekvm::supported_input_resolution(value))
+        return false;
+    *resolution = value;
+    return true;
+}
+
+onekvm::InputResolution initial_input_resolution() {
+    onekvm::InputResolution first{};
+    onekvm::InputResolution second{};
+    if (read_supported_input_resolution(&first)) {
+        std::this_thread::sleep_for(kInitialResolutionSampleDelay);
+        if (read_supported_input_resolution(&second) && first == second)
+            return first;
+    }
+    return {1920, 1080};
+}
+
+bool stable_input_resolution(onekvm::InputResolution *resolution) {
+    onekvm::InputResolution first{};
+    onekvm::InputResolution second{};
+    if (resolution == nullptr || !read_supported_input_resolution(&first))
+        return false;
+    std::this_thread::sleep_for(kInitialResolutionSampleDelay);
+    if (!read_supported_input_resolution(&second) || first != second)
+        return false;
+    *resolution = first;
+    return true;
+}
+
+int cached_signal_present(Source *source) {
+    if (source == nullptr) return 0;
+    const uint64_t now = monotonic_ns();
+    const uint64_t recent_window = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            kRecentFrameSignalWindow).count());
+    const uint64_t last_frame = source->last_frame_ns.load(std::memory_order_relaxed);
+    if (last_frame != 0 && now >= last_frame && now - last_frame <= recent_window) {
+        return 1;
+    }
+
+    const uint64_t probe_interval = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            kSignalProbeInterval).count());
+    const uint64_t last_probe = source->last_signal_probe_ns.load(std::memory_order_relaxed);
+    if (last_probe != 0 && now >= last_probe && now - last_probe < probe_interval) {
+        return source->cached_signal.load(std::memory_order_relaxed);
+    }
+    if (source->signal_probe_running.test_and_set(std::memory_order_acquire)) {
+        return source->cached_signal.load(std::memory_order_relaxed);
+    }
+    double fps = 0;
+    const int present = read_vi_fps(&fps) ? (fps > 0 ? 1 : 0) : -1;
+    source->cached_signal.store(present, std::memory_order_relaxed);
+    source->last_signal_probe_ns.store(monotonic_ns(), std::memory_order_relaxed);
+    source->signal_probe_running.clear(std::memory_order_release);
+    return present;
+}
+
+void reset_signal_cache(Source *source) {
+    source->last_frame_ns.store(0, std::memory_order_relaxed);
+    source->last_signal_probe_ns.store(0, std::memory_order_relaxed);
+    source->cached_signal.store(-1, std::memory_order_relaxed);
+    source->signal_probe_running.clear(std::memory_order_release);
+}
+
+void release_source_frame(Source *source) {
+    if (!source->frame_pending || source->channel < 0) {
+        return;
+    }
+    std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
+    mmf::release_capture_frame(source->channel);
+    source->frame_pending = false;
+}
+
+void close_source(Source *source) {
+    if (!source->initialized) {
+        return;
+    }
+    std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
+    release_source_frame(source);
+    /* mmf::shutdown() owns the complete dependency-ordered teardown: bound VENC
+       consumers are stopped before their VPSS/VI producers.  Removing the VI
+       channel here first leaves the VENC worker running without userspace
+       draining its stream, which can fill the 12-pack queue and drop the
+       cached SPS/PPS needed by reconnecting H.264 decoders.  It also made the
+       later global teardown destroy the same VI resources twice. */
+    mmf::shutdown();
+    g_mmf_generation.fetch_add(1, std::memory_order_acq_rel);
+    source->channel = -1;
+    source->initialized = false;
+    source->no_signal_frame.clear();
+}
+
+int open_source(Source *source, const onekvm_video_source_config_v1 *config,
+                char *error, uint32_t error_capacity,
+                const onekvm::InputResolution *requested_input = nullptr) {
+    if (config == nullptr || config->struct_size < sizeof(*config)) {
+        set_error(error, error_capacity, "invalid source configuration");
+        return -1;
+    }
+    std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
+    const onekvm::InputResolution input = requested_input != nullptr &&
+        onekvm::supported_input_resolution(*requested_input)
+        ? *requested_input : initial_input_resolution();
+    std::fprintf(stderr, "OneKVM: configuring HDMI input %ux%u\n",
+                 input.width, input.height);
+    if (onekvm_lt6911_set_active_size(input.width, input.height) != 0) {
+        set_error(error, error_capacity, "invalid LT6911 input size %ux%u",
+                  input.width, input.height);
+        return -1;
+    }
+    if (mmf::initialize() != 0) {
+        set_error(error, error_capacity, "initialize failed");
+        return -1;
+    }
+    if (mmf::start_capture_pipeline() != 0) {
+        mmf::shutdown();
+        set_error(error, error_capacity, "start MMF capture pipeline failed");
+        return -1;
+    }
+    int channel = mmf::find_free_capture_channel();
+    if (channel < 0) {
+        mmf::stop_capture_pipeline();
+        mmf::shutdown();
+        set_error(error, error_capacity, "no free MMF VI channel");
+        return -1;
+    }
+    const auto [width, height] = resolution_size(config->resolution);
+    mmf::set_capture_mirror(channel, false);
+    mmf::set_capture_flip(channel, false);
+    const int fps = config->fps > 0 ? static_cast<int>(config->fps) : 60;
+    int result = mmf::open_capture_channel(channel, width, height, kMMFNV21, fps);
+    if (result != 0) {
+        mmf::stop_capture_pipeline();
+        mmf::shutdown();
+        set_error(error, error_capacity, "open MMF capture channel failed: %d", result);
+        return -1;
+    }
+    source->channel = channel;
+    source->initialized = true;
+    source->config = *config;
+    source->config.device = nullptr;
+    source->failures = 0;
+    source->last_recovery = {};
+    source->input_resolution.set_current(input);
+    source->no_signal_frame.clear();
+    reset_signal_cache(source);
+    return 0;
+}
+
+int reopen_source_for_input(Source *source, onekvm::InputResolution input,
+                            char *error, uint32_t error_capacity) {
+    const onekvm_video_source_config_v1 config = source->config;
+    std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
+    close_source(source);
+    if (open_source(source, &config, error, error_capacity, &input) != 0)
+        return -1;
+    std::fprintf(stderr, "OneKVM: HDMI input resolution changed to %ux%u\n",
+                 input.width, input.height);
+    return 0;
+}
+
+int32_t source_create(const onekvm_video_source_config_v1 *config, void **result,
+                      char *error, uint32_t error_capacity) {
+    if (result == nullptr) {
+        set_error(error, error_capacity, "source output is null");
+        return -1;
+    }
+    *result = nullptr;
+    Source *source = new (std::nothrow) Source();
+    if (source == nullptr) {
+        set_error(error, error_capacity, "allocate source: out of memory");
+        return -1;
+    }
+    if (open_source(source, config, error, error_capacity) != 0) {
+        delete source;
+        return -1;
+    }
+    *result = source;
+    return 0;
+}
+
+int32_t source_reset(void *opaque, const onekvm_video_source_config_v1 *config,
+                     char *error, uint32_t error_capacity) {
+    auto *source = static_cast<Source *>(opaque);
+    if (source == nullptr || config == nullptr || config->struct_size < sizeof(*config)) {
+        set_error(error, error_capacity, "invalid source reset");
+        return -1;
+    }
+    std::lock_guard<std::mutex> lock(source->mutex);
+    if (!source->initialized) {
+        return open_source(source, config, error, error_capacity);
+    }
+    release_source_frame(source);
+    const auto [width, height] = resolution_size(config->resolution);
+    const int fps = config->fps > 0 ? static_cast<int>(config->fps) : 60;
+    std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
+    int result = mmf::reset_capture_channel(
+        source->channel, width, height, kMMFNV21, fps);
+    if (result != 0) {
+        set_error(error, error_capacity, "reset MMF capture channel failed: %d", result);
+        return -1;
+    }
+    source->config = *config;
+    source->config.device = nullptr;
+    source->failures = 0;
+    source->last_recovery = {};
+    source->no_signal_frame.clear();
+    reset_signal_cache(source);
+    return 0;
+}
+
+int no_signal_frame(Source *source, onekvm_video_frame_v1 *frame,
+                    char *error, uint32_t error_capacity) {
+    const auto [width, height] = resolution_size(source->config.resolution);
+    size_t bytes = 0;
+    if (!nv21_size(width, height, &bytes)) {
+        set_error(error, error_capacity, "invalid no-signal frame size %dx%d",
+                  width, height);
+        return -1;
+    }
+    if (source->no_signal_frame.size() != bytes ||
+        source->no_signal_width != width || source->no_signal_height != height) {
+        try {
+            source->no_signal_frame.resize(bytes);
+        } catch (const std::bad_alloc &) {
+            set_error(error, error_capacity, "allocate no-signal frame: out of memory");
+            return -1;
+        }
+        int written = render_no_signal_nv21(source->no_signal_frame.data(),
+                                               static_cast<int>(bytes), width, height);
+        if (written != static_cast<int>(bytes)) {
+            set_error(error, error_capacity,
+                      "render no-signal frame returned %d, want %zu", written, bytes);
+            return -1;
+        }
+        source->no_signal_width = width;
+        source->no_signal_height = height;
+    }
+    frame->data = source->no_signal_frame.data();
+    frame->data_size = source->no_signal_frame.size();
+    frame->width = width;
+    frame->height = height;
+    frame->pixel_format = ONEKVM_VIDEO_PIXEL_NV21;
+    frame->pts_ns = monotonic_ns();
+    frame->token = 0;
+    return 0;
+}
+
+int32_t source_read(void *opaque, onekvm_video_frame_v1 *frame,
+                    char *error, uint32_t error_capacity) {
+    auto *source = static_cast<Source *>(opaque);
+    if (source == nullptr || frame == nullptr || frame->struct_size < sizeof(*frame)) {
+        set_error(error, error_capacity, "invalid source read");
+        return -1;
+    }
+    std::lock_guard<std::mutex> lock(source->mutex);
+    if (!source->initialized) {
+        set_error(error, error_capacity, "source is not initialized");
+        return -1;
+    }
+    if (source->frame_pending) {
+        set_error(error, error_capacity, "previous source frame was not released");
+        return -1;
+    }
+
+    void *data = nullptr;
+    int length = 0;
+    int width = 0;
+    int height = 0;
+    int format = 0;
+    std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
+    int result = mmf::acquire_capture_frame(source->channel, &data, &length, &width, &height, &format);
+    if (result != 0 || data == nullptr || length <= 0) {
+        if (result == 0) {
+            mmf::release_capture_frame(source->channel);
+        }
+        if (cached_signal_present(source) == 0) {
+            source->failures = 0;
+            return no_signal_frame(source, frame, error, error_capacity);
+        }
+        source->failures++;
+        const auto now = std::chrono::steady_clock::now();
+        const bool due = source->failures >= kRecoveryFailureThreshold &&
+            (source->last_recovery.time_since_epoch().count() == 0 ||
+             now - source->last_recovery >= kRecoveryInterval);
+        if (due) {
+            source->failures = 0;
+            source->last_recovery = now;
+            /* LT6911C internal-register access can interrupt live CSI output
+               on NanoKVM Cube.  Never poll it on the steady-state hot path;
+               sample only after VI has already stopped delivering frames. */
+            onekvm::InputResolution observed{};
+            const auto current = source->input_resolution.current();
+            if (stable_input_resolution(&observed) && observed != current) {
+                int reopen = reopen_source_for_input(
+                    source, observed, error, error_capacity);
+                if (reopen == 0) {
+                    set_error(error, error_capacity,
+                              "HDMI input changed to %ux%u; pipeline rebuilt",
+                              observed.width, observed.height);
+                }
+                return -1;
+            }
+            const auto [reset_width, reset_height] = resolution_size(source->config.resolution);
+            const int reset_fps = source->config.fps > 0
+                ? static_cast<int>(source->config.fps) : 60;
+            int reset = mmf::reset_capture_channel(
+                source->channel, reset_width, reset_height, kMMFNV21, reset_fps);
+            set_error(error, error_capacity, "MMF VI read failed; channel reset returned %d", reset);
+        } else {
+            set_error(error, error_capacity, "MMF VI read failed: %d", result);
+        }
+        return -1;
+    }
+
+    source->failures = 0;
+    source->last_frame_ns.store(monotonic_ns(), std::memory_order_relaxed);
+    source->cached_signal.store(1, std::memory_order_relaxed);
+    source->frame_pending = true;
+    source->frame_token++;
+    if (source->frame_token == 0) {
+        source->frame_token++;
+    }
+    frame->data = static_cast<const uint8_t *>(data);
+    frame->data_size = static_cast<uint64_t>(length);
+    frame->width = width;
+    frame->height = height;
+    frame->pixel_format = ONEKVM_VIDEO_PIXEL_NV21;
+    frame->pts_ns = monotonic_ns();
+    frame->token = source->frame_token;
+    return 0;
+}
+
+void source_release(void *opaque, uint64_t token) {
+    auto *source = static_cast<Source *>(opaque);
+    if (source == nullptr || token == 0) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(source->mutex);
+    if (source->frame_pending && source->frame_token == token) {
+        release_source_frame(source);
+    }
+}
+
+int32_t source_signal_present(void *opaque) {
+    return cached_signal_present(static_cast<Source *>(opaque)) > 0 ? 1 : 0;
+}
+
+int32_t source_input_format(void *opaque, onekvm_video_format_v1 *format) {
+    auto *source = static_cast<Source *>(opaque);
+    if (source == nullptr || format == nullptr ||
+        format->struct_size < sizeof(*format)) {
+        return -1;
+    }
+    std::lock_guard<std::mutex> lock(source->mutex);
+    if (!source->initialized) {
+        return -1;
+    }
+    const auto input = source->input_resolution.current();
+    if (input.width == 0 || input.height == 0) {
+        return -1;
+    }
+    format->width = static_cast<int32_t>(input.width);
+    format->height = static_cast<int32_t>(input.height);
+    format->fps = source->config.fps;
+    format->pixel_format = ONEKVM_VIDEO_PIXEL_UNKNOWN;
+    return 0;
+}
+
+void source_destroy(void *opaque) {
+    auto *source = static_cast<Source *>(opaque);
+    if (source == nullptr) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(source->mutex);
+        close_source(source);
+    }
+    delete source;
+}
+
+
+} // namespace onekvm::video_backend
+#pragma GCC visibility pop

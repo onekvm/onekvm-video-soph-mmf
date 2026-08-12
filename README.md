@@ -1,37 +1,155 @@
 # onekvm-device-nanokvm-mmf
 
-OneKVM 维护的 NanoKVM/SG2002 多媒体运行库，提供 HDMI 视频采集以及
-H.264、H.265、MJPEG 硬件编码。
+English | [简体中文](README.zh-CN.md)
 
-本仓库是独立的 MaixCDK `kvm_mmf` component，不再通过补丁修改
-Sipeed NanoKVM 仓库。构建时将本仓库作为 `components/kvm_mmf` 使用，
-Sophgo middleware、LT6911 sensor glue 和交叉工具链仍由 NanoKVM/MaixCDK
-构建环境提供。
+`onekvm-device-nanokvm-mmf` provides the NanoKVM video and crypto hardware
+backend for OneKVM. It integrates the SG2002 multimedia pipeline with the
+OneKVM backend ABI while keeping device-specific implementation details out of
+`onekvm-server`.
 
-## ABI
+## Features
 
-公共 ABI 定义在 `include/kvm_mmf.hpp`。OneKVM runtime 升级必须保持：
+- Captures video from the LT6911 HDMI input.
+- Encodes H.264, H.265, and MJPEG in hardware.
+- Recognizes common HDMI input modes from 640x480 through 1920x1080.
+- Provides 1080p, 720p, and 480p OneKVM output profiles at up to 60 FPS.
+- Reports the HDMI signal state and provides a built-in no-signal frame to
+  callers using the raw-frame path.
+- Uses the official CVITEK SPACC driver for optional AES-GCM acceleration.
 
-- `libkvm_mmf.so` SONAME
-- 已有动态导出符号
-- `mmf_stream_t` 和 `mmf_venc_cfg_t` 的内存布局
+The backend is deployed as a single shared library:
 
-## 性能设计
+```text
+/usr/lib/onekvm/video-backends/nanokvm-mmf.so
+```
 
-- VI 映射按物理地址缓存，避免逐帧 mmap/munmap。
-- VI 帧可直接送入 VENC，外部缓冲区仍走兼容复制路径。
-- VENC/JPEG 提供 `*_pop_into`，可把 vendor packs 直接合并到调用方的
-  memfd slot，避免先合并到进程内缓冲再复制一次。
-- 兼容 `pop` ABI 仍复用通道缓冲，避免逐帧 malloc/free。
-- 每个编码通道最多保留一帧在途，避免实时视频积压旧帧。
-- vendor pack 超过公共 ABI 的 8 项时安全合并编码数据。
+The `onekvm-device-nanokvm` package installs this library, and OneKVM loads it
+at runtime when needed. The project uses a standalone CMake build and does not
+depend on MaixCDK.
 
-## 构建与验证
+## Resolution handling
 
-发行构建由 `onekvm-distro/scripts/oe-nanokvm-mmf-artifact.sh` 调用。真机
-验证程序位于 `tests/nanokvm-mmf-smoke.cpp`。
+Input detection and stream output are handled independently. The LT6911 input
+path currently recognizes the following 12 HDMI resolutions:
 
-## 来源与许可
+```text
+1920x1080  1600x900  1440x1080  1440x900
+1280x1024  1280x960  1280x800   1280x720
+1152x864   1024x768  800x600    640x480
+```
 
-最初代码来自 Sipeed NanoKVM 2.4.3，OneKVM 在其基础上维护 ABI、H.265、
-资源回收和性能修复。项目按 GPL-3.0 授权，详见 `LICENSE`。
+The SG2002 VPSS pipeline scales or crops the input to one of three OneKVM
+output profiles: 1920x1080, 1280x720, or 640x480. Each profile supports up to
+60 FPS, subject to the frame rate provided by the HDMI source.
+
+## Driver sources and versions
+
+Release builds compile the driver stack and userspace libraries from the
+official Sophgo sources. Prebuilt MMF components from the Sipeed SDK are not
+used.
+
+All parts are pinned to the same 2026-06-30 driver set:
+
+| Part | Official repository | Version used by OneKVM |
+| --- | --- | --- |
+| Linux kernel | [`sophgo/linux_5.10`](https://github.com/sophgo/linux_5.10) | `sg200x-dev`, commit `767d3c5ab10b066d2d5c7c0bd1eab8a5340e923d` |
+| Video kernel drivers | [`sophgo/osdrv`](https://github.com/sophgo/osdrv) | `sg200x-dev`, commit `aa542c41df94f7bc656cb740f6622a5dca7dc403` |
+| Video userspace libraries | [`sophgo/cvi_mpi`](https://github.com/sophgo/cvi_mpi) | `sg200x-dev` weekly, commit `75c181ee6e25baca9729a4a9b415f36180b54f93` |
+| LT6911 support | [`sophgo/SensorSupportList`](https://github.com/sophgo/SensorSupportList) | `sg200x-dev`, commit `f064b02ba8a82746f3e87a2c5bb3bd683ff95db0` |
+| Video codec firmware | [`sophgo/ramdisk`](https://github.com/sophgo/ramdisk) | commit `1ec8fcb63a358c17c369bac38eb42dc16f30a3bb` |
+
+OSDRV provides the SG2002 video kernel modules, including
+`soph_vcodec.ko`, `soph_jpeg.ko`, `soph_vi.ko`, and `soph_vpss.ko`.
+
+OneKVM adds a small set of NanoKVM compatibility and bug-fix patches. The
+video driver itself still comes from the official Sophgo OSDRV source.
+
+These revisions form a matched driver set. Combining a different kernel,
+OSDRV, or `cvi_mpi` revision may prevent the video stack from starting.
+
+## Host-side tests
+
+The basic tests do not need an SG2002 SDK or a NanoKVM device:
+
+```sh
+cmake -S . -B build/host \
+  -DONEKVM_BUILD_MMF_BACKEND=OFF \
+  -DBUILD_TESTING=ON \
+  -DCMAKE_BUILD_TYPE=Release
+cmake --build build/host --parallel
+ctest --test-dir build/host --output-on-failure
+```
+
+They check resolution changes, VI frame-rate parsing, and no-signal frame
+generation.
+
+## Cross-compiling for NanoKVM
+
+You need an SG2002 RISC-V toolchain and a built copy of the pinned
+`sophgo/cvi_mpi` source:
+
+```sh
+cmake -S . -B build/sg2002 \
+  -DCMAKE_TOOLCHAIN_FILE=/path/to/sg2002-toolchain.cmake \
+  -DCMAKE_OBJCOPY=/path/to/riscv64-unknown-linux-musl-objcopy \
+  -DCVI_MPI_ROOT=/path/to/built/cvi_mpi \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DBUILD_TESTING=OFF
+cmake --build build/sg2002 --parallel
+DESTDIR="$PWD/stage" cmake --install build/sg2002 --prefix /usr
+```
+
+For reproducible release artifacts, use
+`onekvm-distro/scripts/oe-nanokvm-mmf-artifact.sh`. The script checks out the
+locked driver revisions, builds `cvi_mpi`, and compiles the backend with the
+matching toolchain.
+
+## On-device verification
+
+- `tests/video-backend-abi-smoke.cpp` loads the installed backend and captures
+  and encodes a frame.
+- `tests/video-backend-benchmark.cpp` measures capture FPS, encoding FPS,
+  bitrate, and encoding time.
+- `tools/lt6911-resolution-probe.c` helps diagnose HDMI resolution detection.
+
+## OneKVM ABI
+
+The shared library exports exactly two entry points:
+
+- `onekvm_video_backend_query` for video capture and encoding.
+- `onekvm_crypto_backend_query` for optional AES-GCM acceleration.
+
+Their interfaces are defined in `include/onekvm/video_backend_v1.h` and
+`include/onekvm/crypto_backend_v1.h`. Both have explicit versions, so OneKVM
+can reject an incompatible backend instead of crashing. MMF functions and
+vendor functions stay private inside the shared library.
+
+## Video pipeline
+
+For a normal H.264/H.265 stream, the capture hardware feeds the encoder
+directly. Full 1080p frames do not pass through OneKVM Core. MJPEG also sends
+the captured frame straight to the hardware JPEG encoder.
+
+Only the much smaller encoded result is copied into a reusable output buffer
+before it is handed to Core. If another feature needs access to raw frames at
+the same time, the backend switches to a general path that may copy one raw
+frame. This is an internal fallback, not a second public API.
+
+AES-GCM offload goes through OneKVM's small adapter to the official
+`cvitek_spacc` kernel driver. Hardware crypto is currently not advertised for
+concurrent H.265 sessions because that driver combination can lock the SG2002;
+OneKVM Core falls back to its normal software AES-GCM path in that case.
+
+## No-signal assets
+
+The source images are under `assets/no-signal/`. After changing them,
+regenerate the NV21 data with:
+
+```sh
+go run ./tools/pack_no_signal.go src/no_signal_frames.inc
+```
+
+## License
+
+This project is licensed under the GNU General Public License v3.0. See
+[LICENSE](LICENSE).
