@@ -99,6 +99,11 @@ cmake --build build/sg2002 --parallel
 DESTDIR="$PWD/stage" cmake --install build/sg2002 --prefix /usr
 ```
 
+The vendor SG2002 tune flags are enabled by default. Toolchain files that
+already define the target ISA, such as OpenEmbedded toolchains, should add
+`-DONEKVM_USE_VENDOR_TUNE_FLAGS=OFF`. Installation includes both the backend
+library and its OneKVM device/system-plugin descriptors.
+
 For reproducible release artifacts, use
 `onekvm-distro/scripts/oe-nanokvm-mmf-artifact.sh`. The script checks out the
 locked driver revisions, builds `cvi_mpi`, and compiles the backend with the

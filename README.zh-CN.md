@@ -93,6 +93,10 @@ cmake --build build/sg2002 --parallel
 DESTDIR="$PWD/stage" cmake --install build/sg2002 --prefix /usr
 ```
 
+默认启用厂商 SG2002 tune flags。如果工具链文件已经指定目标 ISA（例如
+OpenEmbedded 工具链），应增加 `-DONEKVM_USE_VENDOR_TUNE_FLAGS=OFF`。安装过程
+会同时安装后端动态库及 OneKVM device/system-plugin 描述文件。
+
 生成可复现的发行产物时，建议使用
 `onekvm-distro/scripts/oe-nanokvm-mmf-artifact.sh`。该脚本会检出锁定的官方
 驱动版本、构建 `cvi_mpi`，再使用配套工具链编译本项目。
