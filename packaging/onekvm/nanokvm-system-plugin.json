@@ -1,0 +1,23 @@
+{
+  "id": "nanokvm-device",
+  "name": "NanoKVM device backend",
+  "description": "Provides in-process NanoKVM video capture, USB HID and virtual-media capabilities.",
+  "i18n": {
+    "default": {
+      "name": "NanoKVM device backend",
+      "description": "Provides in-process NanoKVM video capture, USB HID and virtual-media capabilities."
+    },
+    "zh": {
+      "name": "NanoKVM 设备后端",
+      "description": "在 OneKVM 主进程内提供 NanoKVM 视频采集、USB HID 和虚拟媒体能力。"
+    }
+  },
+  "kind": "device",
+  "version": "0.1.0",
+  "capabilities": ["video", "hid", "msd"],
+  "icon": {
+    "source": "lucide",
+    "name": "microchip"
+  },
+  "unit": "onekvm.service"
+}

@@ -1,0 +1,16 @@
+{
+  "id": "nanokvm",
+  "api_major": 1,
+  "transport": "native",
+  "driver": "nanokvm-mmf",
+  "library": "/usr/lib/onekvm/video-backends/nanokvm-mmf.so",
+  "capabilities": ["video", "hid", "msd", "srtp-tx-offload"],
+  "video_codecs": ["auto", "h264", "h265", "mjpeg"],
+  "video_bitrate_kbps": {"minimum": 100, "maximum": 10000, "step": 100, "default": 5000},
+  "video_formats": [
+    {"Width": 1920, "Height": 1080, "FPS": 60, "PixelFormat": "nv21"},
+    {"Width": 1280, "Height": 720, "FPS": 60, "PixelFormat": "nv21"},
+    {"Width": 640, "Height": 480, "FPS": 60, "PixelFormat": "nv21"}
+  ],
+  "usb_role_path": "/proc/cviusb/otg_role"
+}

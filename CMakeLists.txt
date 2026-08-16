@@ -7,6 +7,8 @@ include(CTest)
 include(GNUInstallDirs)
 
 option(ONEKVM_BUILD_MMF_BACKEND "Build the NanoKVM MMF backend" ON)
+option(ONEKVM_USE_VENDOR_TUNE_FLAGS
+    "Build with Sophgo's vendor GCC SG2002 tune flags" ON)
 
 function(onekvm_enable_warnings target)
     target_compile_options(${target} PRIVATE
@@ -86,12 +88,14 @@ target_compile_definitions(kvm_mmf PRIVATE
     USE_USER_SEN_DRIVER=1
     SENSOR_LONTIUM_LT6911
     SENSOR2_TYPE=LONTIUM_LT6911_2M_60FPS_8BIT)
-target_compile_options(kvm_mmf PRIVATE
-    -mcpu=c906fdv
-    -march=rv64imafdcv0p7xthead
-    -mcmodel=medany
-    -mabi=lp64d
-    -Os)
+if(ONEKVM_USE_VENDOR_TUNE_FLAGS)
+    target_compile_options(kvm_mmf PRIVATE
+        -mcpu=c906fdv
+        -march=rv64imafdcv0p7xthead
+        -mcmodel=medany
+        -mabi=lp64d
+        -Os)
+endif()
 target_compile_features(kvm_mmf PRIVATE cxx_std_17)
 onekvm_enable_warnings(kvm_mmf)
 set_target_properties(kvm_mmf PROPERTIES
@@ -156,6 +160,12 @@ set(ONEKVM_VIDEO_BACKEND_INSTALL_DIR
     CACHE STRING "Install directory for OneKVM video backend DSOs")
 install(TARGETS kvm_mmf
     LIBRARY DESTINATION "${ONEKVM_VIDEO_BACKEND_INSTALL_DIR}")
+install(FILES packaging/onekvm/nanokvm-device-backend.json
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/onekvm/device-backends"
+    RENAME nanokvm.json)
+install(FILES packaging/onekvm/nanokvm-system-plugin.json
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/onekvm/system-plugins"
+    RENAME nanokvm-device.json)
 install(FILES
     include/onekvm/crypto_backend_v1.h
     include/onekvm/video_backend_v1.h
