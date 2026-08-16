@@ -104,6 +104,10 @@ set_target_properties(kvm_mmf PROPERTIES
     VISIBILITY_INLINES_HIDDEN ON)
 
 set(CVI_MPI_LIB_DIR "${CVI_MPI_ROOT}/lib")
+# Sophgo's cvi_mpi DSOs omit their cross-library DT_NEEDED metadata.  Keep the
+# complete runtime set attached to this backend so dlopen can resolve symbols
+# between vendor libraries regardless of their order on the link line.
+target_link_options(kvm_mmf PRIVATE "-Wl,--no-as-needed")
 target_link_libraries(kvm_mmf PRIVATE
     "${CVI_MPI_LIB_DIR}/libcvi_bin.so"
     "${CVI_MPI_LIB_DIR}/libae.so"
