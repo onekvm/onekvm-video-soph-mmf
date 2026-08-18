@@ -308,16 +308,14 @@ int maybe_rebuild_for_hdmi_change(Source *source, char *error,
     if (source == nullptr)
         return 0;
 
-    const uint64_t now_ns = monotonic_ns();
-    const uint64_t last_frame = source->last_frame_ns.load(std::memory_order_relaxed);
-    const uint64_t idle_ns = static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::nanoseconds>(
-            kHDMIChangeIdleWindow).count());
-    /* VENC packets are not proof the HDMI frontend is still live. After a
-       host mode change VI IntCnt freezes while VENC can keep repeating. */
-    const bool recent_frames = cached_signal_present(source) == 1 &&
-        last_frame != 0 && now_ns >= last_frame &&
-        now_ns - last_frame < idle_ns;
+    /* VENC last_frame_ns is not HDMI liveness. GetStream can stall while
+       CSI is still running; probing LT6911 then interrupts a live frontend.
+       After a host mode change IntCnt freezes, so a fresh VI sample is the
+       only safe gate. */
+    double fps = 0;
+    const bool recent_frames = read_vi_fps(source, &fps) && fps > 0;
+    source->cached_signal.store(recent_frames ? 1 : 0, std::memory_order_relaxed);
+    source->last_signal_probe_ns.store(monotonic_ns(), std::memory_order_relaxed);
 
     const auto now = std::chrono::steady_clock::now();
     const bool interval_elapsed =
