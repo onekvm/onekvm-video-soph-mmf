@@ -367,6 +367,11 @@ int bind_encoder_to_source_locked(Encoder *encoder, Source *source,
     const auto [width, height] = resolution_size(source->config.resolution);
     if (configure_encoder(encoder, width, height, error, error_capacity) != 0)
         return -1;
+    /* Core binds every iteration. Stay unbound while showing the no-signal
+       artwork or the next Bind would reattach VPSS and drop placeholder
+       submits on packet_pending. */
+    if (encoder->placeholder_frames && encoder->bound_source == source)
+        return 0;
     if (encoder->source_bound && encoder->bound_source == source)
         return 0;
 
@@ -400,19 +405,17 @@ int32_t encoder_bind_source(void *encoder_opaque, void *source_opaque,
 int encode_bound_placeholder(Encoder *encoder, Source *source,
                              onekvm_video_packet_v1 *packet,
                              char *error, uint32_t error_capacity) {
-    if (!encoder->placeholder_frames) {
-        if (encoder->source_bound) {
-            std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
-            if (mmf::unbind_h26x_from_capture(encoder->channel) != 0) {
-                set_error(error, error_capacity,
-                          "unbind capture for no-signal frame failed");
-                return -1;
-            }
-            encoder->source_bound = false;
+    if (encoder->source_bound) {
+        std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
+        if (mmf::unbind_h26x_from_capture(encoder->channel) != 0) {
+            set_error(error, error_capacity,
+                      "unbind capture for no-signal frame failed");
+            return -1;
         }
-        encoder->placeholder_frames = true;
+        encoder->source_bound = false;
         encoder->request_keyframe = true;
     }
+    encoder->placeholder_frames = true;
 
     onekvm_video_frame_v1 frame{};
     frame.struct_size = sizeof(frame);

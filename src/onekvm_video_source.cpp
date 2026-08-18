@@ -114,12 +114,15 @@ int cached_signal_present(Source *source) {
         return 1;
     }
 
+    const int cached = source->cached_signal.load(std::memory_order_relaxed);
+    const auto probe_window = cached == 0
+        ? kNoSignalProbeInterval : kSignalProbeInterval;
     const uint64_t probe_interval = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::nanoseconds>(
-            kSignalProbeInterval).count());
+            probe_window).count());
     const uint64_t last_probe = source->last_signal_probe_ns.load(std::memory_order_relaxed);
     if (last_probe != 0 && now >= last_probe && now - last_probe < probe_interval) {
-        return source->cached_signal.load(std::memory_order_relaxed);
+        return cached;
     }
     if (source->signal_probe_running.test_and_set(std::memory_order_acquire)) {
         return source->cached_signal.load(std::memory_order_relaxed);

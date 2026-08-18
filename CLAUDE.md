@@ -44,4 +44,7 @@ Host 单测：`g++ -std=c++17 -I include tests/input-resolution-tracker-test.cpp
   `onekvm-server` 杀不掉（媒体驱动卡死）。未授权前不做 NanoKVM 断电。
 
 无信号画面根因：默认 H.264 绑定路径不走 `source_read()`，预设 NV21 从未进 VENC。
-已在 `62f7cf0` 用 `encode_bound_placeholder()` 修。现场还没验证到出画。
+已在 `62f7cf0` 用 `encode_bound_placeholder()` 修。审查发现 Core 每轮
+`BindVideoSource` 会在 `source_bound==false` 时重新绑 VPSS，占位提交被
+`packet_pending` 吃掉，最多闪一帧。已改为占位期间 Bind 视为 no-op，
+并无信号时把 `vi_dbg` 探测间隔收到 1s，方便同分辨率插回 HDMI。
