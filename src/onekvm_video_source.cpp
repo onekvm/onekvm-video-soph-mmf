@@ -242,6 +242,17 @@ int open_source(Source *source, const onekvm_video_source_config_v1 *config,
     source->input_resolution.set_current(input);
     source->reported_input = input;
     source->out_of_range.store(false, std::memory_order_relaxed);
+    onekvm::InputResolution probed{};
+    if (read_hdmi_input(&probed)) {
+        source->reported_input = probed;
+        if (onekvm::classify_hdmi_input(probed) ==
+            onekvm::HdmiInputClass::OutOfRange) {
+            source->out_of_range.store(true, std::memory_order_relaxed);
+            std::fprintf(stderr,
+                         "OneKVM: HDMI input %ux%u is out of range\n",
+                         probed.width, probed.height);
+        }
+    }
     source->no_signal_frame.clear();
     reset_signal_cache(source);
     return 0;
