@@ -3,6 +3,7 @@
 #include <vector>
 
 extern "C" int render_no_signal_nv21(uint8_t *, int, int, int);
+extern "C" int no_signal_h264(int, int, const uint8_t **, size_t *);
 
 int main()
 {
@@ -22,5 +23,13 @@ int main()
 	if (render_no_signal_nv21(frame.data(), image_size, width, -height) >= 0) return 7;
 	if (render_no_signal_nv21(frame.data(), image_size, -width, height) >= 0) return 8;
 	if (render_no_signal_nv21(nullptr, image_size, width, height) >= 0) return 9;
+	const uint8_t *h264 = nullptr;
+	size_t h264_size = 0;
+	if (no_signal_h264(1920, 1080, &h264, &h264_size) != 0 ||
+		h264 == nullptr || h264_size < 8) return 10;
+	if (h264[0] != 0 || h264[1] != 0 || h264[2] != 0 || h264[3] != 1)
+		return 11;
+	if (no_signal_h264(0, 0, &h264, &h264_size) != 0 || h264_size < 8)
+		return 12;
 	return 0;
 }

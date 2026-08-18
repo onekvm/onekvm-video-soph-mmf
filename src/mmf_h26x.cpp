@@ -1,6 +1,30 @@
 #include "mmf_internal.hpp"
 
+#include <atomic>
+#include <chrono>
+#include <cstring>
+#include <mutex>
+#include <thread>
+#include <vector>
+
 namespace onekvm::mmf {
+
+struct H26xReader {
+	std::thread thread;
+	std::atomic<bool> stop{false};
+	std::atomic<bool> running{false};
+	std::atomic<uint64_t> last_packet_ns{0};
+	std::mutex mu;
+	std::vector<uint8_t> packet;
+};
+
+static H26xReader g_readers[MMF_VENC_MAX_CHN];
+
+static uint64_t reader_now_ns()
+{
+	return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+		std::chrono::steady_clock::now().time_since_epoch()).count());
+}
 static int _validate_venc_cfg(int ch, const H26xEncoderConfig *cfg)
 {
 	if (ch < 0 || ch >= MMF_VENC_MAX_CHN || cfg == NULL) {
@@ -200,6 +224,7 @@ int open_h26x_encoder(int ch, const H26xEncoderConfig &config,
 int close_h26x_encoder(int ch) {
 	if (ch < 0 || ch >= MMF_VENC_MAX_CHN)
 		return -1;
+	stop_h26x_reader(ch);
 	if (!g_runtime.h26x_encoders[ch].initialized) {
 		return 0;
 	}
@@ -551,8 +576,10 @@ int bind_h26x_to_capture(int ch, int vpss_group, int vpss_channel) {
 	H26xEncoderState *info = &g_runtime.h26x_encoders[ch];
 	if (info->bound_to_capture) {
 		if (info->capture_group == vpss_group &&
-			info->capture_channel == vpss_channel)
+			info->capture_channel == vpss_channel) {
+			start_h26x_reader(ch);
 			return 0;
+		}
 		if (unbind_h26x_from_capture(ch) != 0)
 			return -1;
 	}
@@ -602,6 +629,7 @@ int bind_h26x_to_capture(int ch, int vpss_group, int vpss_channel) {
 	info->capture_group = (uint8_t)vpss_group;
 	info->capture_channel = (uint8_t)vpss_channel;
 	info->packet_pending = 1;
+	start_h26x_reader(ch);
 	return 0;
 }
 
@@ -654,6 +682,71 @@ int request_h26x_idr(int ch) {
 	if (ch < 0 || ch >= MMF_VENC_MAX_CHN || !g_runtime.h26x_encoders[ch].initialized)
 		return -1;
 	return CVI_VENC_RequestIDR(ch, CVI_TRUE);
+}
+
+void start_h26x_reader(int ch)
+{
+	if (ch < 0 || ch >= MMF_VENC_MAX_CHN)
+		return;
+	H26xReader &reader = g_readers[ch];
+	if (reader.running.load(std::memory_order_acquire))
+		return;
+	reader.stop.store(false, std::memory_order_relaxed);
+	reader.last_packet_ns.store(0, std::memory_order_relaxed);
+	{
+		std::lock_guard<std::mutex> lock(reader.mu);
+		reader.packet.clear();
+	}
+	reader.running.store(true, std::memory_order_release);
+	reader.thread = std::thread([ch]() {
+		H26xReader &self = g_readers[ch];
+		std::vector<uint8_t> scratch(1024 * 1024);
+		if (request_h26x_idr(ch) != 0)
+			printf("OneKVM: reader IDR request failed on ch %d\n", ch);
+		while (!self.stop.load(std::memory_order_relaxed)) {
+			const int got = read_latest_h26x_packet(
+				ch, scratch.data(), static_cast<int>(scratch.size()));
+			if (got <= 0)
+				continue;
+			std::lock_guard<std::mutex> lock(self.mu);
+			self.packet.assign(scratch.begin(), scratch.begin() + got);
+			self.last_packet_ns.store(reader_now_ns(), std::memory_order_relaxed);
+		}
+		self.running.store(false, std::memory_order_release);
+	});
+}
+
+void stop_h26x_reader(int ch)
+{
+	if (ch < 0 || ch >= MMF_VENC_MAX_CHN)
+		return;
+	H26xReader &reader = g_readers[ch];
+	reader.stop.store(true, std::memory_order_relaxed);
+	if (reader.thread.joinable())
+		reader.thread.detach();
+}
+
+int take_ready_h26x_packet(int ch, uint8_t *dst, int capacity)
+{
+	if (ch < 0 || ch >= MMF_VENC_MAX_CHN || dst == nullptr || capacity <= 0)
+		return -1;
+	H26xReader &reader = g_readers[ch];
+	std::lock_guard<std::mutex> lock(reader.mu);
+	if (reader.packet.empty())
+		return 0;
+	if (static_cast<int>(reader.packet.size()) > capacity)
+		return -2;
+	std::memcpy(dst, reader.packet.data(), reader.packet.size());
+	const int size = static_cast<int>(reader.packet.size());
+	reader.packet.clear();
+	return size;
+}
+
+uint64_t h26x_reader_last_packet_ns(int ch)
+{
+	if (ch < 0 || ch >= MMF_VENC_MAX_CHN)
+		return 0;
+	return g_readers[ch].last_packet_ns.load(std::memory_order_relaxed);
 }
 
 } // namespace onekvm::mmf

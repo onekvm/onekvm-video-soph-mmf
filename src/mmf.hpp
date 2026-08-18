@@ -2,10 +2,12 @@
 
 // Internal MMF implementation interface. This is not part of the OneKVM ABI.
 
+#include <cstddef>
 #include <cstdint>
 
 extern "C" {
 int render_no_signal_nv21(uint8_t *data, int capacity, int width, int height);
+int no_signal_h264(int width, int height, const uint8_t **data, size_t *size);
 int lt6911_get_input_size(int pipe, uint32_t *width, uint32_t *height);
 int lt6911_get_capture_size(uint32_t *width, uint32_t *height);
 int onekvm_lt6911_set_active_size(uint32_t width, uint32_t height);
@@ -74,6 +76,10 @@ int read_latest_h26x_packet(int ch, uint8_t *dst, int capacity);
 int read_latest_h26x_packet_nowait(int ch, uint8_t *dst, int capacity);
 // Release every access unit already queued without waiting for a new one.
 int drain_h26x_packets(int ch, uint8_t *scratch, int capacity);
+void start_h26x_reader(int ch);
+void stop_h26x_reader(int ch);
+int take_ready_h26x_packet(int ch, uint8_t *dst, int capacity);
+uint64_t h26x_reader_last_packet_ns(int ch);
 int release_h26x_packet(int ch);
 int request_h26x_idr(int ch);
 int bind_h26x_to_capture(int ch, int vpss_group, int vpss_channel);
