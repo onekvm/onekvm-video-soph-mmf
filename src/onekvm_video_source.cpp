@@ -143,13 +143,9 @@ bool stable_input_resolution(onekvm::InputResolution *resolution) {
 int cached_signal_present(Source *source) {
     if (source == nullptr) return 0;
     const uint64_t now = monotonic_ns();
-    const uint64_t recent_window = static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::nanoseconds>(
-            kRecentFrameSignalWindow).count());
-    const uint64_t last_frame = source->last_frame_ns.load(std::memory_order_relaxed);
-    if (last_frame != 0 && now >= last_frame && now - last_frame <= recent_window) {
-        return 1;
-    }
+    /* Do not treat recent VENC packets as HDMI. After a host mode change
+       the encoder can keep repeating the old geometry while VI IntCnt
+       is already frozen. */
 
     const int cached = source->cached_signal.load(std::memory_order_relaxed);
     const auto probe_window = cached == 0
