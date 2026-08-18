@@ -402,9 +402,12 @@ static int copy_h26x_packet(int ch, uint8_t *dst, int capacity,
 	}
 
 	stream->pstPack = info->packs;
-	CVI_S32 ret = CVI_VENC_GetStream(
-		ch, stream, wait_timeout_us > 0 ? 1000 : 0);
-	if (wait_timeout_us == 0 && ret == CVI_ERR_VENC_BUSY)
+	/* Never ask GetStream to block. The vendor EnterVcodecLock path ignores
+	   a millisecond timeout when the worker already holds the lock, and
+	   waiting here while callers hold g_mmf_mutex deadlocks bind/shutdown.
+	   select() above is the only bounded wait. */
+	CVI_S32 ret = CVI_VENC_GetStream(ch, stream, 0);
+	if (ret == CVI_ERR_VENC_BUSY)
 		return 0;
 	if (ret != CVI_SUCCESS)
 		return -1;

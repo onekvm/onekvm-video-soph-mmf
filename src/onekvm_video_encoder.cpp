@@ -442,8 +442,8 @@ int encode_bound_placeholder(Encoder *encoder, Source *source,
                       "submit no-signal frame failed: %d", push);
             return -1;
         }
-        result = drain_venc_packet(encoder, &output_data, &output_pts_ns);
     }
+    result = drain_venc_packet(encoder, &output_data, &output_pts_ns);
     if (result < 0) {
         set_error(error, error_capacity,
                   "encode no-signal frame failed: %d", result);
@@ -519,10 +519,12 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
             output_pts_ns = encoder->prepared_pts_ns;
             encoder->prepared_size = 0;
             encoder->prepared_pts_ns = 0;
-        } else {
-            result = drain_venc_packet(encoder, &output_data, &output_pts_ns);
         }
     }
+    /* Wait on the VENC fd outside g_mmf_mutex. GetStream/select while
+       holding that lock blocked bind, HDMI rebuild, and shutdown. */
+    if (result == 0 && output_data == nullptr)
+        result = drain_venc_packet(encoder, &output_data, &output_pts_ns);
     if (result < 0) {
         set_error(error, error_capacity, "read bound MMF frame failed: %d", result);
         return -1;
