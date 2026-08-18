@@ -22,6 +22,10 @@ int main()
 	if (!parse_vi_chn_status_fps("  0  0  N   0 0 0    0    019201080\n", &fps) ||
 	    fps != 0)
 		return 11;
+	if (!parse_vi_chn_status_fps("  0  0  Y    0 1946 1946    0    019201080\n",
+					&fps) ||
+	    fps != 60)
+		return 14;
 	if (parse_vi_chn_status_fps(
 		    "  0  0 019201080  N N  -1  -1NV21  SDR8  -1\n", &fps))
 		return 12;

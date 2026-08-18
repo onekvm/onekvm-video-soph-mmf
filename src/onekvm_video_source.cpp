@@ -31,7 +31,9 @@ std::pair<int, int> resolution_size(int resolution) {
     }
 }
 
-bool read_vi_fps(double *fps) {
+bool read_vi_fps(Source *source, double *fps) {
+    if (source == nullptr || fps == nullptr)
+        return false;
     FILE *file = std::fopen(kVideoStatusPath, "r");
     if (file == nullptr) {
         return false;
@@ -44,7 +46,18 @@ bool read_vi_fps(double *fps) {
             in_chn_status = true;
             continue;
         }
-        if (in_chn_status && parse_vi_chn_status_fps(line, fps)) {
+        ViChnStatus status{};
+        if (in_chn_status && parse_vi_chn_status(line, &status)) {
+            const int last = source->last_vi_int_cnt.exchange(
+                status.int_cnt, std::memory_order_relaxed);
+            if (!status.enabled)
+                *fps = 0;
+            else if (status.frame_rate > 0)
+                *fps = static_cast<double>(status.frame_rate);
+            else if (status.int_cnt > last)
+                *fps = 60;
+            else
+                *fps = 0;
             found = true;
             break;
         }
@@ -152,7 +165,7 @@ int cached_signal_present(Source *source) {
         return source->cached_signal.load(std::memory_order_relaxed);
     }
     double fps = 0;
-    const int present = read_vi_fps(&fps) ? (fps > 0 ? 1 : 0) : -1;
+    const int present = read_vi_fps(source, &fps) ? (fps > 0 ? 1 : 0) : -1;
     source->cached_signal.store(present, std::memory_order_relaxed);
     source->last_signal_probe_ns.store(monotonic_ns(), std::memory_order_relaxed);
     source->signal_probe_running.clear(std::memory_order_release);
@@ -176,6 +189,7 @@ void reset_signal_cache(Source *source) {
     source->last_frame_ns.store(0, std::memory_order_relaxed);
     source->last_signal_probe_ns.store(0, std::memory_order_relaxed);
     source->cached_signal.store(-1, std::memory_order_relaxed);
+    source->last_vi_int_cnt.store(0, std::memory_order_relaxed);
     source->signal_probe_running.clear(std::memory_order_release);
     /* Give VENC a chance to produce the first access unit before the bound
        path treats empty reads as a missing HDMI mode and touches LT6911. */

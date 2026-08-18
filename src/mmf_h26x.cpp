@@ -396,7 +396,9 @@ static bool venc_stream_ready(int ch)
 	VENC_CHN_STATUS_S status{};
 	if (CVI_VENC_QueryStatus(ch, &status) != CVI_SUCCESS)
 		return false;
-	return status.u32CurPacks > 0 || status.u32LeftStreamFrames > 0;
+	/* Vendor JPEG / sample paths only trust u32CurPacks. LeftStreamFrames
+	   is documented as TODO and can stick nonzero. */
+	return status.u32CurPacks > 0;
 }
 
 // Copy one access unit directly from the vendor stream into caller storage.
@@ -426,49 +428,30 @@ static int copy_h26x_packet(int ch, uint8_t *dst, int capacity,
 
 	CVI_S32 ret = CVI_FAILURE;
 	for (;;) {
-		if (wait_timeout_us > 0) {
-			gettimeofday(&now, NULL);
-			const int64_t remaining =
-				deadline_us - ((int64_t)now.tv_sec * 1000000 + now.tv_usec);
-			if (remaining <= 0) {
-				if (!venc_stream_ready(ch))
-					return 0;
-			} else {
-				int fd = info->fd;
-				fd_set read_fds;
-				struct timeval timeout = {
-					static_cast<time_t>(remaining / 1000000),
-					static_cast<suseconds_t>(remaining % 1000000),
-				};
-				FD_ZERO(&read_fds);
-				FD_SET(fd, &read_fds);
-				CVI_S32 ready = select(fd + 1, &read_fds, NULL, NULL, &timeout);
-				if (ready < 0) {
-					if (errno == EINTR)
-						return 0;
-					printf("VencChn(%d) select failed: %s\n", ch, strerror(errno));
-					return -1;
-				}
-				/* This driver's poll fd often stays silent on the
-				   bound path. QueryStatus is the source of truth;
-				   a select timeout must not skip a queued AU. */
-				if (ready == 0 && !venc_stream_ready(ch))
-					return 0;
-			}
-		} else if (!venc_stream_ready(ch)) {
-			return 0;
+		gettimeofday(&now, NULL);
+		const int64_t remaining = wait_timeout_us > 0
+			? deadline_us - ((int64_t)now.tv_sec * 1000000 + now.tv_usec)
+			: 0;
+		const bool past_deadline = wait_timeout_us > 0 && remaining <= 0;
+		const bool have_pack = venc_stream_ready(ch);
+		if (!have_pack) {
+			if (wait_timeout_us <= 0 || past_deadline)
+				return 0;
+			/* Poll is often silent on the bound path. Sleep a short
+			   slice of the remaining budget, then QueryStatus again. */
+			const int64_t slice_us = remaining > 2000 ? 2000 : remaining;
+			if (slice_us > 0)
+				usleep(static_cast<useconds_t>(slice_us));
+			continue;
 		}
 
 		stream->pstPack = info->packs;
 		/* Never ask GetStream to block. The vendor EnterVcodecLock path
 		   ignores a millisecond timeout when the worker already holds
-		   the lock. select()/QueryStatus are the only bounded waits. */
+		   the lock. QueryStatus is the only bounded wait. */
 		ret = CVI_VENC_GetStream(ch, stream, 0);
 		if (ret == CVI_ERR_VENC_BUSY) {
-			/* Level-triggered fd stays readable while the pack is
-			   queued. Returning 0 here lets Core spin at 100% and
-			   probe LT6911. Sleep inside the remaining budget. */
-			if (wait_timeout_us <= 0)
+			if (wait_timeout_us <= 0 || past_deadline)
 				return 0;
 			usleep(2000);
 			continue;

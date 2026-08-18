@@ -33,9 +33,16 @@ inline bool parse_vi_chn_status_header(const char *line)
    ~1s and can stall the CSI frontend. Sample:
      DevID ChnID Enable FrameRate IntCnt RecvPic LostFrame ...
        0     0     Y        60     7339    7339      0     */
-inline bool parse_vi_chn_status_fps(const char *line, double *fps)
+struct ViChnStatus {
+	bool enabled = false;
+	int frame_rate = 0;
+	int int_cnt = 0;
+	int recv_pic = 0;
+};
+
+inline bool parse_vi_chn_status(const char *line, ViChnStatus *status)
 {
-	if (line == nullptr || fps == nullptr)
+	if (line == nullptr || status == nullptr)
 		return false;
 	int dev = -1;
 	int chn = -1;
@@ -53,6 +60,26 @@ inline bool parse_vi_chn_status_fps(const char *line, double *fps)
 		return false;
 	if (frame_rate < 0)
 		return false;
-	*fps = enable[0] == 'Y' ? static_cast<double>(frame_rate) : 0;
+	status->enabled = enable[0] == 'Y';
+	status->frame_rate = frame_rate;
+	status->int_cnt = int_cnt;
+	status->recv_pic = recv_pic;
+	return true;
+}
+
+/* Kernel u32FrameRate is only written after a full 1s window, so a live
+   channel starts at FrameRate 0. IntCnt/RecvPic still climb immediately. */
+inline bool parse_vi_chn_status_fps(const char *line, double *fps)
+{
+	ViChnStatus status{};
+	if (!parse_vi_chn_status(line, &status) || fps == nullptr)
+		return false;
+	if (!status.enabled) {
+		*fps = 0;
+		return true;
+	}
+	*fps = status.frame_rate > 0
+		? static_cast<double>(status.frame_rate)
+		: (status.int_cnt > 0 || status.recv_pic > 0 ? 60.0 : 0);
 	return true;
 }
