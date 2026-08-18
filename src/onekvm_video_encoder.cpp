@@ -530,8 +530,20 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
     const bool missing_signal =
         source->out_of_range.load(std::memory_order_relaxed) ||
         cached_signal_present(source) == 0;
-    if (!live_recent && (missing_signal || venc_stale))
+    /* Host mode changes often stop both VI and VENC. The placeholder
+       used to return here and never increment failures, so the pipeline
+       stayed on the old CSI geometry until a process restart. */
+    if (!live_recent && (missing_signal || venc_stale)) {
+        source->failures++;
+        const int rebuilt = maybe_rebuild_for_hdmi_change(
+            source, error, error_capacity);
+        if (rebuilt != 0) {
+            encoder->placeholder_frames = false;
+            invalidate_stale_encoder(encoder);
+            return -1;
+        }
         return encode_bound_placeholder(encoder, source, packet, error, error_capacity);
+    }
 
     source->failures++;
     const int rebuilt = maybe_rebuild_for_hdmi_change(
