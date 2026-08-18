@@ -692,10 +692,27 @@ int unbind_h26x_from_capture(int ch) {
 	return ret;
 }
 
+void h26x_reader_want_idr(int ch)
+{
+	if (ch < 0 || ch >= MMF_VENC_MAX_CHN)
+		return;
+	H26xReader &reader = g_readers[ch];
+	reader.want_idr.store(true, std::memory_order_relaxed);
+	std::lock_guard<std::mutex> lock(reader.mu);
+	auto it = reader.queue.begin();
+	while (it != reader.queue.end()) {
+		if (it->key_frame)
+			++it;
+		else
+			it = reader.queue.erase(it);
+	}
+	reader.cv.notify_all();
+}
+
 int request_h26x_idr(int ch) {
 	if (ch < 0 || ch >= MMF_VENC_MAX_CHN || !g_runtime.h26x_encoders[ch].initialized)
 		return -1;
-	g_readers[ch].want_idr.store(true, std::memory_order_relaxed);
+	h26x_reader_want_idr(ch);
 	return CVI_VENC_RequestIDR(ch, CVI_TRUE);
 }
 
@@ -717,8 +734,11 @@ void start_h26x_reader(int ch)
 	reader.thread = std::thread([ch]() {
 		H26xReader &self = g_readers[ch];
 		std::vector<uint8_t> scratch(1024 * 1024);
+		bool idr_ioctl_sent = false;
 		if (request_h26x_idr(ch) != 0)
 			printf("OneKVM: reader IDR request failed on ch %d\n", ch);
+		else
+			idr_ioctl_sent = true;
 		while (!self.stop.load(std::memory_order_relaxed)) {
 			{
 				std::unique_lock<std::mutex> lock(self.mu);
@@ -727,6 +747,13 @@ void start_h26x_reader(int ch)
 					self.cv.wait_for(lock, std::chrono::milliseconds(5));
 				if (self.stop.load(std::memory_order_relaxed))
 					break;
+			}
+			if (!self.want_idr.load(std::memory_order_relaxed))
+				idr_ioctl_sent = false;
+			else if (!idr_ioctl_sent) {
+				if (request_h26x_idr(ch) != 0)
+					printf("OneKVM: reader IDR request failed on ch %d\n", ch);
+				idr_ioctl_sent = true;
 			}
 			const int got = read_latest_h26x_packet(
 				ch, scratch.data(), static_cast<int>(scratch.size()));

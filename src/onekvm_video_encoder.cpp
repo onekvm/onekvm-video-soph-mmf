@@ -406,6 +406,8 @@ int encode_bound_placeholder(Encoder *encoder, Source *source,
                              onekvm_video_packet_v1 *packet,
                              char *error, uint32_t error_capacity) {
     encoder->placeholder_frames = true;
+    if (encoder->channel >= 0)
+        mmf::h26x_reader_want_idr(encoder->channel);
     const auto [width, height] = resolution_size(source->config.resolution);
     const uint8_t *encoded = nullptr;
     size_t encoded_size = 0;
@@ -466,13 +468,12 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
             encoder->packet_borrowed = false;
         }
         if (encoder->request_keyframe) {
-            /* RequestIDR is non-blocking here. The reader discards P frames
-               until the IDR arrives so a canned placeholder cannot stay in
-               the decoder reference chain. */
+            /* Only mark the reader. CVI_VENC_RequestIDR shares the channel
+               ioctl lock with GetStream and must stay off the video loop. */
             encoder->prepared_size = 0;
             encoder->prepared_pts_ns = 0;
             encoder->request_keyframe = false;
-            (void)mmf::request_h26x_idr(encoder->channel);
+            mmf::h26x_reader_want_idr(encoder->channel);
         }
         if (encoder->prepared_size != 0) {
             result = static_cast<int>(encoder->prepared_size);
