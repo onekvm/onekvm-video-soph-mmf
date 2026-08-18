@@ -278,7 +278,7 @@ size_t complete_jpeg_size(const uint8_t *data, size_t size) {
 }
 
 int drain_venc_packet(Encoder *encoder, const uint8_t **output_data,
-                      uint64_t *output_pts_ns) {
+                      uint64_t *output_pts_ns, bool *key_frame) {
     /* Do not expose VENC-owned pack addresses to Go/Pion.  RTP packetization
        and batched socket writes can outlive the driver's safe borrow window;
        keeping the stream held during that work also lets the producer fill
@@ -290,7 +290,7 @@ int drain_venc_packet(Encoder *encoder, const uint8_t **output_data,
        performs no allocation in the steady state. */
     const int result = mmf::take_ready_h26x_packet(
         encoder->channel, encoder->output.data(),
-        static_cast<int>(encoder->output.size()));
+        static_cast<int>(encoder->output.size()), key_frame);
     if (result < 0) {
         recover_encoder_after_stream_error(encoder);
         return result;
@@ -466,11 +466,13 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
             encoder->packet_borrowed = false;
         }
         if (encoder->request_keyframe) {
-            /* IDR is issued on the VENC reader thread. GetStream ioctl can
-               block forever in EnterVcodecLock; the video loop must not wait. */
+            /* RequestIDR is non-blocking here. The reader discards P frames
+               until the IDR arrives so a canned placeholder cannot stay in
+               the decoder reference chain. */
             encoder->prepared_size = 0;
             encoder->prepared_pts_ns = 0;
             encoder->request_keyframe = false;
+            (void)mmf::request_h26x_idr(encoder->channel);
         }
         if (encoder->prepared_size != 0) {
             result = static_cast<int>(encoder->prepared_size);
@@ -480,8 +482,9 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
             encoder->prepared_pts_ns = 0;
         }
     }
+    bool key_frame = false;
     if (result == 0 && output_data == nullptr)
-        result = drain_venc_packet(encoder, &output_data, &output_pts_ns);
+        result = drain_venc_packet(encoder, &output_data, &output_pts_ns, &key_frame);
     if (result < 0) {
         set_error(error, error_capacity, "read bound MMF frame failed: %d", result);
         return -1;
@@ -493,7 +496,7 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
         packet->data = output_data;
         packet->data_size = static_cast<uint64_t>(result);
         packet->codec = public_codec(encoder->codec_type);
-        packet->key_frame = 0;
+        packet->key_frame = key_frame ? 1 : 0;
         packet->pts_ns = monotonic_ns();
         return 0;
     }
@@ -630,8 +633,10 @@ int32_t encoder_encode(void *opaque, const onekvm_video_frame_v1 *frame,
                frame. The previous access unit is therefore already copied out
                and its VENC stream released. Keep the old in-call drain as the
                ABI-v1 fallback for callers that do not use the optional tail. */
+            bool unused_key = false;
             if (encoder->frame_pending) {
-                result = drain_venc_packet(encoder, &output_data, &output_pts_ns);
+                result = drain_venc_packet(
+                    encoder, &output_data, &output_pts_ns, &unused_key);
             } else if (encoder->prepared_size != 0) {
                 result = static_cast<int>(encoder->prepared_size);
                 output_data = encoder->output.data();

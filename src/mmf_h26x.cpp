@@ -1,21 +1,33 @@
 #include "mmf_internal.hpp"
+#include "h264_annexb.hpp"
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstring>
+#include <deque>
 #include <mutex>
 #include <thread>
 #include <vector>
 
 namespace onekvm::mmf {
 
+constexpr std::size_t kReaderQueueMax = 4;
+
+struct H26xQueuedPacket {
+	std::vector<uint8_t> data;
+	bool key_frame = false;
+};
+
 struct H26xReader {
 	std::thread thread;
 	std::atomic<bool> stop{false};
 	std::atomic<bool> running{false};
+	std::atomic<bool> want_idr{false};
 	std::atomic<uint64_t> last_packet_ns{0};
 	std::mutex mu;
-	std::vector<uint8_t> packet;
+	std::condition_variable cv;
+	std::deque<H26xQueuedPacket> queue;
 };
 
 static H26xReader g_readers[MMF_VENC_MAX_CHN];
@@ -683,6 +695,7 @@ int unbind_h26x_from_capture(int ch) {
 int request_h26x_idr(int ch) {
 	if (ch < 0 || ch >= MMF_VENC_MAX_CHN || !g_runtime.h26x_encoders[ch].initialized)
 		return -1;
+	g_readers[ch].want_idr.store(true, std::memory_order_relaxed);
 	return CVI_VENC_RequestIDR(ch, CVI_TRUE);
 }
 
@@ -695,9 +708,10 @@ void start_h26x_reader(int ch)
 		return;
 	reader.stop.store(false, std::memory_order_relaxed);
 	reader.last_packet_ns.store(0, std::memory_order_relaxed);
+	reader.want_idr.store(true, std::memory_order_relaxed);
 	{
 		std::lock_guard<std::mutex> lock(reader.mu);
-		reader.packet.clear();
+		reader.queue.clear();
 	}
 	reader.running.store(true, std::memory_order_release);
 	reader.thread = std::thread([ch]() {
@@ -706,16 +720,44 @@ void start_h26x_reader(int ch)
 		if (request_h26x_idr(ch) != 0)
 			printf("OneKVM: reader IDR request failed on ch %d\n", ch);
 		while (!self.stop.load(std::memory_order_relaxed)) {
+			{
+				std::unique_lock<std::mutex> lock(self.mu);
+				while (self.queue.size() >= kReaderQueueMax &&
+					!self.stop.load(std::memory_order_relaxed))
+					self.cv.wait_for(lock, std::chrono::milliseconds(5));
+				if (self.stop.load(std::memory_order_relaxed))
+					break;
+			}
 			const int got = read_latest_h26x_packet(
 				ch, scratch.data(), static_cast<int>(scratch.size()));
 			if (got <= 0)
 				continue;
+			const bool key = annexb_has_idr(
+				scratch.data(), static_cast<std::size_t>(got));
+			if (self.want_idr.load(std::memory_order_relaxed) && !key)
+				continue;
 			if (self.last_packet_ns.load(std::memory_order_relaxed) == 0)
 				printf("OneKVM: VENC reader got first %d-byte AU on ch %d\n",
 					got, ch);
-			std::lock_guard<std::mutex> lock(self.mu);
-			self.packet.assign(scratch.begin(), scratch.begin() + got);
-			self.last_packet_ns.store(reader_now_ns(), std::memory_order_relaxed);
+			bool overflow = false;
+			{
+				std::lock_guard<std::mutex> lock(self.mu);
+				if (self.queue.size() >= kReaderQueueMax) {
+					overflow = true;
+				} else {
+					H26xQueuedPacket packet;
+					packet.data.assign(scratch.begin(), scratch.begin() + got);
+					packet.key_frame = key;
+					self.queue.push_back(std::move(packet));
+					if (key)
+						self.want_idr.store(false, std::memory_order_relaxed);
+					self.last_packet_ns.store(reader_now_ns(),
+						std::memory_order_relaxed);
+					self.cv.notify_all();
+				}
+			}
+			if (overflow)
+				(void)request_h26x_idr(ch);
 		}
 		self.running.store(false, std::memory_order_release);
 	});
@@ -727,23 +769,28 @@ void stop_h26x_reader(int ch)
 		return;
 	H26xReader &reader = g_readers[ch];
 	reader.stop.store(true, std::memory_order_relaxed);
+	reader.cv.notify_all();
 	if (reader.thread.joinable())
 		reader.thread.detach();
 }
 
-int take_ready_h26x_packet(int ch, uint8_t *dst, int capacity)
+int take_ready_h26x_packet(int ch, uint8_t *dst, int capacity, bool *key_frame)
 {
 	if (ch < 0 || ch >= MMF_VENC_MAX_CHN || dst == nullptr || capacity <= 0)
 		return -1;
 	H26xReader &reader = g_readers[ch];
 	std::lock_guard<std::mutex> lock(reader.mu);
-	if (reader.packet.empty())
+	if (reader.queue.empty())
 		return 0;
-	if (static_cast<int>(reader.packet.size()) > capacity)
+	H26xQueuedPacket &front = reader.queue.front();
+	if (static_cast<int>(front.data.size()) > capacity)
 		return -2;
-	std::memcpy(dst, reader.packet.data(), reader.packet.size());
-	const int size = static_cast<int>(reader.packet.size());
-	reader.packet.clear();
+	std::memcpy(dst, front.data.data(), front.data.size());
+	const int size = static_cast<int>(front.data.size());
+	if (key_frame != nullptr)
+		*key_frame = front.key_frame;
+	reader.queue.pop_front();
+	reader.cv.notify_all();
 	return size;
 }
 
