@@ -491,9 +491,24 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
         return -1;
     }
     if (result > 0) {
-        source->failures = 0;
         source->last_frame_ns.store(monotonic_ns(), std::memory_order_relaxed);
-        source->cached_signal.store(1, std::memory_order_relaxed);
+        const int vi_live = cached_signal_present(source);
+        if (vi_live == 1)
+            source->cached_signal.store(1, std::memory_order_relaxed);
+        /* VENC can keep emitting the last 1080p GOP after HDMI changed and
+           VI IntCnt froze. Treat a dead VI as idle so LT6911 is probed. */
+        if (vi_live == 0) {
+            source->failures++;
+            const int rebuilt = maybe_rebuild_for_hdmi_change(
+                source, error, error_capacity);
+            if (rebuilt != 0) {
+                encoder->placeholder_frames = false;
+                invalidate_stale_encoder(encoder);
+                return -1;
+            }
+        } else {
+            source->failures = 0;
+        }
         packet->data = output_data;
         packet->data_size = static_cast<uint64_t>(result);
         packet->codec = public_codec(encoder->codec_type);

@@ -317,7 +317,10 @@ int maybe_rebuild_for_hdmi_change(Source *source, char *error,
     const uint64_t idle_ns = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::nanoseconds>(
             kHDMIChangeIdleWindow).count());
-    const bool recent_frames = last_frame != 0 && now_ns >= last_frame &&
+    /* VENC packets are not proof the HDMI frontend is still live. After a
+       host mode change VI IntCnt freezes while VENC can keep repeating. */
+    const bool recent_frames = cached_signal_present(source) == 1 &&
+        last_frame != 0 && now_ns >= last_frame &&
         now_ns - last_frame < idle_ns;
 
     const auto now = std::chrono::steady_clock::now();
