@@ -381,36 +381,58 @@ static int copy_h26x_packet(int ch, uint8_t *dst, int capacity,
 		info->fd = CVI_VENC_GetFd(ch);
 	if (info->fd < 0)
 		return -1;
-	if (wait_timeout_us > 0) {
-		int fd = info->fd;
-		fd_set read_fds;
-		struct timeval timeout = {
-			wait_timeout_us / 1000000,
-			wait_timeout_us % 1000000,
-		};
-		FD_ZERO(&read_fds);
-		FD_SET(fd, &read_fds);
-		CVI_S32 ready = select(fd + 1, &read_fds, NULL, NULL, &timeout);
-		if (ready < 0) {
-			if (errno == EINTR)
-				return 0;
-			printf("VencChn(%d) select failed: %s\n", ch, strerror(errno));
-			return -1;
-		}
-		if (ready == 0)
-			return 0;
-	}
 
-	stream->pstPack = info->packs;
-	/* Never ask GetStream to block. The vendor EnterVcodecLock path ignores
-	   a millisecond timeout when the worker already holds the lock, and
-	   waiting here while callers hold g_mmf_mutex deadlocks bind/shutdown.
-	   select() above is the only bounded wait. */
-	CVI_S32 ret = CVI_VENC_GetStream(ch, stream, 0);
-	if (ret == CVI_ERR_VENC_BUSY)
-		return 0;
-	if (ret != CVI_SUCCESS)
-		return -1;
+	struct timeval now;
+	gettimeofday(&now, NULL);
+	const int64_t deadline_us = wait_timeout_us > 0
+		? (int64_t)now.tv_sec * 1000000 + now.tv_usec + wait_timeout_us
+		: 0;
+
+	CVI_S32 ret = CVI_FAILURE;
+	for (;;) {
+		if (wait_timeout_us > 0) {
+			gettimeofday(&now, NULL);
+			const int64_t remaining =
+				deadline_us - ((int64_t)now.tv_sec * 1000000 + now.tv_usec);
+			if (remaining <= 0)
+				return 0;
+			int fd = info->fd;
+			fd_set read_fds;
+			struct timeval timeout = {
+				static_cast<time_t>(remaining / 1000000),
+				static_cast<suseconds_t>(remaining % 1000000),
+			};
+			FD_ZERO(&read_fds);
+			FD_SET(fd, &read_fds);
+			CVI_S32 ready = select(fd + 1, &read_fds, NULL, NULL, &timeout);
+			if (ready < 0) {
+				if (errno == EINTR)
+					return 0;
+				printf("VencChn(%d) select failed: %s\n", ch, strerror(errno));
+				return -1;
+			}
+			if (ready == 0)
+				return 0;
+		}
+
+		stream->pstPack = info->packs;
+		/* Never ask GetStream to block. The vendor EnterVcodecLock path
+		   ignores a millisecond timeout when the worker already holds
+		   the lock. select() is the only bounded wait. */
+		ret = CVI_VENC_GetStream(ch, stream, 0);
+		if (ret == CVI_ERR_VENC_BUSY) {
+			/* Level-triggered fd stays readable while the pack is
+			   queued. Returning 0 here lets Core spin at 100% and
+			   probe LT6911. Sleep inside the remaining budget. */
+			if (wait_timeout_us <= 0)
+				return 0;
+			usleep(2000);
+			continue;
+		}
+		if (ret != CVI_SUCCESS)
+			return -1;
+		break;
+	}
 	if (!info->bound_to_capture)
 		info->packet_pending = 0;
 	info->stream_held = 1;
