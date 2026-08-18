@@ -30,26 +30,18 @@
 
 Host 单测：`g++ -std=c++17 -I include tests/input-resolution-tracker-test.cpp` 已通过。
 
-### 未完成（环境限制）
+### 2026-08-18 部署记录
 
-当前 agent 不能 SSH 到 `root@10.100.99.137` / `root@10.100.99.99`，因此：
+- 测试机 HDMI-A-1 已改回 `1920x1080@60`（`kscreen-doctor output.HDMI-A-1.mode.8`）。
+- OE：`make -C onekvm-distro nanokvm-mmf` 产出
+  `onekvm-device-nanokvm_0.1.0+git0+62f7cf0296-r3_onekvm_nanokvm.ipk`。
+- `10.100.99.137` 不在 NFS export（只有 103/107/196），改为 scp +
+  `opkg install --force-reinstall --force-depends`（设备 libgcc 仍是 15.2，
+  配方依赖写成了 15.3）。
+- 只重启了 `onekvm.service`。第一次起来：`OneKVM: configuring HDMI input 1920x1080`，
+  但 `/proc/cvitek/vi_dbg` 仍是 `VIFPS: 0`，CSI 计数全 0。
+- 第二次 `systemctl restart` 卡在 `deactivating (stop-sigkill)`，
+  `onekvm-server` 杀不掉（媒体驱动卡死）。未授权前不做 NanoKVM 断电。
 
-1. 无法在 99.99 上执行 `xrandr` 做分辨率切换复现
-2. 无法把新的 `nanokvm-mmf.so` 部署到设备并只重启 `onekvm.service`
-3. 无法读 `journalctl -u onekvm.service` 里的 `HDMI input changed to ...` 日志
-
-允许 SSH 后的验证步骤：
-
-```sh
-# 设备上确认当前输入
-ssh root@10.100.99.137 'onekvm-cli status video; cat /proc/cvitek/vi_dbg'
-
-# 测试机切换一种已支持的模式，例如 1280x720
-ssh root@10.100.99.99 'DISPLAY=:0 xrandr --output <HDMI> --mode 1280x720'
-
-# 最多等约 3 秒，设备应重新出画
-# journal 应出现：OneKVM: HDMI input resolution changed to 1280x720
-# /api/status 应变为 hdmi_connected=true，actual_fps>0，input 1280x720
-```
-
-不要重启设备、不要动 RAUC/U-Boot；部署应用 so/IPK 后只重启 `onekvm.service`。
+无信号画面根因：默认 H.264 绑定路径不走 `source_read()`，预设 NV21 从未进 VENC。
+已在 `62f7cf0` 用 `encode_bound_placeholder()` 修。现场还没验证到出画。
