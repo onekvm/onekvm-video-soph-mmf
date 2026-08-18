@@ -137,6 +137,9 @@ void reset_signal_cache(Source *source) {
     source->last_signal_probe_ns.store(0, std::memory_order_relaxed);
     source->cached_signal.store(-1, std::memory_order_relaxed);
     source->signal_probe_running.clear(std::memory_order_release);
+    /* Give VENC a chance to produce the first access unit before the bound
+       path treats empty reads as a missing HDMI mode and touches LT6911. */
+    source->last_hdmi_probe = std::chrono::steady_clock::now();
 }
 
 void release_source_frame(Source *source) {
@@ -234,6 +237,49 @@ int reopen_source_for_input(Source *source, onekvm::InputResolution input,
     std::fprintf(stderr, "OneKVM: HDMI input resolution changed to %ux%u\n",
                  input.width, input.height);
     return 0;
+}
+
+int maybe_rebuild_for_hdmi_change(Source *source, char *error,
+                                  uint32_t error_capacity) {
+    if (source == nullptr)
+        return 0;
+
+    const uint64_t now_ns = monotonic_ns();
+    const uint64_t last_frame = source->last_frame_ns.load(std::memory_order_relaxed);
+    const uint64_t idle_ns = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            kHDMIChangeIdleWindow).count());
+    const bool recent_frames = last_frame != 0 && now_ns >= last_frame &&
+        now_ns - last_frame < idle_ns;
+
+    const auto now = std::chrono::steady_clock::now();
+    const bool interval_elapsed =
+        source->last_hdmi_probe.time_since_epoch().count() == 0 ||
+        now - source->last_hdmi_probe >= kHDMIChangeProbeInterval;
+    if (!onekvm::hdmi_resolution_probe_due(
+            static_cast<unsigned>(std::max(0, source->failures)),
+            recent_frames, interval_elapsed))
+        return 0;
+
+    source->last_hdmi_probe = now;
+
+    /* LT6911C internal-register access can interrupt live CSI output on
+       NanoKVM Cube.  Probe only after VI/VENC has already gone idle. */
+    onekvm::InputResolution observed{};
+    const auto current = source->input_resolution.current();
+    if (!stable_input_resolution(&observed) || observed == current)
+        return 0;
+
+    source->failures = 0;
+    source->last_recovery = now;
+    const int reopen = reopen_source_for_input(
+        source, observed, error, error_capacity);
+    if (reopen != 0)
+        return -1;
+    set_error(error, error_capacity,
+              "HDMI input changed to %ux%u; pipeline rebuilt",
+              observed.width, observed.height);
+    return 1;
 }
 
 int32_t source_create(const onekvm_video_source_config_v1 *config, void **result,
@@ -351,11 +397,13 @@ int32_t source_read(void *opaque, onekvm_video_frame_v1 *frame,
         if (result == 0) {
             mmf::release_capture_frame(source->channel);
         }
-        if (cached_signal_present(source) == 0) {
-            source->failures = 0;
-            return no_signal_frame(source, frame, error, error_capacity);
-        }
         source->failures++;
+        const int rebuilt = maybe_rebuild_for_hdmi_change(
+            source, error, error_capacity);
+        if (rebuilt != 0)
+            return -1;
+        if (cached_signal_present(source) == 0)
+            return no_signal_frame(source, frame, error, error_capacity);
         const auto now = std::chrono::steady_clock::now();
         const bool due = source->failures >= kRecoveryFailureThreshold &&
             (source->last_recovery.time_since_epoch().count() == 0 ||
@@ -363,21 +411,6 @@ int32_t source_read(void *opaque, onekvm_video_frame_v1 *frame,
         if (due) {
             source->failures = 0;
             source->last_recovery = now;
-            /* LT6911C internal-register access can interrupt live CSI output
-               on NanoKVM Cube.  Never poll it on the steady-state hot path;
-               sample only after VI has already stopped delivering frames. */
-            onekvm::InputResolution observed{};
-            const auto current = source->input_resolution.current();
-            if (stable_input_resolution(&observed) && observed != current) {
-                int reopen = reopen_source_for_input(
-                    source, observed, error, error_capacity);
-                if (reopen == 0) {
-                    set_error(error, error_capacity,
-                              "HDMI input changed to %ux%u; pipeline rebuilt",
-                              observed.width, observed.height);
-                }
-                return -1;
-            }
             const auto [reset_width, reset_height] = resolution_size(source->config.resolution);
             const int reset_fps = source->config.fps > 0
                 ? static_cast<int>(source->config.fps) : 60;

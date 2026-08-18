@@ -38,6 +38,22 @@ enum class InputResolutionObservation {
     Changed,
 };
 
+constexpr unsigned kHDMIChangeFailureThreshold = 3;
+
+/* Probe LT6911 only after capture/encode has already gone idle. A live
+ * hitch of a few empty VENC reads must not touch internal registers. */
+constexpr bool hdmi_resolution_probe_due(
+    unsigned failures,
+    bool recent_frames,
+    bool interval_elapsed)
+{
+    if (recent_frames)
+        return false;
+    if (failures < kHDMIChangeFailureThreshold)
+        return false;
+    return interval_elapsed;
+}
+
 class InputResolutionTracker {
 public:
     void set_current(InputResolution resolution) {

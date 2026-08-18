@@ -134,6 +134,13 @@ int configure_encoder(Encoder *encoder, int width, int height,
         return -1;
     }
     int fps = encoder->config.fps > 0 ? encoder->config.fps : 30;
+    // The capture/VPSS path can continue delivering frames at the HDMI input
+    // cadence even when the requested output is lower.  Tell VENC the
+    // expected input cadence separately from the requested destination rate;
+    // using the target for both fields makes the driver assume every submitted
+    // frame is already at the target rate and it will not perform rate
+    // conversion (the stream then remains close to the source FPS).
+    constexpr int kVencInputFPS = 60;
     /* Keep the default GOP at one second. This avoids spending excessive VBR
        budget on IDR frames while still bounding decoder recovery latency. */
     int gop = encoder->config.gop > 0 ? encoder->config.gop : std::max(1, fps);
@@ -153,7 +160,7 @@ int configure_encoder(Encoder *encoder, int width, int height,
             config.height = height;
             config.pixel_format = kMMFNV21;
             config.gop = gop;
-            config.input_fps = fps;
+            config.input_fps = kVencInputFPS;
             config.output_fps = fps;
             config.bitrate_kbps = encoder->config.bitrate_kbps > 0
                 ? encoder->config.bitrate_kbps
@@ -458,8 +465,19 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
         return -1;
     }
     if (result > 0) {
+        source->failures = 0;
         source->last_frame_ns.store(monotonic_ns(), std::memory_order_relaxed);
         source->cached_signal.store(1, std::memory_order_relaxed);
+    } else {
+        /* Default H.264/H.265 never calls source_read. Resolution changes
+           must be discovered here or the pipeline stays on the old VI size. */
+        source->failures++;
+        const int rebuilt = maybe_rebuild_for_hdmi_change(
+            source, error, error_capacity);
+        if (rebuilt != 0) {
+            invalidate_stale_encoder(encoder);
+            return -1;
+        }
     }
     packet->data = result > 0 ? output_data : nullptr;
     packet->data_size = result > 0 ? static_cast<uint64_t>(result) : 0;

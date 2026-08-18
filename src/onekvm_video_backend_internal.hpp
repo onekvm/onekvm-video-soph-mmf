@@ -34,6 +34,8 @@ ONEKVM_VIDEO_INTERNAL inline constexpr size_t kVENCBufferSize = 1024 * 1024;
 ONEKVM_VIDEO_INTERNAL inline constexpr size_t kJPEGBufferSize = 2 * 1024 * 1024;
 ONEKVM_VIDEO_INTERNAL inline constexpr int kRecoveryFailureThreshold = 3;
 ONEKVM_VIDEO_INTERNAL inline constexpr auto kRecoveryInterval = std::chrono::seconds(5);
+ONEKVM_VIDEO_INTERNAL inline constexpr auto kHDMIChangeIdleWindow = std::chrono::milliseconds(500);
+ONEKVM_VIDEO_INTERNAL inline constexpr auto kHDMIChangeProbeInterval = std::chrono::seconds(2);
 ONEKVM_VIDEO_INTERNAL inline constexpr auto kSignalProbeInterval = std::chrono::seconds(10);
 ONEKVM_VIDEO_INTERNAL inline constexpr auto kRecentFrameSignalWindow = std::chrono::milliseconds(500);
 ONEKVM_VIDEO_INTERNAL inline constexpr auto kInitialResolutionSampleDelay = std::chrono::milliseconds(20);
@@ -51,6 +53,7 @@ struct ONEKVM_VIDEO_INTERNAL Source {
     int no_signal_height = 0;
     int failures = 0;
     std::chrono::steady_clock::time_point last_recovery{};
+    std::chrono::steady_clock::time_point last_hdmi_probe{};
     std::atomic<uint64_t> last_frame_ns{0};
     std::atomic<uint64_t> last_signal_probe_ns{0};
     std::atomic<int> cached_signal{-1};
@@ -86,6 +89,9 @@ ONEKVM_VIDEO_INTERNAL void set_error(
 ONEKVM_VIDEO_INTERNAL std::pair<int, int> resolution_size(int resolution);
 ONEKVM_VIDEO_INTERNAL uint64_t monotonic_ns();
 ONEKVM_VIDEO_INTERNAL bool nv21_size(int width, int height, size_t *size);
+/* Caller must hold source->mutex. 1 = rebuilt, 0 = no change, -1 = failed. */
+ONEKVM_VIDEO_INTERNAL int maybe_rebuild_for_hdmi_change(
+    Source *source, char *error, uint32_t error_capacity);
 
 ONEKVM_VIDEO_INTERNAL int32_t source_create(
     const onekvm_video_source_config_v1 *config, void **result,

@@ -18,5 +18,11 @@ int main() {
         tracker.current() != InputResolution{640, 480}) return 4;
     if (tracker.observe({640, 480}) != InputResolutionObservation::Unchanged) return 5;
 
+    if (hdmi_resolution_probe_due(0, false, true)) return 6;
+    if (hdmi_resolution_probe_due(kHDMIChangeFailureThreshold, true, true)) return 7;
+    if (hdmi_resolution_probe_due(kHDMIChangeFailureThreshold, false, false)) return 8;
+    if (!hdmi_resolution_probe_due(kHDMIChangeFailureThreshold, false, true)) return 9;
+    if (!hdmi_resolution_probe_due(kHDMIChangeFailureThreshold + 2, false, true)) return 10;
+
     return 0;
 }
