@@ -150,6 +150,19 @@ int cached_signal_present(Source *source) {
     return present;
 }
 
+void publish_input_format(Source *source) {
+    if (source == nullptr)
+        return;
+    onekvm::InputResolution input = source->reported_input;
+    if (input.width == 0 || input.height == 0)
+        input = source->input_resolution.current();
+    const uint64_t packed =
+        (static_cast<uint64_t>(input.width) << 32) |
+        static_cast<uint64_t>(input.height);
+    source->cached_input_size.store(packed, std::memory_order_release);
+    source->cached_input_fps.store(source->config.fps, std::memory_order_relaxed);
+}
+
 void reset_signal_cache(Source *source) {
     source->last_frame_ns.store(0, std::memory_order_relaxed);
     source->last_signal_probe_ns.store(0, std::memory_order_relaxed);
@@ -253,6 +266,7 @@ int open_source(Source *source, const onekvm_video_source_config_v1 *config,
                          probed.width, probed.height);
         }
     }
+    publish_input_format(source);
     source->no_signal_frame.clear();
     reset_signal_cache(source);
     return 0;
@@ -300,6 +314,7 @@ int maybe_rebuild_for_hdmi_change(Source *source, char *error,
     if (!stable_hdmi_input(&observed))
         return 0;
     source->reported_input = observed;
+    publish_input_format(source);
 
     const auto kind = onekvm::classify_hdmi_input(observed);
     if (kind == onekvm::HdmiInputClass::OutOfRange) {
@@ -377,6 +392,7 @@ int32_t source_reset(void *opaque, const onekvm_video_source_config_v1 *config,
     source->failures = 0;
     source->last_recovery = {};
     source->no_signal_frame.clear();
+    publish_input_format(source);
     reset_signal_cache(source);
     return 0;
 }
@@ -515,19 +531,15 @@ int32_t source_input_format(void *opaque, onekvm_video_format_v1 *format) {
         format->struct_size < sizeof(*format)) {
         return -1;
     }
-    std::lock_guard<std::mutex> lock(source->mutex);
-    if (!source->initialized) {
+    const uint64_t packed =
+        source->cached_input_size.load(std::memory_order_acquire);
+    const auto width = static_cast<int32_t>(packed >> 32);
+    const auto height = static_cast<int32_t>(packed & 0xffffffffu);
+    if (width <= 0 || height <= 0)
         return -1;
-    }
-    auto input = source->reported_input;
-    if (input.width == 0 || input.height == 0)
-        input = source->input_resolution.current();
-    if (input.width == 0 || input.height == 0) {
-        return -1;
-    }
-    format->width = static_cast<int32_t>(input.width);
-    format->height = static_cast<int32_t>(input.height);
-    format->fps = source->config.fps;
+    format->width = width;
+    format->height = height;
+    format->fps = source->cached_input_fps.load(std::memory_order_relaxed);
     format->pixel_format = ONEKVM_VIDEO_PIXEL_UNKNOWN;
     return 0;
 }

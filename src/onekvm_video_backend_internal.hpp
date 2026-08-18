@@ -12,6 +12,7 @@
 #include <cerrno>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
@@ -61,6 +62,8 @@ struct ONEKVM_VIDEO_INTERNAL Source {
     std::atomic_flag signal_probe_running = ATOMIC_FLAG_INIT;
     onekvm::InputResolutionTracker input_resolution;
     onekvm::InputResolution reported_input{};
+    std::atomic<uint64_t> cached_input_size{0};
+    std::atomic<int32_t> cached_input_fps{0};
     std::atomic<bool> out_of_range{false};
 };
 
