@@ -544,7 +544,8 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
             invalidate_stale_encoder(encoder);
             return -1;
         }
-        if (cached_signal_present(source) == 0)
+        if (source->out_of_range.load(std::memory_order_relaxed) ||
+            cached_signal_present(source) == 0)
             return encode_bound_placeholder(
                 encoder, source, packet, error, error_capacity);
         if (encoder->placeholder_frames) {

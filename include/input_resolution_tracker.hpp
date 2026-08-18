@@ -31,6 +31,30 @@ constexpr bool supported_input_resolution(InputResolution resolution) {
     return false;
 }
 
+enum class HdmiInputClass {
+    None,
+    Supported,
+    OutOfRange,
+};
+
+constexpr bool plausible_hdmi_size(InputResolution resolution) {
+    if (resolution.width < 320 || resolution.height < 200)
+        return false;
+    if (resolution.width > 4096 || resolution.height > 2160)
+        return false;
+    if ((resolution.width & 1u) != 0 || (resolution.height & 1u) != 0)
+        return false;
+    return true;
+}
+
+constexpr HdmiInputClass classify_hdmi_input(InputResolution resolution) {
+    if (!plausible_hdmi_size(resolution))
+        return HdmiInputClass::None;
+    if (supported_input_resolution(resolution))
+        return HdmiInputClass::Supported;
+    return HdmiInputClass::OutOfRange;
+}
+
 enum class InputResolutionObservation {
     Invalid,
     Unchanged,

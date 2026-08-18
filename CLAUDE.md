@@ -1,5 +1,14 @@
 # onekvm-nanokvm-mmf 工作备忘
 
+## 未完成 / 勿忘
+
+- 看门狗已写但未部署到 `10.100.99.137`（需同时更新 `onekvm-core` + `onekvm-watchdog`）。
+- NFS export 不含 `.137`（只有 103/107/196）；部署靠 scp。
+- 设备 libgcc 15.2，OE 包依赖 15.3，安装需 `--force-depends`。
+- 设备卡死时 `onekvm-server` 可能 SIGKILL 无效，只能 `reboot -f`。
+- 0 FPS 可能只是显示器休眠，不是进程卡死；看门狗只认 D-Bus 心跳。
+- 超范围 HDMI（1366x768 / 1440p / 4K）不得按旧几何继续采，应占位并报告实测尺寸。
+
 ## 2026-08-18：测试机改分辨率后设备无画面
 
 ### 已确认现象

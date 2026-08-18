@@ -68,13 +68,19 @@ bool nv21_size(int width, int height, size_t *size) {
     return true;
 }
 
-bool read_supported_input_resolution(onekvm::InputResolution *resolution) {
+bool read_hdmi_input(onekvm::InputResolution *resolution) {
     uint32_t width = 0;
     uint32_t height = 0;
     if (resolution == nullptr || lt6911_get_input_size(0, &width, &height) != 0)
         return false;
-    const onekvm::InputResolution value{width, height};
-    if (!onekvm::supported_input_resolution(value))
+    *resolution = {width, height};
+    return true;
+}
+
+bool read_supported_input_resolution(onekvm::InputResolution *resolution) {
+    onekvm::InputResolution value{};
+    if (!read_hdmi_input(&value) ||
+        !onekvm::supported_input_resolution(value))
         return false;
     *resolution = value;
     return true;
@@ -91,15 +97,24 @@ onekvm::InputResolution initial_input_resolution() {
     return {1920, 1080};
 }
 
-bool stable_input_resolution(onekvm::InputResolution *resolution) {
+bool stable_hdmi_input(onekvm::InputResolution *resolution) {
     onekvm::InputResolution first{};
     onekvm::InputResolution second{};
-    if (resolution == nullptr || !read_supported_input_resolution(&first))
+    if (resolution == nullptr || !read_hdmi_input(&first))
         return false;
     std::this_thread::sleep_for(kInitialResolutionSampleDelay);
-    if (!read_supported_input_resolution(&second) || first != second)
+    if (!read_hdmi_input(&second) || first != second)
         return false;
     *resolution = first;
+    return true;
+}
+
+bool stable_input_resolution(onekvm::InputResolution *resolution) {
+    onekvm::InputResolution value{};
+    if (!stable_hdmi_input(&value) ||
+        !onekvm::supported_input_resolution(value))
+        return false;
+    *resolution = value;
     return true;
 }
 
@@ -225,6 +240,8 @@ int open_source(Source *source, const onekvm_video_source_config_v1 *config,
     source->failures = 0;
     source->last_recovery = {};
     source->input_resolution.set_current(input);
+    source->reported_input = input;
+    source->out_of_range.store(false, std::memory_order_relaxed);
     source->no_signal_frame.clear();
     reset_signal_cache(source);
     return 0;
@@ -269,8 +286,26 @@ int maybe_rebuild_for_hdmi_change(Source *source, char *error,
     /* LT6911C internal-register access can interrupt live CSI output on
        NanoKVM Cube.  Probe only after VI/VENC has already gone idle. */
     onekvm::InputResolution observed{};
+    if (!stable_hdmi_input(&observed))
+        return 0;
+    source->reported_input = observed;
+
+    const auto kind = onekvm::classify_hdmi_input(observed);
+    if (kind == onekvm::HdmiInputClass::OutOfRange) {
+        if (!source->out_of_range.exchange(true, std::memory_order_relaxed)) {
+            std::fprintf(stderr,
+                         "OneKVM: HDMI input %ux%u is out of range\n",
+                         observed.width, observed.height);
+        }
+        return 0;
+    }
+    if (kind != onekvm::HdmiInputClass::Supported)
+        return 0;
+
     const auto current = source->input_resolution.current();
-    if (!stable_input_resolution(&observed) || observed == current)
+    const bool was_out_of_range =
+        source->out_of_range.exchange(false, std::memory_order_relaxed);
+    if (!was_out_of_range && observed == current)
         return 0;
 
     source->failures = 0;
@@ -405,7 +440,8 @@ int32_t source_read(void *opaque, onekvm_video_frame_v1 *frame,
             source, error, error_capacity);
         if (rebuilt != 0)
             return -1;
-        if (cached_signal_present(source) == 0)
+        if (source->out_of_range.load(std::memory_order_relaxed) ||
+            cached_signal_present(source) == 0)
             return no_signal_frame(source, frame, error, error_capacity);
         const auto now = std::chrono::steady_clock::now();
         const bool due = source->failures >= kRecoveryFailureThreshold &&
@@ -456,7 +492,10 @@ void source_release(void *opaque, uint64_t token) {
 }
 
 int32_t source_signal_present(void *opaque) {
-    return cached_signal_present(static_cast<Source *>(opaque)) > 0 ? 1 : 0;
+    auto *source = static_cast<Source *>(opaque);
+    if (source != nullptr && source->out_of_range.load(std::memory_order_relaxed))
+        return 1;
+    return cached_signal_present(source) > 0 ? 1 : 0;
 }
 
 int32_t source_input_format(void *opaque, onekvm_video_format_v1 *format) {
@@ -469,7 +508,9 @@ int32_t source_input_format(void *opaque, onekvm_video_format_v1 *format) {
     if (!source->initialized) {
         return -1;
     }
-    const auto input = source->input_resolution.current();
+    auto input = source->reported_input;
+    if (input.width == 0 || input.height == 0)
+        input = source->input_resolution.current();
     if (input.width == 0 || input.height == 0) {
         return -1;
     }

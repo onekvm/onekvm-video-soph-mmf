@@ -60,6 +60,8 @@ struct ONEKVM_VIDEO_INTERNAL Source {
     std::atomic<int> cached_signal{-1};
     std::atomic_flag signal_probe_running = ATOMIC_FLAG_INIT;
     onekvm::InputResolutionTracker input_resolution;
+    onekvm::InputResolution reported_input{};
+    std::atomic<bool> out_of_range{false};
 };
 
 struct ONEKVM_VIDEO_INTERNAL Encoder {
