@@ -70,6 +70,7 @@ struct ONEKVM_VIDEO_INTERNAL Encoder {
     int height = 0;
     bool initialized = false;
     bool source_bound = false;
+    bool placeholder_frames = false;
     bool request_keyframe = false;
     bool frame_pending = false;
     bool packet_borrowed = false;
@@ -92,6 +93,10 @@ ONEKVM_VIDEO_INTERNAL bool nv21_size(int width, int height, size_t *size);
 /* Caller must hold source->mutex. 1 = rebuilt, 0 = no change, -1 = failed. */
 ONEKVM_VIDEO_INTERNAL int maybe_rebuild_for_hdmi_change(
     Source *source, char *error, uint32_t error_capacity);
+ONEKVM_VIDEO_INTERNAL int no_signal_frame(
+    Source *source, onekvm_video_frame_v1 *frame,
+    char *error, uint32_t error_capacity);
+ONEKVM_VIDEO_INTERNAL int cached_signal_present(Source *source);
 
 ONEKVM_VIDEO_INTERNAL int32_t source_create(
     const onekvm_video_source_config_v1 *config, void **result,

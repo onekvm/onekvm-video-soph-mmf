@@ -70,6 +70,7 @@ void close_encoder(Encoder *encoder) {
     encoder->height = 0;
     encoder->frame_pending = false;
     encoder->source_bound = false;
+    encoder->placeholder_frames = false;
     encoder->packet_borrowed = false;
     encoder->pending_pts_ns = 0;
     encoder->prepared_size = 0;
@@ -87,6 +88,7 @@ void invalidate_stale_encoder(Encoder *encoder) {
     encoder->width = 0;
     encoder->height = 0;
     encoder->source_bound = false;
+    encoder->placeholder_frames = false;
     encoder->request_keyframe = true;
     encoder->frame_pending = false;
     encoder->packet_borrowed = false;
@@ -395,6 +397,63 @@ int32_t encoder_bind_source(void *encoder_opaque, void *source_opaque,
     return bind_encoder_to_source_locked(encoder, source, error, error_capacity);
 }
 
+int encode_bound_placeholder(Encoder *encoder, Source *source,
+                             onekvm_video_packet_v1 *packet,
+                             char *error, uint32_t error_capacity) {
+    if (!encoder->placeholder_frames) {
+        if (encoder->source_bound) {
+            std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
+            if (mmf::unbind_h26x_from_capture(encoder->channel) != 0) {
+                set_error(error, error_capacity,
+                          "unbind capture for no-signal frame failed");
+                return -1;
+            }
+            encoder->source_bound = false;
+        }
+        encoder->placeholder_frames = true;
+        encoder->request_keyframe = true;
+    }
+
+    onekvm_video_frame_v1 frame{};
+    frame.struct_size = sizeof(frame);
+    if (no_signal_frame(source, &frame, error, error_capacity) != 0)
+        return -1;
+
+    const uint8_t *output_data = nullptr;
+    uint64_t output_pts_ns = frame.pts_ns;
+    int result = 0;
+    {
+        std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
+        if (encoder->request_keyframe) {
+            if (mmf::request_h26x_idr(encoder->channel) != 0) {
+                set_error(error, error_capacity, "request no-signal IDR failed");
+                return -1;
+            }
+            encoder->request_keyframe = false;
+        }
+        const int push = mmf::submit_h26x_frame(
+            encoder->channel, const_cast<uint8_t *>(frame.data),
+            frame.width, frame.height, kMMFNV21);
+        if (push != 0) {
+            set_error(error, error_capacity,
+                      "submit no-signal frame failed: %d", push);
+            return -1;
+        }
+        result = drain_venc_packet(encoder, &output_data, &output_pts_ns);
+    }
+    if (result < 0) {
+        set_error(error, error_capacity,
+                  "encode no-signal frame failed: %d", result);
+        return -1;
+    }
+    packet->data = result > 0 ? output_data : nullptr;
+    packet->data_size = result > 0 ? static_cast<uint64_t>(result) : 0;
+    packet->codec = public_codec(encoder->codec_type);
+    packet->key_frame = 0;
+    packet->pts_ns = output_pts_ns;
+    return 0;
+}
+
 int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
                             char *error, uint32_t error_capacity) {
     auto *encoder = static_cast<Encoder *>(opaque);
@@ -411,7 +470,8 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
     }
     std::lock_guard<std::mutex> source_lock(source->mutex);
     invalidate_stale_encoder(encoder);
-    if (!encoder->initialized || !encoder->source_bound) {
+    if (!encoder->initialized ||
+        (!encoder->source_bound && !encoder->placeholder_frames)) {
         if (bind_encoder_to_source_locked(encoder, source, error, error_capacity) != 0)
             return -1;
         encoder->request_keyframe = true;
@@ -466,17 +526,30 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
     }
     if (result > 0) {
         source->failures = 0;
-        source->last_frame_ns.store(monotonic_ns(), std::memory_order_relaxed);
-        source->cached_signal.store(1, std::memory_order_relaxed);
+        if (!encoder->placeholder_frames) {
+            source->last_frame_ns.store(monotonic_ns(), std::memory_order_relaxed);
+            source->cached_signal.store(1, std::memory_order_relaxed);
+        }
     } else {
         /* Default H.264/H.265 never calls source_read. Resolution changes
-           must be discovered here or the pipeline stays on the old VI size. */
+           and the no-signal placeholder must be handled here. */
         source->failures++;
         const int rebuilt = maybe_rebuild_for_hdmi_change(
             source, error, error_capacity);
         if (rebuilt != 0) {
+            encoder->placeholder_frames = false;
             invalidate_stale_encoder(encoder);
             return -1;
+        }
+        if (cached_signal_present(source) == 0)
+            return encode_bound_placeholder(
+                encoder, source, packet, error, error_capacity);
+        if (encoder->placeholder_frames) {
+            encoder->placeholder_frames = false;
+            encoder->request_keyframe = true;
+            if (bind_encoder_to_source_locked(
+                    encoder, source, error, error_capacity) != 0)
+                return -1;
         }
     }
     packet->data = result > 0 ? output_data : nullptr;

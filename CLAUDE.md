@@ -5,8 +5,10 @@
 ### 已确认现象
 
 - 设备 `10.100.99.137`（NanoKVM Cube，`admin` / `no_password`）
-- 被采集主机 `10.100.99.99`（HID 已连接，键盘灯 `known=true`，说明 USB gadget 正常）
-- `GET /api/status`：`video.active=true`，`hdmi_connected=false`，`actual_fps=0`，`input_width/height=1920x1080`
+- 被采集主机 `10.100.99.99`（KDE Wayland / kwin，用户 `samlm` seat0）
+- **测试机 HDMI-A-1 当前是 `800x600@60`，不是 1080p。** 该口首选模式仍是 `1920x1080@60`；内置 eDP-1 已 disable。
+- HID 已连接，键盘灯 `known=true`，说明 USB gadget 正常
+- `GET /api/status`：`video.active=true`，`hdmi_connected=false`，`actual_fps=0`，`input_width/height=1920x1080`（设备仍按旧的 1080p 几何采集）
 - ATX `pwr_led=false`（该 GPIO 不能用来判断 99.99 是否开机）
 - `/api/stream` MJPEG 8 秒无字节；设备日志没有 `HDMI input changed` / pipeline rebuilt
 
