@@ -12,5 +12,20 @@ int main()
 	if (parse_vi_fps_line("VIFPS : nan\n", &fps)) return 5;
 	if (parse_vi_fps_line("VIFPS : inf\n", &fps)) return 6;
 	if (parse_vi_fps_line("VIFPS : -1\n", &fps)) return 7;
+	if (!parse_vi_chn_status_header(
+		    "-------------------------------VI CHN STATUS------------------------------------\n"))
+		return 8;
+	if (parse_vi_chn_status_header("VI DEV ATTR1\n")) return 9;
+	if (!parse_vi_chn_status_fps("  0  0  Y   60 7339 7339    0    019201080\n", &fps) ||
+	    fps != 60)
+		return 10;
+	if (!parse_vi_chn_status_fps("  0  0  N   0 0 0    0    019201080\n", &fps) ||
+	    fps != 0)
+		return 11;
+	if (parse_vi_chn_status_fps(
+		    "  0  0 019201080  N N  -1  -1NV21  SDR8  -1\n", &fps))
+		return 12;
+	if (parse_vi_chn_status_fps("  1  0  Y   60 1 1    0    019201080\n", &fps))
+		return 13;
 	return 0;
 }

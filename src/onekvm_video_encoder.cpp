@@ -502,12 +502,15 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
 
     const uint64_t last_live = mmf::h26x_reader_last_packet_ns(encoder->channel);
     const uint64_t now = monotonic_ns();
-    const bool venc_stale = last_live == 0 ||
-        (now > last_live && now - last_live > 300000000ull);
+    /* last_live==0 means the reader has not delivered a unit yet, not that
+       HDMI is gone. Treating it as stale forced the no-signal artwork while
+       VI/VPSS/VENC were already running at 1080p60. */
+    const bool venc_stale = last_live != 0 &&
+        now > last_live && now - last_live > 300000000ull;
     const bool missing_signal =
         source->out_of_range.load(std::memory_order_relaxed) ||
         cached_signal_present(source) == 0;
-    if (venc_stale || missing_signal)
+    if (missing_signal || venc_stale)
         return encode_bound_placeholder(encoder, source, packet, error, error_capacity);
 
     source->failures++;

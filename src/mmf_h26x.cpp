@@ -71,7 +71,10 @@ static void _set_venc_common_attr(VENC_CHN_ATTR_S *attr, const H26xEncoderConfig
 	if (cfg->codec == H26xCodec::H264)
 		attr->stVencAttr.u32Profile = H264E_PROFILE_BASELINE;
 	attr->stVencAttr.bEsBufQueueEn = CVI_TRUE;
-	attr->stVencAttr.bIsoSendFrmEn = CVI_TRUE;
+	/* Isolate SendFrame/GetStream only when userspace pairs them. The bound
+	   VPSS→VENC path never calls SendFrame; leaving this on encodes frames
+	   (EncodedFrame++) but never queues them for GetStream (LeftFrm=0). */
+	attr->stVencAttr.bIsoSendFrmEn = CVI_FALSE;
 	attr->stGopAttr.enGopMode = VENC_GOPMODE_NORMALP;
 	attr->stGopAttr.stNormalP.s32IPQpDelta = 2;
 }
@@ -388,6 +391,14 @@ int submit_h26x_frame(int ch, uint8_t *data, int w, int h, int format) {
 	return res;
 }
 
+static bool venc_stream_ready(int ch)
+{
+	VENC_CHN_STATUS_S status{};
+	if (CVI_VENC_QueryStatus(ch, &status) != CVI_SUCCESS)
+		return false;
+	return status.u32CurPacks > 0 || status.u32LeftStreamFrames > 0;
+}
+
 // Copy one access unit directly from the vendor stream into caller storage.
 static int copy_h26x_packet(int ch, uint8_t *dst, int capacity,
 	int wait_timeout_us) {
@@ -419,31 +430,39 @@ static int copy_h26x_packet(int ch, uint8_t *dst, int capacity,
 			gettimeofday(&now, NULL);
 			const int64_t remaining =
 				deadline_us - ((int64_t)now.tv_sec * 1000000 + now.tv_usec);
-			if (remaining <= 0)
-				return 0;
-			int fd = info->fd;
-			fd_set read_fds;
-			struct timeval timeout = {
-				static_cast<time_t>(remaining / 1000000),
-				static_cast<suseconds_t>(remaining % 1000000),
-			};
-			FD_ZERO(&read_fds);
-			FD_SET(fd, &read_fds);
-			CVI_S32 ready = select(fd + 1, &read_fds, NULL, NULL, &timeout);
-			if (ready < 0) {
-				if (errno == EINTR)
+			if (remaining <= 0) {
+				if (!venc_stream_ready(ch))
 					return 0;
-				printf("VencChn(%d) select failed: %s\n", ch, strerror(errno));
-				return -1;
+			} else {
+				int fd = info->fd;
+				fd_set read_fds;
+				struct timeval timeout = {
+					static_cast<time_t>(remaining / 1000000),
+					static_cast<suseconds_t>(remaining % 1000000),
+				};
+				FD_ZERO(&read_fds);
+				FD_SET(fd, &read_fds);
+				CVI_S32 ready = select(fd + 1, &read_fds, NULL, NULL, &timeout);
+				if (ready < 0) {
+					if (errno == EINTR)
+						return 0;
+					printf("VencChn(%d) select failed: %s\n", ch, strerror(errno));
+					return -1;
+				}
+				/* This driver's poll fd often stays silent on the
+				   bound path. QueryStatus is the source of truth;
+				   a select timeout must not skip a queued AU. */
+				if (ready == 0 && !venc_stream_ready(ch))
+					return 0;
 			}
-			if (ready == 0)
-				return 0;
+		} else if (!venc_stream_ready(ch)) {
+			return 0;
 		}
 
 		stream->pstPack = info->packs;
 		/* Never ask GetStream to block. The vendor EnterVcodecLock path
 		   ignores a millisecond timeout when the worker already holds
-		   the lock. select() is the only bounded wait. */
+		   the lock. select()/QueryStatus are the only bounded waits. */
 		ret = CVI_VENC_GetStream(ch, stream, 0);
 		if (ret == CVI_ERR_VENC_BUSY) {
 			/* Level-triggered fd stays readable while the pack is
@@ -708,6 +727,9 @@ void start_h26x_reader(int ch)
 				ch, scratch.data(), static_cast<int>(scratch.size()));
 			if (got <= 0)
 				continue;
+			if (self.last_packet_ns.load(std::memory_order_relaxed) == 0)
+				printf("OneKVM: VENC reader got first %d-byte AU on ch %d\n",
+					got, ch);
 			std::lock_guard<std::mutex> lock(self.mu);
 			self.packet.assign(scratch.begin(), scratch.begin() + got);
 			self.last_packet_ns.store(reader_now_ns(), std::memory_order_relaxed);

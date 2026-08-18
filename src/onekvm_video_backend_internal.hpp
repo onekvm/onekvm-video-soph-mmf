@@ -41,7 +41,9 @@ ONEKVM_VIDEO_INTERNAL inline constexpr auto kSignalProbeInterval = std::chrono::
 ONEKVM_VIDEO_INTERNAL inline constexpr auto kNoSignalProbeInterval = std::chrono::seconds(1);
 ONEKVM_VIDEO_INTERNAL inline constexpr auto kRecentFrameSignalWindow = std::chrono::milliseconds(500);
 ONEKVM_VIDEO_INTERNAL inline constexpr auto kInitialResolutionSampleDelay = std::chrono::milliseconds(20);
-ONEKVM_VIDEO_INTERNAL inline constexpr const char *kVideoDebugPath = "/proc/cvitek/vi_dbg";
+/* Prefer /proc/cvitek/vi. Reading vi_dbg holds the VI debug handler and
+   can stall CSI (VIFPS drops to 0 while SOF/FE counters freeze). */
+ONEKVM_VIDEO_INTERNAL inline constexpr const char *kVideoStatusPath = "/proc/cvitek/vi";
 
 struct ONEKVM_VIDEO_INTERNAL Source {
     std::mutex mutex;

@@ -32,13 +32,22 @@ std::pair<int, int> resolution_size(int resolution) {
 }
 
 bool read_vi_fps(double *fps) {
-    FILE *file = std::fopen(kVideoDebugPath, "r");
+    FILE *file = std::fopen(kVideoStatusPath, "r");
     if (file == nullptr) {
         return false;
     }
     char line[256];
+    bool in_chn_status = false;
     bool found = false;
     while (std::fgets(line, sizeof(line), file) != nullptr) {
+        if (parse_vi_chn_status_header(line)) {
+            in_chn_status = true;
+            continue;
+        }
+        if (in_chn_status && parse_vi_chn_status_fps(line, fps)) {
+            found = true;
+            break;
+        }
         if (parse_vi_fps_line(line, fps)) {
             found = true;
             break;
