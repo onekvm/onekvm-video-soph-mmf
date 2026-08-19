@@ -257,9 +257,28 @@ int32_t encoder_reset(void *opaque, const onekvm_video_encoder_config_v1 *config
         return -1;
     }
     std::lock_guard<std::mutex> lock(encoder->mutex);
+    const auto next = normalized_encoder_config(config);
+    const int next_codec = codec_type(config->codec);
+    /* Cube cannot close/recreate a live VENC channel: GetStream holds
+       EnterVcodecLock on the reader thread. Same-codec FPS/GOP updates
+       are posted for that thread to apply between GetStream calls. */
+    if (encoder->initialized && encoder->codec_type != 0 &&
+        encoder->codec_type == next_codec && encoder->channel >= 0) {
+        int fps = next.fps > 0 ? next.fps : 30;
+        if (fps > 60)
+            fps = 60;
+        const int gop = next.gop > 0 ? next.gop : std::max(1, fps);
+        if (mmf::set_h26x_output_fps(encoder->channel, fps, gop) != 0) {
+            set_error(error, error_capacity, "queue VENC output fps %d failed", fps);
+            return -1;
+        }
+        encoder->config = next;
+        encoder->codec_type = next_codec;
+        return 0;
+    }
     close_encoder(encoder);
-    encoder->config = normalized_encoder_config(config);
-    encoder->codec_type = codec_type(config->codec);
+    encoder->config = next;
+    encoder->codec_type = next_codec;
     encoder->request_keyframe = false;
     encoder->output.clear();
     return 0;

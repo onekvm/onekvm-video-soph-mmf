@@ -84,6 +84,7 @@ uint64_t h26x_reader_last_packet_ns(int ch);
 void h26x_reader_want_idr(int ch);
 int release_h26x_packet(int ch);
 int request_h26x_idr(int ch);
+int set_h26x_output_fps(int ch, int output_fps, int gop);
 int bind_h26x_to_capture(int ch, int vpss_group, int vpss_channel);
 int unbind_h26x_from_capture(int ch);
 
