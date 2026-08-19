@@ -329,6 +329,7 @@ int open_source(Source *source, const onekvm_video_source_config_v1 *config,
     source->input_resolution.set_current(input);
     source->reported_input = input;
     source->hdmi_blanking_samples = 0;
+    source->hdmi_oor_samples = 0;
     source->out_of_range.store(false, std::memory_order_relaxed);
     onekvm::InputResolution probed{};
     if (read_hdmi_input(&probed)) {
@@ -387,6 +388,12 @@ int rebuild_for_hdmi_timing(Source *source, bool force_probe, char *error,
     source->cached_signal.store(recent_frames ? 1 : 0, std::memory_order_relaxed);
     source->last_signal_probe_ns.store(monotonic_ns(), std::memory_order_relaxed);
 
+    /* Live 1080p does not need I2C. Touching 80ee here is what produced
+       490x404 "out of range" samples and flashed the no-signal artwork. */
+    if (!force_probe && recent_frames &&
+        source->input_resolution.current() == onekvm::kMaxViReceiver)
+        return 0;
+
     const auto now = std::chrono::steady_clock::now();
     const bool interval_elapsed =
         force_probe ||
@@ -418,6 +425,13 @@ int rebuild_for_hdmi_timing(Source *source, bool force_probe, char *error,
 
     const auto kind = onekvm::classify_hdmi_input(reported);
     if (kind == onekvm::HdmiInputClass::OutOfRange) {
+        if (onekvm::supported_input_resolution(csi)) {
+            source->hdmi_oor_samples = 0;
+            source->out_of_range.store(false, std::memory_order_relaxed);
+            return 0;
+        }
+        if (++source->hdmi_oor_samples < 3)
+            return 0;
         if (!source->out_of_range.exchange(true, std::memory_order_relaxed)) {
             std::fprintf(stderr,
                          "OneKVM: HDMI input %ux%u is out of range\n",
@@ -425,6 +439,8 @@ int rebuild_for_hdmi_timing(Source *source, bool force_probe, char *error,
         }
         if (current == onekvm::kMaxViReceiver)
             return 0;
+    } else {
+        source->hdmi_oor_samples = 0;
     }
 
     onekvm::InputResolution receiver =

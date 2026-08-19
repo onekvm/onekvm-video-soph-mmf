@@ -553,29 +553,12 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
         const int vi_live = cached_signal_present(source);
         if (vi_live == 1)
             source->cached_signal.store(1, std::memory_order_relaxed);
-        /* VENC can keep emitting the last 1080p GOP after HDMI changed and
-           VI IntCnt froze. Treat a dead VI as idle so LT6911 is probed. */
-        if (vi_live == 0) {
+        /* Do not I2C on the live packet path. The HDMI watcher owns
+           rebuilds; probing here interrupts CSI and flashes 无 HDMI. */
+        if (vi_live == 0)
             source->failures++;
-            const int rebuilt = maybe_rebuild_for_hdmi_change(
-                source, error, error_capacity);
-            if (rebuilt != 0) {
-                encoder->placeholder_frames = false;
-                invalidate_stale_encoder(encoder);
-                return -1;
-            }
-        } else {
+        else
             source->failures = 0;
-            /* 800→1080 keeps VI IntCnt ticking on CSI errors. Still
-               probe so CSIBDG can grow before 1920-wide frames pile up. */
-            const int rebuilt = maybe_rebuild_for_hdmi_change(
-                source, error, error_capacity);
-            if (rebuilt != 0) {
-                encoder->placeholder_frames = false;
-                invalidate_stale_encoder(encoder);
-                return -1;
-            }
-        }
         packet->data = output_data;
         packet->data_size = static_cast<uint64_t>(result);
         packet->codec = public_codec(encoder->codec_type);
@@ -590,10 +573,13 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
        HDMI is gone. A recent live AU also suppresses the artwork: the VI
        FrameRate field stays 0 for the first second, and inserting a canned
        IDR between live P frames breaks the decoder. */
+    const uint64_t live_ns = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            kVencLiveRecentWindow).count());
     const bool live_recent = last_live != 0 &&
-        now >= last_live && now - last_live <= 300000000ull;
+        now >= last_live && now - last_live <= live_ns;
     const bool venc_stale = last_live != 0 &&
-        now > last_live && now - last_live > 300000000ull;
+        now > last_live && now - last_live > live_ns;
     const bool missing_signal =
         source->out_of_range.load(std::memory_order_relaxed) ||
         cached_signal_present(source) == 0;

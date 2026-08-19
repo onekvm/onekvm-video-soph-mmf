@@ -45,6 +45,10 @@ ONEKVM_VIDEO_INTERNAL inline constexpr auto kHDMIChangeGrowProbeInterval =
 ONEKVM_VIDEO_INTERNAL inline constexpr auto kSignalProbeInterval = std::chrono::seconds(10);
 ONEKVM_VIDEO_INTERNAL inline constexpr auto kNoSignalProbeInterval = std::chrono::seconds(1);
 ONEKVM_VIDEO_INTERNAL inline constexpr auto kRecentFrameSignalWindow = std::chrono::milliseconds(500);
+/* Inserting the canned no-signal IDR between live P-frames makes the
+   picture jump.  Wait out a short GetStream stall first. */
+ONEKVM_VIDEO_INTERNAL inline constexpr auto kVencLiveRecentWindow =
+    std::chrono::milliseconds(1500);
 ONEKVM_VIDEO_INTERNAL inline constexpr auto kInitialResolutionSampleDelay = std::chrono::milliseconds(20);
 /* Prefer /proc/cvitek/vi. Reading vi_dbg holds the VI debug handler and
    can stall CSI (VIFPS drops to 0 while SOF/FE counters freeze). */
@@ -73,6 +77,7 @@ struct ONEKVM_VIDEO_INTERNAL Source {
     onekvm::InputResolution reported_input{};
     onekvm::InputResolution pending_receiver{};
     unsigned hdmi_blanking_samples = 0;
+    unsigned hdmi_oor_samples = 0;
     int capture_width = 0;
     int capture_height = 0;
     std::atomic<uint64_t> cached_input_size{0};
