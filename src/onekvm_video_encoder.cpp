@@ -422,7 +422,7 @@ int bind_encoder_to_source_locked(Encoder *encoder, Source *source,
                   "bound encoding requires an idle source and H.264/H.265 encoder");
         return -1;
     }
-    const auto [width, height] = resolution_size(source->config.resolution);
+    const auto [width, height] = source_output_size(source);
     if (configure_encoder(encoder, width, height, error, error_capacity) != 0)
         return -1;
     /* Core binds every iteration. Stay unbound while showing the no-signal
@@ -466,7 +466,7 @@ int encode_bound_placeholder(Encoder *encoder, Source *source,
     encoder->placeholder_frames = true;
     if (encoder->channel >= 0)
         mmf::h26x_reader_want_idr(encoder->channel);
-    const auto [width, height] = resolution_size(source->config.resolution);
+    const auto [width, height] = source_output_size(source);
     const uint8_t *encoded = nullptr;
     size_t encoded_size = 0;
     if (no_signal_h264(width, height, &encoded, &encoded_size) != 0 ||

@@ -31,6 +31,48 @@ constexpr bool supported_input_resolution(InputResolution resolution) {
     return false;
 }
 
+/* Config still stores an int: 0 = follow HDMI, 1080/720/480 are the
+   historical height aliases, and width*10000+height packs the rest. */
+constexpr int kPackedResolutionScale = 10000;
+
+constexpr InputResolution decode_target_resolution(int code)
+{
+    if (code == 1080)
+        return {1920, 1080};
+    if (code == 720)
+        return {1280, 720};
+    if (code == 480)
+        return {640, 480};
+    if (code >= kPackedResolutionScale) {
+        const InputResolution packed{
+            static_cast<uint32_t>(code / kPackedResolutionScale),
+            static_cast<uint32_t>(code % kPackedResolutionScale),
+        };
+        if (supported_input_resolution(packed))
+            return packed;
+    }
+    return {};
+}
+
+constexpr bool valid_target_resolution_code(int code)
+{
+    return code == 0 || decode_target_resolution(code).width != 0;
+}
+
+constexpr InputResolution target_output_resolution(
+    int code, InputResolution input)
+{
+    if (code <= 0) {
+        if (supported_input_resolution(input))
+            return input;
+        return {1920, 1080};
+    }
+    const auto decoded = decode_target_resolution(code);
+    if (decoded.width != 0)
+        return decoded;
+    return {1920, 1080};
+}
+
 enum class HdmiInputClass {
     None,
     Supported,

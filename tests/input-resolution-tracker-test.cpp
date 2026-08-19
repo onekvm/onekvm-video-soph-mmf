@@ -31,5 +31,21 @@ int main() {
     if (classify_hdmi_input({3840, 2160}) != HdmiInputClass::OutOfRange) return 15;
     if (classify_hdmi_input({1921, 1080}) != HdmiInputClass::None) return 16;
 
+    if (decode_target_resolution(1080) != InputResolution{1920, 1080}) return 17;
+    if (decode_target_resolution(720) != InputResolution{1280, 720}) return 18;
+    if (decode_target_resolution(480) != InputResolution{640, 480}) return 19;
+    if (decode_target_resolution(12801024) != InputResolution{1280, 1024}) return 20;
+    if (decode_target_resolution(8540480).width != 0) return 21;
+    if (!valid_target_resolution_code(0) || !valid_target_resolution_code(12800800))
+        return 22;
+    if (valid_target_resolution_code(854) || valid_target_resolution_code(13660768))
+        return 23;
+    if (target_output_resolution(0, {1280, 720}) != InputResolution{1280, 720})
+        return 24;
+    if (target_output_resolution(0, {1366, 768}) != InputResolution{1920, 1080})
+        return 25;
+    if (target_output_resolution(1080, {1280, 720}) != InputResolution{1920, 1080})
+        return 26;
+
     return 0;
 }

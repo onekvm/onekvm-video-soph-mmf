@@ -21,14 +21,18 @@ void set_error(char *error, uint32_t capacity, const char *format, ...) {
 }
 
 std::pair<int, int> resolution_size(int resolution) {
-    switch (resolution) {
-    case 720:
-        return {1280, 720};
-    case 480:
-        return {640, 480};
-    default:
+    const auto out = onekvm::target_output_resolution(resolution, {});
+    return {static_cast<int>(out.width), static_cast<int>(out.height)};
+}
+
+std::pair<int, int> source_output_size(const Source *source) {
+    if (source == nullptr)
         return {1920, 1080};
-    }
+    if (source->capture_width > 0 && source->capture_height > 0)
+        return {source->capture_width, source->capture_height};
+    const auto out = onekvm::target_output_resolution(
+        source->config.resolution, source->input_resolution.current());
+    return {static_cast<int>(out.width), static_cast<int>(out.height)};
 }
 
 bool read_vi_fps(Source *source, double *fps) {
@@ -217,6 +221,8 @@ void close_source(Source *source) {
     g_mmf_generation.fetch_add(1, std::memory_order_acq_rel);
     source->channel = -1;
     source->initialized = false;
+    source->capture_width = 0;
+    source->capture_height = 0;
     source->no_signal_frame.clear();
 }
 
@@ -231,8 +237,12 @@ int open_source(Source *source, const onekvm_video_source_config_v1 *config,
     const onekvm::InputResolution input = requested_input != nullptr &&
         onekvm::supported_input_resolution(*requested_input)
         ? *requested_input : initial_input_resolution();
-    std::fprintf(stderr, "OneKVM: configuring HDMI input %ux%u\n",
-                 input.width, input.height);
+    const auto output = onekvm::target_output_resolution(
+        config->resolution, input);
+    const int width = static_cast<int>(output.width);
+    const int height = static_cast<int>(output.height);
+    std::fprintf(stderr, "OneKVM: configuring HDMI input %ux%u, output %dx%d\n",
+                 input.width, input.height, width, height);
     if (onekvm_lt6911_set_active_size(input.width, input.height) != 0) {
         set_error(error, error_capacity, "invalid LT6911 input size %ux%u",
                   input.width, input.height);
@@ -254,7 +264,6 @@ int open_source(Source *source, const onekvm_video_source_config_v1 *config,
         set_error(error, error_capacity, "no free MMF VI channel");
         return -1;
     }
-    const auto [width, height] = resolution_size(config->resolution);
     mmf::set_capture_mirror(channel, false);
     mmf::set_capture_flip(channel, false);
     const int fps = config->fps > 0 ? static_cast<int>(config->fps) : 60;
@@ -267,6 +276,8 @@ int open_source(Source *source, const onekvm_video_source_config_v1 *config,
     }
     source->channel = channel;
     source->initialized = true;
+    source->capture_width = width;
+    source->capture_height = height;
     source->config = *config;
     source->config.device = nullptr;
     source->failures = 0;
@@ -398,7 +409,10 @@ int32_t source_reset(void *opaque, const onekvm_video_source_config_v1 *config,
         return open_source(source, config, error, error_capacity);
     }
     release_source_frame(source);
-    const auto [width, height] = resolution_size(config->resolution);
+    const auto output = onekvm::target_output_resolution(
+        config->resolution, source->input_resolution.current());
+    const int width = static_cast<int>(output.width);
+    const int height = static_cast<int>(output.height);
     const int fps = config->fps > 0 ? static_cast<int>(config->fps) : 60;
     std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
     int result = mmf::reset_capture_channel(
@@ -409,6 +423,8 @@ int32_t source_reset(void *opaque, const onekvm_video_source_config_v1 *config,
     }
     source->config = *config;
     source->config.device = nullptr;
+    source->capture_width = width;
+    source->capture_height = height;
     source->failures = 0;
     source->last_recovery = {};
     source->no_signal_frame.clear();
@@ -419,7 +435,7 @@ int32_t source_reset(void *opaque, const onekvm_video_source_config_v1 *config,
 
 int no_signal_frame(Source *source, onekvm_video_frame_v1 *frame,
                     char *error, uint32_t error_capacity) {
-    const auto [width, height] = resolution_size(source->config.resolution);
+    const auto [width, height] = source_output_size(source);
     size_t bytes = 0;
     if (!nv21_size(width, height, &bytes)) {
         set_error(error, error_capacity, "invalid no-signal frame size %dx%d",
@@ -497,7 +513,7 @@ int32_t source_read(void *opaque, onekvm_video_frame_v1 *frame,
         if (due) {
             source->failures = 0;
             source->last_recovery = now;
-            const auto [reset_width, reset_height] = resolution_size(source->config.resolution);
+            const auto [reset_width, reset_height] = source_output_size(source);
             const int reset_fps = source->config.fps > 0
                 ? static_cast<int>(source->config.fps) : 60;
             int reset = mmf::reset_capture_channel(

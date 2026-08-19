@@ -65,6 +65,8 @@ struct ONEKVM_VIDEO_INTERNAL Source {
     std::atomic_flag signal_probe_running = ATOMIC_FLAG_INIT;
     onekvm::InputResolutionTracker input_resolution;
     onekvm::InputResolution reported_input{};
+    int capture_width = 0;
+    int capture_height = 0;
     std::atomic<uint64_t> cached_input_size{0};
     std::atomic<int32_t> cached_input_fps{0};
     std::atomic<bool> out_of_range{false};
@@ -97,6 +99,7 @@ extern ONEKVM_VIDEO_INTERNAL std::atomic<uint64_t> g_mmf_generation;
 ONEKVM_VIDEO_INTERNAL void set_error(
     char *error, uint32_t capacity, const char *format, ...);
 ONEKVM_VIDEO_INTERNAL std::pair<int, int> resolution_size(int resolution);
+ONEKVM_VIDEO_INTERNAL std::pair<int, int> source_output_size(const Source *source);
 ONEKVM_VIDEO_INTERNAL uint64_t monotonic_ns();
 ONEKVM_VIDEO_INTERNAL bool nv21_size(int width, int height, size_t *size);
 /* Caller must hold source->mutex. 1 = rebuilt, 0 = no change, -1 = failed. */

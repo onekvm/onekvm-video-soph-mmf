@@ -8,6 +8,7 @@
 - 设备卡死时 `onekvm-server` 可能 SIGKILL 无效，只能 `reboot -f`。
 - 0 FPS 可能只是显示器休眠，不是进程卡死；看门狗只认 D-Bus 心跳。
 - 超范围 HDMI（1366x768 / 1440p / 4K）不得按旧几何继续采，应占位并报告实测尺寸。
+- `video.resolution=0` 时 VI/VENC 必须跟当前支持的 HDMI 输入；480 是 640x480，不是 854x480。
 - 活 VENC 通道上的 `SetChnAttr` / `RequestIDR` / `close_encoder` 只能在 reader 线程、两次 `GetStream` 之间做。HTTP/`g_mmf_mutex` 上调会和 `GetStream` 抢 `EnterVcodecLock`。
 
 ## 2026-08-19：目标 FPS 热改（r17 已上 137）
