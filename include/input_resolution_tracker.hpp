@@ -106,17 +106,43 @@ enum class InputResolutionObservation {
 
 constexpr unsigned kHDMIChangeFailureThreshold = 3;
 
-/* Probe LT6911 only after capture/encode has already gone idle. A live
- * hitch of a few empty VENC reads must not touch internal registers. */
+constexpr uint64_t resolution_pixels(InputResolution resolution)
+{
+    return static_cast<uint64_t>(resolution.width) *
+           static_cast<uint64_t>(resolution.height);
+}
+
+/* CSIBDG must never be smaller than the MIPI frame about to arrive.
+   Grow immediately when HDMI timing is already larger (800→1080).
+   Shrink only when CSI active size has actually followed (1080→800). */
+constexpr InputResolution choose_vi_receiver_size(
+    InputResolution csi,
+    InputResolution hdmi,
+    InputResolution current)
+{
+    const bool csi_ok = supported_input_resolution(csi);
+    const bool hdmi_ok = supported_input_resolution(hdmi);
+    if (csi_ok && hdmi_ok) {
+        if (resolution_pixels(hdmi) > resolution_pixels(csi))
+            return hdmi;
+        return csi;
+    }
+    if (hdmi_ok && resolution_pixels(hdmi) > resolution_pixels(current))
+        return hdmi;
+    if (csi_ok)
+        return csi;
+    return {};
+}
+
+/* Interval is the only hard gate. 800→1080 keeps IntCnt ticking on CSI
+   errors, so "recent frames" must not hide an upscale. */
 constexpr bool hdmi_resolution_probe_due(
     unsigned failures,
     bool recent_frames,
     bool interval_elapsed)
 {
-    if (recent_frames)
-        return false;
-    if (failures < kHDMIChangeFailureThreshold)
-        return false;
+    (void)failures;
+    (void)recent_frames;
     return interval_elapsed;
 }
 

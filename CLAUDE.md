@@ -10,7 +10,7 @@
 - 超范围 HDMI（1366x768 / 1440p / 4K）不得按旧几何继续采，应占位并报告实测尺寸。
 - `video.resolution=0` 时 VI/VENC 必须跟当前支持的 HDMI 输入；480 是 640x480，不是 854x480。
 - VPSS/VENC 画面宽保持真实 HDMI/目标尺寸（800 就是 800）。64 对齐只用于 VB stride，不要改 `u32PicWidth`。
-- 目标分辨率只改 VPSS/VENC。VI/CSI 必须跟 LT6911 **实际 CSI 出帧**，不能只信 HDMI 时序。主机 800x600 时 CSI 仍可能是 1920，VI 配成 800 会 `frm width greater than setting(800)`。
+- 目标分辨率只改 VPSS/VENC。VI/CSI：HDMI 变大（800→1080）立刻放大接收端；HDMI 变小要等 CSI 有效尺寸跟上再缩。只信 HDMI 会把 VI 配成 800 而 MIPI 仍 1920；只信 CSI 会在 800→1080 时把接收端留在 800。
 - 活 VENC 通道上的 `SetChnAttr` / `RequestIDR` / `close_encoder` 只能在 reader 线程、两次 `GetStream` 之间做。HTTP/`g_mmf_mutex` 上调会和 `GetStream` 抢 `EnterVcodecLock`。
 
 ## 2026-08-19：目标 FPS 热改（r17 已上 137）

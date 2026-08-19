@@ -19,6 +19,8 @@
 #endif
 #include "cvi_sns_ctrl.h"
 
+void onekvm_lt6911_get_active_size(uint32_t *width, uint32_t *height);
+
 #define LT6911_I2C_DEV 4
 #define LT6911_I2C_BANK_ADDR 0xff
 #define LT6911_CHIP_ID_ADDR_H 0xa000
@@ -272,26 +274,45 @@ int lt6911_get_input_size(VI_PIPE pipe, uint32_t *width, uint32_t *height)
 		goto error;
 	d_width *= 2;
 
-	/* CSI receiver width must match the MIPI frame on the wire, not HDMI
-	 * timing. Host 800x600 can still leave LT6911 CSI at 1920; programming
-	 * VI to 800 then logs "frm width greater than setting(800)". Prefer
-	 * CSI active size. HDMI timing is only used when CSI is down so a
-	 * real mode change can still be discovered. */
-	if (supported_active_size(c_width, c_height)) {
-		*width = c_width;
-		*height = c_height;
-	} else {
-		/* HDMI timing can already be 800x600 while MIPI is still
-		   1920. Do not publish that as the VI/CSI size. */
-		*width = 0;
-		*height = 0;
+	{
+		uint32_t cur_w = 0;
+		uint32_t cur_h = 0;
+		const uint64_t csi_px = (uint64_t)c_width * c_height;
+		const uint64_t hdmi_px = (uint64_t)c_hdmi_width * c_hdmi_height;
+		const uint64_t uxc_px = (uint64_t)uxc_width * uxc_height;
+		const uint64_t d_px = (uint64_t)d_width * d_height;
+		uint64_t cur_px;
+		int csi_ok = supported_active_size(c_width, c_height);
+		int hdmi_ok = supported_active_size(c_hdmi_width, c_hdmi_height);
+		int uxc_ok = supported_active_size(uxc_width, uxc_height);
+		int d_ok = supported_active_size(d_width, d_height);
+
+		onekvm_lt6911_get_active_size(&cur_w, &cur_h);
+		cur_px = (uint64_t)cur_w * cur_h;
+		/* Grow to the largest HDMI/UXC/D timing so 800→1080
+		   reprograms CSIBDG before 1920-wide frames arrive.
+		   Keep CSI when it is larger so 1080→800 does not shrink
+		   the receiver while MIPI is still 1920. */
+		if (hdmi_ok && (!csi_ok || hdmi_px > csi_px) &&
+		    hdmi_px >= cur_px) {
+			*width = c_hdmi_width;
+			*height = c_hdmi_height;
+		} else if (uxc_ok && (!csi_ok || uxc_px > csi_px) &&
+			   uxc_px >= cur_px) {
+			*width = uxc_width;
+			*height = uxc_height;
+		} else if (d_ok && (!csi_ok || d_px > csi_px) &&
+			   d_px >= cur_px) {
+			*width = d_width;
+			*height = d_height;
+		} else if (csi_ok) {
+			*width = c_width;
+			*height = c_height;
+		} else {
+			*width = 0;
+			*height = 0;
+		}
 	}
-	(void)c_hdmi_width;
-	(void)c_hdmi_height;
-	(void)uxc_width;
-	(void)uxc_height;
-	(void)d_width;
-	(void)d_height;
 
 	pthread_mutex_unlock(&g_i2c_lock);
 	return CVI_SUCCESS;

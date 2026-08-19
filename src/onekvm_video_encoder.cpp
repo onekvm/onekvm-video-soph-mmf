@@ -566,6 +566,15 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
             }
         } else {
             source->failures = 0;
+            /* 800→1080 keeps VI IntCnt ticking on CSI errors. Still
+               probe so CSIBDG can grow before 1920-wide frames pile up. */
+            const int rebuilt = maybe_rebuild_for_hdmi_change(
+                source, error, error_capacity);
+            if (rebuilt != 0) {
+                encoder->placeholder_frames = false;
+                invalidate_stale_encoder(encoder);
+                return -1;
+            }
         }
         packet->data = output_data;
         packet->data_size = static_cast<uint64_t>(result);

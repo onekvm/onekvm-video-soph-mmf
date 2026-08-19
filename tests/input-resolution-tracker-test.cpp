@@ -18,11 +18,11 @@ int main() {
         tracker.current() != InputResolution{640, 480}) return 4;
     if (tracker.observe({640, 480}) != InputResolutionObservation::Unchanged) return 5;
 
-    if (hdmi_resolution_probe_due(0, false, true)) return 6;
-    if (hdmi_resolution_probe_due(kHDMIChangeFailureThreshold, true, true)) return 7;
-    if (hdmi_resolution_probe_due(kHDMIChangeFailureThreshold, false, false)) return 8;
-    if (!hdmi_resolution_probe_due(kHDMIChangeFailureThreshold, false, true)) return 9;
-    if (!hdmi_resolution_probe_due(kHDMIChangeFailureThreshold + 2, false, true)) return 10;
+    if (hdmi_resolution_probe_due(0, false, false)) return 6;
+    if (hdmi_resolution_probe_due(0, true, false)) return 7;
+    if (!hdmi_resolution_probe_due(0, false, true)) return 8;
+    if (!hdmi_resolution_probe_due(0, true, true)) return 9;
+    if (!hdmi_resolution_probe_due(kHDMIChangeFailureThreshold, true, true)) return 10;
 
     if (classify_hdmi_input({0, 0}) != HdmiInputClass::None) return 11;
     if (classify_hdmi_input({1920, 1080}) != HdmiInputClass::Supported) return 12;
@@ -46,6 +46,17 @@ int main() {
         return 25;
     if (target_output_resolution(1080, {1280, 720}) != InputResolution{1920, 1080})
         return 26;
+    if (choose_vi_receiver_size({800, 600}, {1920, 1080}, {800, 600}) !=
+        InputResolution{1920, 1080})
+        return 27;
+    if (choose_vi_receiver_size({1920, 1080}, {800, 600}, {1920, 1080}) !=
+        InputResolution{1920, 1080})
+        return 28;
+    if (choose_vi_receiver_size({0, 0}, {1920, 1080}, {800, 600}) !=
+        InputResolution{1920, 1080})
+        return 29;
+    if (choose_vi_receiver_size({0, 0}, {800, 600}, {1920, 1080}).width != 0)
+        return 30;
 
     return 0;
 }
