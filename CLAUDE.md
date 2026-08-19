@@ -14,7 +14,7 @@
 
 `0f14e22`：`set_h26x_output_fps` 只写 `pending_output_fps`；reader 在 `GetStream` 前 `apply_h26x_output_fps`（VBR src=60、dst=目标、gop=fps）再要 IDR。
 真机 r17 + core r7：UI 60→30→60，PID 不变，`/proc/cvitek/venc` `TarFr`/`EncFramePerSec` 跟上。reader 的 printf 可能被 stdout 全缓冲，journal 看不到 `output fps` 不代表没生效。
-审查：同 codec 热路径过宽会把 `Suspend` 变成空操作（reader 空转）。热路径只覆盖 fps/gop；`stop_h26x_reader` 必须 join 再 `DestroyChn`；`!packet_pending` 时 reader 要 sleep。
+审查：同 codec 热路径过宽会把 `Suspend` 变成空操作（reader 空转）。`5e98c87` / r18 已上 137：热路径只覆盖 fps/gop；`stop_h26x_reader` join 再 `DestroyChn`；`!packet_pending` 时 reader sleep。关会话后 VENC 通道消失，进程不空转。
 
 ## 2026-08-18：测试机改分辨率后设备无画面
 
