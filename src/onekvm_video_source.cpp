@@ -325,13 +325,27 @@ int open_source(Source *source, const onekvm_video_source_config_v1 *config,
     return 0;
 }
 
+int recover_source(Source *source, char *error, uint32_t error_capacity) {
+    if (source == nullptr || source->initialized)
+        return 0;
+    const auto want = source->pending_receiver.width != 0
+        ? source->pending_receiver
+        : source->input_resolution.current();
+    const onekvm::InputResolution *requested =
+        want.width != 0 ? &want : nullptr;
+    return open_source(source, &source->config, error, error_capacity,
+                       requested);
+}
+
 int reopen_source_for_input(Source *source, onekvm::InputResolution input,
                             char *error, uint32_t error_capacity) {
     const onekvm_video_source_config_v1 config = source->config;
+    source->pending_receiver = input;
     std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
     close_source(source);
     if (open_source(source, &config, error, error_capacity, &input) != 0)
         return -1;
+    source->pending_receiver = {};
     std::fprintf(stderr, "OneKVM: HDMI input resolution changed to %ux%u\n",
                  input.width, input.height);
     return 0;
@@ -428,11 +442,35 @@ void hdmi_watch_loop(Source *source) {
             break;
         char error[256];
         std::lock_guard<std::mutex> lock(source->mutex);
-        if (!source->initialized ||
-            source->hdmi_watch_stop.load(std::memory_order_relaxed))
+        if (source->hdmi_watch_stop.load(std::memory_order_relaxed))
             continue;
-        (void)maybe_rebuild_for_hdmi_change_now(
-            source, error, sizeof(error));
+        if (!source->initialized) {
+            const auto now = std::chrono::steady_clock::now();
+            if (source->last_recovery.time_since_epoch().count() != 0 &&
+                now - source->last_recovery < kHDMIChangeIdleWindow)
+                continue;
+            source->last_recovery = now;
+            if (recover_source(source, error, sizeof(error)) != 0) {
+                std::fprintf(stderr,
+                             "OneKVM: HDMI watch recover failed: %s\n",
+                             error);
+            } else if (source->initialized) {
+                source->pending_receiver = {};
+            }
+            continue;
+        }
+        /* 1920 is the CSIBDG maximum. Fast-poll only when a grow is
+           still possible or VI has already gone idle. */
+        const bool need_fast =
+            source->input_resolution.current() !=
+                onekvm::InputResolution{1920, 1080} ||
+            source->cached_signal.load(std::memory_order_relaxed) != 1;
+        if (need_fast)
+            (void)maybe_rebuild_for_hdmi_change_now(
+                source, error, sizeof(error));
+        else
+            (void)maybe_rebuild_for_hdmi_change(
+                source, error, sizeof(error));
     }
 }
 

@@ -28,6 +28,7 @@ struct H26xReader {
 	std::atomic<int> pending_gop{0};
 	std::atomic<uint64_t> last_packet_ns{0};
 	std::mutex mu;
+	std::mutex join_mu;
 	std::condition_variable cv;
 	std::deque<H26xQueuedPacket> queue;
 };
@@ -778,8 +779,11 @@ void start_h26x_reader(int ch)
 	if (ch < 0 || ch >= MMF_VENC_MAX_CHN)
 		return;
 	H26xReader &reader = g_readers[ch];
+	std::lock_guard<std::mutex> join_lock(reader.join_mu);
 	if (reader.running.load(std::memory_order_acquire))
 		return;
+	if (reader.thread.joinable())
+		reader.thread.join();
 	reader.stop.store(false, std::memory_order_relaxed);
 	reader.last_packet_ns.store(0, std::memory_order_relaxed);
 	reader.want_idr.store(true, std::memory_order_relaxed);
@@ -867,6 +871,7 @@ void stop_h26x_reader(int ch)
 	H26xReader &reader = g_readers[ch];
 	reader.stop.store(true, std::memory_order_relaxed);
 	reader.cv.notify_all();
+	std::lock_guard<std::mutex> join_lock(reader.join_mu);
 	if (!reader.thread.joinable())
 		return;
 	if (reader.thread.get_id() == std::this_thread::get_id()) {
