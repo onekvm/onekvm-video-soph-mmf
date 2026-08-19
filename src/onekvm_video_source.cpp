@@ -397,12 +397,15 @@ int rebuild_for_hdmi_timing(Source *source, bool force_probe, char *error,
                          "OneKVM: HDMI input %ux%u is out of range\n",
                          reported.width, reported.height);
         }
-        return 0;
+        if (current == onekvm::kMaxViReceiver)
+            return 0;
     }
 
-    const auto receiver =
+    onekvm::InputResolution receiver =
         onekvm::choose_vi_receiver_size(csi, hdmi, current);
-    if (!onekvm::should_rebuild_vi_receiver(current, receiver, csi)) {
+    if (onekvm::should_grow_to_max_vi_receiver(current, hdmi))
+        receiver = onekvm::kMaxViReceiver;
+    if (!onekvm::should_rebuild_vi_receiver(current, receiver, csi, hdmi)) {
         if (kind == onekvm::HdmiInputClass::Supported)
             source->out_of_range.store(false, std::memory_order_relaxed);
         return 0;

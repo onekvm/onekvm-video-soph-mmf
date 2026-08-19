@@ -57,6 +57,8 @@ int main() {
         return 29;
     if (choose_vi_receiver_size({0, 0}, {800, 600}, {1920, 1080}).width != 0)
         return 30;
+    if (choose_vi_receiver_size({800, 600}, {0, 0}, {1920, 1080}).width != 0)
+        return 40;
 
     if (!should_rebuild_vi_receiver(
             {800, 600}, {1920, 1080}, {800, 600}))
@@ -64,8 +66,11 @@ int main() {
     if (should_rebuild_vi_receiver(
             {1920, 1080}, {800, 600}, {1920, 1080}))
         return 32;
+    if (should_rebuild_vi_receiver(
+            {1920, 1080}, {800, 600}, {800, 600}, {0, 0}))
+        return 41;
     if (!should_rebuild_vi_receiver(
-            {1920, 1080}, {800, 600}, {800, 600}))
+            {1920, 1080}, {800, 600}, {800, 600}, {800, 600}))
         return 33;
     if (should_rebuild_vi_receiver(
             {800, 600}, {800, 600}, {800, 600}))
@@ -81,6 +86,14 @@ int main() {
         return 38;
     if (infer_hdmi_mode({1366, 768}) != InputResolution{1366, 768})
         return 39;
+    if (!should_grow_to_max_vi_receiver({800, 600}, {0, 0}))
+        return 42;
+    if (!should_grow_to_max_vi_receiver({800, 600}, {1920, 1080}))
+        return 43;
+    if (should_grow_to_max_vi_receiver({800, 600}, {800, 600}))
+        return 44;
+    if (should_grow_to_max_vi_receiver({1920, 1080}, {0, 0}))
+        return 45;
 
     return 0;
 }

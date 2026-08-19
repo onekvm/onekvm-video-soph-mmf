@@ -112,9 +112,8 @@ constexpr uint64_t resolution_pixels(InputResolution resolution)
            static_cast<uint64_t>(resolution.height);
 }
 
-/* CSIBDG must never be smaller than the MIPI frame about to arrive.
-   Grow immediately when HDMI timing is already larger (800→1080).
-   Shrink only when CSI active size has actually followed (1080→800). */
+constexpr InputResolution kMaxViReceiver{1920, 1080};
+
 /* LT6911C HDMI counters often show half-width and a garbage height for one
    or two samples while the source is locking 1080p. Treat those as the
    matching supported mode so CSIBDG can grow before the first 1920 line. */
@@ -131,6 +130,10 @@ constexpr InputResolution infer_hdmi_mode(InputResolution hdmi)
     return hdmi;
 }
 
+/* CSIBDG must never be smaller than the MIPI frame about to arrive.
+   Grow immediately when HDMI timing is already larger (800→1080).
+   HDMI 0/blanking is a mode change, not a shrink: returning CSI 800
+   while current is 1920 would program CSIBDG to 800 just as 1080 starts. */
 constexpr InputResolution choose_vi_receiver_size(
     InputResolution csi,
     InputResolution hdmi,
@@ -145,20 +148,38 @@ constexpr InputResolution choose_vi_receiver_size(
     }
     if (hdmi_ok && resolution_pixels(hdmi) > resolution_pixels(current))
         return hdmi;
-    if (csi_ok)
+    if (csi_ok) {
+        if (hdmi.width == 0 &&
+            resolution_pixels(csi) < resolution_pixels(current))
+            return {};
         return csi;
+    }
     return {};
+}
+
+/* Leave any sub-1080 mode for 1920 as soon as HDMI is no longer that
+   mode (blanking, garbage, or a new timing). Overflow is worse than
+   a brief 1920 CSIBDG. */
+constexpr bool should_grow_to_max_vi_receiver(
+    InputResolution current, InputResolution hdmi)
+{
+    if (current == kMaxViReceiver)
+        return false;
+    if (current.width == 0)
+        return false;
+    return hdmi != current;
 }
 
 constexpr bool should_rebuild_vi_receiver(
     InputResolution current,
     InputResolution receiver,
-    InputResolution csi)
+    InputResolution csi,
+    InputResolution hdmi = {})
 {
     if (receiver.width == 0 || receiver == current)
         return false;
     if (resolution_pixels(receiver) < resolution_pixels(current))
-        return csi == receiver;
+        return csi == receiver && hdmi == receiver;
     return true;
 }
 
