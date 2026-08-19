@@ -233,6 +233,14 @@ int stop_capture_pipeline(void)
 	return s32Ret;
 }
 
+void aligned_capture_size(int width, int height, int *out_width, int *out_height)
+{
+	if (out_width != nullptr)
+		*out_width = ALIGN(width, DEFAULT_ALIGN);
+	if (out_height != nullptr)
+		*out_height = height;
+}
+
 static int create_capture_channel(int ch, int width, int height, int format, int fps) {
 	uint32_t pool_size_out = 0;
 	int pool_id = -1;
@@ -283,8 +291,9 @@ static int create_capture_channel(int ch, int width, int height, int format, int
 	/* A depth of one prevents VPSS from retaining an extra completed frame.
 	 * At 60 Hz that stale frame costs about 16.7 ms before encoding starts. */
 	const int depth = MMF_VPSS_LOW_LATENCY_DEPTH;
-	int width_out = ALIGN(width, DEFAULT_ALIGN);
-	int height_out = height;
+	int width_out = 0;
+	int height_out = 0;
+	aligned_capture_size(width, height, &width_out, &height_out);
 	PIXEL_FORMAT_E format_out = (PIXEL_FORMAT_E)format;
 	const bool mirror = g_capture_options.mirror[ch];
 	const bool flip = g_capture_options.flip[ch];

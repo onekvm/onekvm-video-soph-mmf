@@ -46,6 +46,7 @@ int shutdown(void);
 int find_free_capture_channel(void);
 int start_capture_pipeline(void);
 int stop_capture_pipeline(void);
+void aligned_capture_size(int width, int height, int *out_width, int *out_height);
 int open_capture_channel(int ch, int width, int height, int format, int fps);
 int close_capture_channel(int ch);
 int close_all_capture_channels(void);

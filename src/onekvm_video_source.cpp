@@ -239,8 +239,9 @@ int open_source(Source *source, const onekvm_video_source_config_v1 *config,
         ? *requested_input : initial_input_resolution();
     const auto output = onekvm::target_output_resolution(
         config->resolution, input);
-    const int width = static_cast<int>(output.width);
-    const int height = static_cast<int>(output.height);
+    int width = static_cast<int>(output.width);
+    int height = static_cast<int>(output.height);
+    mmf::aligned_capture_size(width, height, &width, &height);
     std::fprintf(stderr, "OneKVM: configuring HDMI input %ux%u, output %dx%d\n",
                  input.width, input.height, width, height);
     if (onekvm_lt6911_set_active_size(input.width, input.height) != 0) {
@@ -411,8 +412,9 @@ int32_t source_reset(void *opaque, const onekvm_video_source_config_v1 *config,
     release_source_frame(source);
     const auto output = onekvm::target_output_resolution(
         config->resolution, source->input_resolution.current());
-    const int width = static_cast<int>(output.width);
-    const int height = static_cast<int>(output.height);
+    int width = static_cast<int>(output.width);
+    int height = static_cast<int>(output.height);
+    mmf::aligned_capture_size(width, height, &width, &height);
     const int fps = config->fps > 0 ? static_cast<int>(config->fps) : 60;
     std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
     int result = mmf::reset_capture_channel(
