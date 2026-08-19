@@ -42,10 +42,44 @@ int bitrate(int width, int height, double quality) {
     return std::max(100, static_cast<int>(static_cast<double>(base) * quality));
 }
 
+static int normalized_output_fps(int fps)
+{
+    if (fps <= 0)
+        return 30;
+    if (fps > 60)
+        return 60;
+    return fps;
+}
+
+static int normalized_gop(int gop, int fps)
+{
+    if (gop > 0)
+        return gop;
+    return std::max(1, fps);
+}
+
+static bool encoder_rc_unchanged(const onekvm_video_encoder_config_v1 &cur,
+                                 const onekvm_video_encoder_config_v1 &next)
+{
+    return cur.quality_factor == next.quality_factor &&
+           cur.bitrate_kbps == next.bitrate_kbps &&
+           cur.initial_qp == next.initial_qp &&
+           cur.min_qp == next.min_qp &&
+           cur.max_qp == next.max_qp;
+}
+
 void close_encoder(Encoder *encoder) {
     if (!encoder->initialized) {
         return;
     }
+    /* Join the VENC reader before taking g_mmf_mutex or DestroyChn.
+       GetStream holds EnterVcodecLock; detaching then destroying deadlocks.
+       Skip stale handles: the channel number may already belong to a
+       newer encoder after an MMF generation bump. */
+    if (encoder->codec_type != 0 && encoder->channel >= 0 &&
+        encoder->mmf_generation ==
+            g_mmf_generation.load(std::memory_order_acquire))
+        mmf::stop_h26x_reader(encoder->channel);
     std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
     const bool live = encoder->mmf_generation ==
         g_mmf_generation.load(std::memory_order_acquire);
@@ -259,22 +293,27 @@ int32_t encoder_reset(void *opaque, const onekvm_video_encoder_config_v1 *config
     std::lock_guard<std::mutex> lock(encoder->mutex);
     const auto next = normalized_encoder_config(config);
     const int next_codec = codec_type(config->codec);
-    /* Cube cannot close/recreate a live VENC channel: GetStream holds
-       EnterVcodecLock on the reader thread. Same-codec FPS/GOP updates
-       are posted for that thread to apply between GetStream calls. */
+    /* Cube cannot close/recreate a live VENC channel from this thread:
+       GetStream holds EnterVcodecLock on the reader. Only fps/gop changes
+       are posted for that thread. Suspend and quality/bitrate/QP still
+       close the channel — after stop_h26x_reader joins. */
     if (encoder->initialized && encoder->codec_type != 0 &&
-        encoder->codec_type == next_codec && encoder->channel >= 0) {
-        int fps = next.fps > 0 ? next.fps : 30;
-        if (fps > 60)
-            fps = 60;
-        const int gop = next.gop > 0 ? next.gop : std::max(1, fps);
-        if (mmf::set_h26x_output_fps(encoder->channel, fps, gop) != 0) {
-            set_error(error, error_capacity, "queue VENC output fps %d failed", fps);
-            return -1;
+        encoder->codec_type == next_codec && encoder->channel >= 0 &&
+        encoder_rc_unchanged(encoder->config, next)) {
+        const int fps = normalized_output_fps(next.fps);
+        const int gop = normalized_gop(next.gop, fps);
+        const int cur_fps = normalized_output_fps(encoder->config.fps);
+        const int cur_gop = normalized_gop(encoder->config.gop, cur_fps);
+        if (fps != cur_fps || gop != cur_gop) {
+            if (mmf::set_h26x_output_fps(encoder->channel, fps, gop) != 0) {
+                set_error(error, error_capacity,
+                          "queue VENC output fps %d failed", fps);
+                return -1;
+            }
+            encoder->config = next;
+            encoder->codec_type = next_codec;
+            return 0;
         }
-        encoder->config = next;
-        encoder->codec_type = next_codec;
-        return 0;
     }
     close_encoder(encoder);
     encoder->config = next;

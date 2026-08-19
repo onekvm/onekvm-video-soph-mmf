@@ -8,6 +8,13 @@
 - 设备卡死时 `onekvm-server` 可能 SIGKILL 无效，只能 `reboot -f`。
 - 0 FPS 可能只是显示器休眠，不是进程卡死；看门狗只认 D-Bus 心跳。
 - 超范围 HDMI（1366x768 / 1440p / 4K）不得按旧几何继续采，应占位并报告实测尺寸。
+- 活 VENC 通道上的 `SetChnAttr` / `RequestIDR` / `close_encoder` 只能在 reader 线程、两次 `GetStream` 之间做。HTTP/`g_mmf_mutex` 上调会和 `GetStream` 抢 `EnterVcodecLock`。
+
+## 2026-08-19：目标 FPS 热改（r17 已上 137）
+
+`0f14e22`：`set_h26x_output_fps` 只写 `pending_output_fps`；reader 在 `GetStream` 前 `apply_h26x_output_fps`（VBR src=60、dst=目标、gop=fps）再要 IDR。
+真机 r17 + core r7：UI 60→30→60，PID 不变，`/proc/cvitek/venc` `TarFr`/`EncFramePerSec` 跟上。reader 的 printf 可能被 stdout 全缓冲，journal 看不到 `output fps` 不代表没生效。
+审查：同 codec 热路径过宽会把 `Suspend` 变成空操作（reader 空转）。热路径只覆盖 fps/gop；`stop_h26x_reader` 必须 join 再 `DestroyChn`；`!packet_pending` 时 reader 要 sleep。
 
 ## 2026-08-18：测试机改分辨率后设备无画面
 
@@ -15,7 +22,7 @@
 
 - 设备 `10.100.99.137`（NanoKVM Cube，`admin` / `no_password`）
 - 被采集主机 `10.100.99.99`（KDE Wayland / kwin，用户 `samlm` seat0）
-- **测试机 HDMI-A-1 当前是 `800x600@60`，不是 1080p。** 该口首选模式仍是 `1920x1080@60`；内置 eDP-1 已 disable。
+- 测试机 HDMI-A-1 已改回 `1920x1080@60`（mode 8）。720p 热切换用 mode 23。
 - HID 已连接，键盘灯 `known=true`，说明 USB gadget 正常
 - `GET /api/status`：`video.active=true`，`hdmi_connected=false`，`actual_fps=0`，`input_width/height=1920x1080`（设备仍按旧的 1080p 几何采集）
 - ATX `pwr_led=false`（该 GPIO 不能用来判断 99.99 是否开机）
@@ -31,13 +38,12 @@
 3. 绑定路径永远不会去读 LT6911 HDMI 时序
 4. 管线停在旧的 1920x1080 上
 
-### 已做修改（未上机）
+### 已做修改（r15 已上机）
 
-绑定空闲读包和 raw `source_read` 共用 `maybe_rebuild_for_hdmi_change()`：
-出帧停止超过 500ms、连续失败 ≥ 3、距上次探测 ≥ 2s 后才读 LT6911；
-两次稳定采样且分辨率变化才 `reopen` 整个 MMF 管线。
-
-Host 单测：`g++ -std=c++17 -I include tests/input-resolution-tracker-test.cpp` 已通过。
+绑定空闲读包和 raw `source_read` 共用 `maybe_rebuild_for_hdmi_change()`。
+`0e8fd87`：VENC 也停时占位图路径必须先 `failures++` 再 `maybe_rebuild`，否则永远不探 LT6911。
+`261f1bb`：`recent_frames` 改看 VI IntCnt，避免活流 GetStream 卡死时误探 LT6911。
+2026-08-19 r16 真机 1080↔720 双向约 1–3s 重建，画面恢复。
 
 ### 2026-08-18 部署记录
 

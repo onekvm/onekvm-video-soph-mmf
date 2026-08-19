@@ -822,8 +822,13 @@ void start_h26x_reader(int ch)
 			}
 			const int got = read_latest_h26x_packet(
 				ch, scratch.data(), static_cast<int>(scratch.size()));
-			if (got <= 0)
+			if (got <= 0) {
+				std::unique_lock<std::mutex> lock(self.mu);
+				self.cv.wait_for(lock, std::chrono::milliseconds(5), [&] {
+					return self.stop.load(std::memory_order_relaxed);
+				});
 				continue;
+			}
 			const bool key = annexb_has_idr(
 				scratch.data(), static_cast<std::size_t>(got));
 			if (self.want_idr.load(std::memory_order_relaxed) && !key)
@@ -862,8 +867,13 @@ void stop_h26x_reader(int ch)
 	H26xReader &reader = g_readers[ch];
 	reader.stop.store(true, std::memory_order_relaxed);
 	reader.cv.notify_all();
-	if (reader.thread.joinable())
+	if (!reader.thread.joinable())
+		return;
+	if (reader.thread.get_id() == std::this_thread::get_id()) {
 		reader.thread.detach();
+		return;
+	}
+	reader.thread.join();
 }
 
 int take_ready_h26x_packet(int ch, uint8_t *dst, int capacity, bool *key_frame)
