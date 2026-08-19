@@ -12,7 +12,7 @@
 - VPSS/VENC 画面宽保持真实 HDMI/目标尺寸（800 就是 800）。64 对齐只用于 VB stride，不要改 `u32PicWidth`。
 - 目标分辨率只改 VPSS/VENC。VI/CSI：HDMI 变大（800→1080）立刻放大接收端；HDMI 变小要等 CSI 有效尺寸跟上再缩。只信 HDMI 会把 VI 配成 800 而 MIPI 仍 1920；只信 CSI 会在 800→1080 时把接收端留在 800。
 - 没有 WebRTC 消费者时 Core `videoLoop` 停在 `waitForConsumer`，不会调 `maybe_rebuild`。HDMI 探测必须在 MMF source 自己的 watcher 里跑。
-- r29 `33d9ca2`：HDMI `0x0` 时禁止按 CSI 800 缩小 CSIBDG（否则 800→1080 会先长到 1920 再缩回 800，刷 `setting(800)`）。1080 只 2s 探一次；100ms + VI=0 会把 LT6911 打停，重启 onekvm 不够，要 `reboot -f`。
+- r30 `607d56b`：800 稳态禁止 100ms I2C（会读到 HDMI=0 再拆到 1920，画面抖）。掉线才快探；HDMI 空白连续 3 次才放大。HDMI `0x0` 禁止按 CSI 缩小。LT6911 被 I2C 打停后只能 `reboot -f`。
 - 活 VENC 通道上的 `SetChnAttr` / `RequestIDR` / `close_encoder` 只能在 reader 线程、两次 `GetStream` 之间做。HTTP/`g_mmf_mutex` 上调会和 `GetStream` 抢 `EnterVcodecLock`。
 
 ## 2026-08-19：目标 FPS 热改（r17 已上 137）
