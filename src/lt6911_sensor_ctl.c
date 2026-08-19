@@ -280,16 +280,18 @@ int lt6911_get_input_size(VI_PIPE pipe, uint32_t *width, uint32_t *height)
 	if (supported_active_size(c_width, c_height)) {
 		*width = c_width;
 		*height = c_height;
-	} else if (supported_active_size(c_hdmi_width, c_hdmi_height)) {
-		*width = c_hdmi_width;
-		*height = c_hdmi_height;
-	} else if (supported_active_size(uxc_width, uxc_height)) {
-		*width = uxc_width;
-		*height = uxc_height;
 	} else {
-		*width = d_width;
-		*height = d_height;
+		/* HDMI timing can already be 800x600 while MIPI is still
+		   1920. Do not publish that as the VI/CSI size. */
+		*width = 0;
+		*height = 0;
 	}
+	(void)c_hdmi_width;
+	(void)c_hdmi_height;
+	(void)uxc_width;
+	(void)uxc_height;
+	(void)d_width;
+	(void)d_height;
 
 	pthread_mutex_unlock(&g_i2c_lock);
 	return CVI_SUCCESS;
