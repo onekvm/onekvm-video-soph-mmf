@@ -1,6 +1,6 @@
 # onekvm-nanokvm-mmf 约束
 
-本文件只放仍然约束下次行为的规则。排查流水账和待办在仓库外 `../local-docs/`（已 gitignore）。git 里的 TODO 文件不要删。
+本文件只放仍然约束下次行为的规则。排查流水账和待办在本仓库 `local-docs/`（已 gitignore）。git 里的 TODO 文件不要删。
 
 ## 部署
 
