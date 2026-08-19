@@ -1,5 +1,7 @@
 #include "onekvm_video_backend_internal.hpp"
 
+#include <exception>
+
 #pragma GCC visibility push(hidden)
 namespace onekvm::video_backend {
 
@@ -94,13 +96,34 @@ bool nv21_size(int width, int height, size_t *size) {
     return true;
 }
 
-bool read_hdmi_input(onekvm::InputResolution *resolution) {
-    uint32_t width = 0;
-    uint32_t height = 0;
-    if (resolution == nullptr || lt6911_get_input_size(0, &width, &height) != 0)
+bool read_hdmi_timing(onekvm::InputResolution *csi,
+                      onekvm::InputResolution *hdmi) {
+    onekvm_lt6911_input_timing timing{};
+    if (csi == nullptr || hdmi == nullptr)
         return false;
-    *resolution = {width, height};
+    if (lt6911_get_input_timing(0, &timing) != 0)
+        return false;
+    *csi = {timing.csi_width, timing.csi_height};
+    *hdmi = {timing.hdmi_width, timing.hdmi_height};
     return true;
+}
+
+bool read_hdmi_input(onekvm::InputResolution *resolution) {
+    onekvm::InputResolution csi{};
+    onekvm::InputResolution hdmi{};
+    if (resolution == nullptr || !read_hdmi_timing(&csi, &hdmi))
+        return false;
+    const auto chosen = onekvm::choose_vi_receiver_size(csi, hdmi, {});
+    if (chosen.width != 0) {
+        *resolution = chosen;
+        return true;
+    }
+    if (hdmi.width != 0) {
+        *resolution = hdmi;
+        return true;
+    }
+    *resolution = csi;
+    return csi.width != 0;
 }
 
 bool read_supported_input_resolution(onekvm::InputResolution *resolution) {
@@ -314,8 +337,8 @@ int reopen_source_for_input(Source *source, onekvm::InputResolution input,
     return 0;
 }
 
-int maybe_rebuild_for_hdmi_change(Source *source, char *error,
-                                  uint32_t error_capacity) {
+int rebuild_for_hdmi_timing(Source *source, bool force_probe, char *error,
+                            uint32_t error_capacity) {
     if (source == nullptr)
         return 0;
 
@@ -330,6 +353,7 @@ int maybe_rebuild_for_hdmi_change(Source *source, char *error,
 
     const auto now = std::chrono::steady_clock::now();
     const bool interval_elapsed =
+        force_probe ||
         source->last_hdmi_probe.time_since_epoch().count() == 0 ||
         now - source->last_hdmi_probe >= kHDMIChangeProbeInterval;
     if (!onekvm::hdmi_resolution_probe_due(
@@ -339,42 +363,93 @@ int maybe_rebuild_for_hdmi_change(Source *source, char *error,
 
     source->last_hdmi_probe = now;
 
-    /* LT6911C internal-register access can interrupt live CSI output on
-       NanoKVM Cube.  Probe only after VI/VENC has already gone idle. */
-    onekvm::InputResolution observed{};
-    if (!stable_hdmi_input(&observed))
+    onekvm::InputResolution csi{};
+    onekvm::InputResolution hdmi{};
+    if (!read_hdmi_timing(&csi, &hdmi))
         return 0;
-    source->reported_input = observed;
-    publish_input_format(source);
 
-    const auto kind = onekvm::classify_hdmi_input(observed);
+    const auto current = source->input_resolution.current();
+    const auto reported = hdmi.width != 0 ? hdmi : csi;
+    if (reported.width != 0) {
+        source->reported_input = reported;
+        publish_input_format(source);
+    }
+
+    const auto kind = onekvm::classify_hdmi_input(reported);
     if (kind == onekvm::HdmiInputClass::OutOfRange) {
         if (!source->out_of_range.exchange(true, std::memory_order_relaxed)) {
             std::fprintf(stderr,
                          "OneKVM: HDMI input %ux%u is out of range\n",
-                         observed.width, observed.height);
+                         reported.width, reported.height);
         }
         return 0;
     }
-    if (kind != onekvm::HdmiInputClass::Supported)
-        return 0;
 
-    const auto current = source->input_resolution.current();
-    const bool was_out_of_range =
-        source->out_of_range.exchange(false, std::memory_order_relaxed);
-    if (!was_out_of_range && observed == current)
+    const auto receiver =
+        onekvm::choose_vi_receiver_size(csi, hdmi, current);
+    if (!onekvm::should_rebuild_vi_receiver(current, receiver, csi)) {
+        if (kind == onekvm::HdmiInputClass::Supported)
+            source->out_of_range.store(false, std::memory_order_relaxed);
         return 0;
+    }
+    source->out_of_range.store(false, std::memory_order_relaxed);
 
     source->failures = 0;
     source->last_recovery = now;
+    std::fprintf(stderr,
+                 "OneKVM: HDMI timing CSI %ux%u HDMI %ux%u; grow/shrink VI %ux%u -> %ux%u\n",
+                 csi.width, csi.height, hdmi.width, hdmi.height,
+                 current.width, current.height,
+                 receiver.width, receiver.height);
     const int reopen = reopen_source_for_input(
-        source, observed, error, error_capacity);
+        source, receiver, error, error_capacity);
     if (reopen != 0)
         return -1;
     set_error(error, error_capacity,
               "HDMI input changed to %ux%u; pipeline rebuilt",
-              observed.width, observed.height);
+              receiver.width, receiver.height);
     return 1;
+}
+
+int maybe_rebuild_for_hdmi_change(Source *source, char *error,
+                                  uint32_t error_capacity) {
+    return rebuild_for_hdmi_timing(source, false, error, error_capacity);
+}
+
+int maybe_rebuild_for_hdmi_change_now(Source *source, char *error,
+                                      uint32_t error_capacity) {
+    return rebuild_for_hdmi_timing(source, true, error, error_capacity);
+}
+
+void hdmi_watch_loop(Source *source) {
+    while (!source->hdmi_watch_stop.load(std::memory_order_relaxed)) {
+        std::this_thread::sleep_for(kHDMIChangeGrowProbeInterval);
+        if (source->hdmi_watch_stop.load(std::memory_order_relaxed))
+            break;
+        char error[256];
+        std::lock_guard<std::mutex> lock(source->mutex);
+        if (!source->initialized ||
+            source->hdmi_watch_stop.load(std::memory_order_relaxed))
+            continue;
+        (void)maybe_rebuild_for_hdmi_change_now(
+            source, error, sizeof(error));
+    }
+}
+
+void stop_hdmi_watch(Source *source) {
+    if (source == nullptr)
+        return;
+    source->hdmi_watch_stop.store(true, std::memory_order_relaxed);
+    if (source->hdmi_watch.joinable())
+        source->hdmi_watch.join();
+}
+
+void start_hdmi_watch(Source *source) {
+    if (source == nullptr)
+        return;
+    stop_hdmi_watch(source);
+    source->hdmi_watch_stop.store(false, std::memory_order_relaxed);
+    source->hdmi_watch = std::thread(hdmi_watch_loop, source);
 }
 
 int32_t source_create(const onekvm_video_source_config_v1 *config, void **result,
@@ -392,6 +467,12 @@ int32_t source_create(const onekvm_video_source_config_v1 *config, void **result
     if (open_source(source, config, error, error_capacity) != 0) {
         delete source;
         return -1;
+    }
+    try {
+        start_hdmi_watch(source);
+    } catch (const std::exception &ex) {
+        std::fprintf(stderr, "OneKVM: HDMI watch thread failed: %s\n",
+                     ex.what());
     }
     *result = source;
     return 0;
@@ -585,6 +666,7 @@ void source_destroy(void *opaque) {
     if (source == nullptr) {
         return;
     }
+    stop_hdmi_watch(source);
     {
         std::lock_guard<std::mutex> lock(source->mutex);
         close_source(source);

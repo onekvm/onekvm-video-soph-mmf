@@ -134,6 +134,18 @@ constexpr InputResolution choose_vi_receiver_size(
     return {};
 }
 
+constexpr bool should_rebuild_vi_receiver(
+    InputResolution current,
+    InputResolution receiver,
+    InputResolution csi)
+{
+    if (receiver.width == 0 || receiver == current)
+        return false;
+    if (resolution_pixels(receiver) < resolution_pixels(current))
+        return csi == receiver;
+    return true;
+}
+
 /* Interval is the only hard gate. 800→1080 keeps IntCnt ticking on CSI
    errors, so "recent frames" must not hide an upscale. */
 constexpr bool hdmi_resolution_probe_due(

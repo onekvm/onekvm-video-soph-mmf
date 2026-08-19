@@ -58,5 +58,21 @@ int main() {
     if (choose_vi_receiver_size({0, 0}, {800, 600}, {1920, 1080}).width != 0)
         return 30;
 
+    if (!should_rebuild_vi_receiver(
+            {800, 600}, {1920, 1080}, {800, 600}))
+        return 31;
+    if (should_rebuild_vi_receiver(
+            {1920, 1080}, {800, 600}, {1920, 1080}))
+        return 32;
+    if (!should_rebuild_vi_receiver(
+            {1920, 1080}, {800, 600}, {800, 600}))
+        return 33;
+    if (should_rebuild_vi_receiver(
+            {800, 600}, {800, 600}, {800, 600}))
+        return 34;
+    if (should_rebuild_vi_receiver(
+            {800, 600}, {}, {800, 600}))
+        return 35;
+
     return 0;
 }

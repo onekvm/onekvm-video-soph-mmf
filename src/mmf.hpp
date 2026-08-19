@@ -6,8 +6,16 @@
 #include <cstdint>
 
 extern "C" {
+struct onekvm_lt6911_input_timing {
+    uint32_t csi_width;
+    uint32_t csi_height;
+    uint32_t hdmi_width;
+    uint32_t hdmi_height;
+};
+
 int render_no_signal_nv21(uint8_t *data, int capacity, int width, int height);
 int no_signal_h264(int width, int height, const uint8_t **data, size_t *size);
+int lt6911_get_input_timing(int pipe, struct onekvm_lt6911_input_timing *timing);
 int lt6911_get_input_size(int pipe, uint32_t *width, uint32_t *height);
 int lt6911_get_capture_size(uint32_t *width, uint32_t *height);
 int onekvm_lt6911_set_active_size(uint32_t width, uint32_t height);

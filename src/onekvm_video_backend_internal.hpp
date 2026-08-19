@@ -37,6 +37,11 @@ ONEKVM_VIDEO_INTERNAL inline constexpr int kRecoveryFailureThreshold = 3;
 ONEKVM_VIDEO_INTERNAL inline constexpr auto kRecoveryInterval = std::chrono::seconds(5);
 ONEKVM_VIDEO_INTERNAL inline constexpr auto kHDMIChangeIdleWindow = std::chrono::milliseconds(500);
 ONEKVM_VIDEO_INTERNAL inline constexpr auto kHDMIChangeProbeInterval = std::chrono::seconds(2);
+/* HDMI 800→1080 changes CSI output before the video loop runs.  A dedicated
+   watcher must see HDMI timing while the source is still 800, including when
+   no WebRTC consumer is attached. */
+ONEKVM_VIDEO_INTERNAL inline constexpr auto kHDMIChangeGrowProbeInterval =
+    std::chrono::milliseconds(100);
 ONEKVM_VIDEO_INTERNAL inline constexpr auto kSignalProbeInterval = std::chrono::seconds(10);
 ONEKVM_VIDEO_INTERNAL inline constexpr auto kNoSignalProbeInterval = std::chrono::seconds(1);
 ONEKVM_VIDEO_INTERNAL inline constexpr auto kRecentFrameSignalWindow = std::chrono::milliseconds(500);
@@ -70,6 +75,8 @@ struct ONEKVM_VIDEO_INTERNAL Source {
     std::atomic<uint64_t> cached_input_size{0};
     std::atomic<int32_t> cached_input_fps{0};
     std::atomic<bool> out_of_range{false};
+    std::atomic<bool> hdmi_watch_stop{false};
+    std::thread hdmi_watch;
 };
 
 struct ONEKVM_VIDEO_INTERNAL Encoder {
@@ -104,6 +111,8 @@ ONEKVM_VIDEO_INTERNAL uint64_t monotonic_ns();
 ONEKVM_VIDEO_INTERNAL bool nv21_size(int width, int height, size_t *size);
 /* Caller must hold source->mutex. 1 = rebuilt, 0 = no change, -1 = failed. */
 ONEKVM_VIDEO_INTERNAL int maybe_rebuild_for_hdmi_change(
+    Source *source, char *error, uint32_t error_capacity);
+ONEKVM_VIDEO_INTERNAL int maybe_rebuild_for_hdmi_change_now(
     Source *source, char *error, uint32_t error_capacity);
 ONEKVM_VIDEO_INTERNAL int no_signal_frame(
     Source *source, onekvm_video_frame_v1 *frame,
