@@ -463,12 +463,11 @@ void hdmi_watch_loop(Source *source) {
             }
             continue;
         }
-        /* 1920 is the CSIBDG maximum. Fast-poll only when a grow is
-           still possible or VI has already gone idle. */
+        /* 1920 is the CSIBDG maximum. Fast-poll only while a grow is
+           still possible. I2C every 100ms at 1080 with VI idle turns into
+           a death spiral of garbage HDMI reads and a frozen frontend. */
         const bool need_fast =
-            source->input_resolution.current() !=
-                onekvm::InputResolution{1920, 1080} ||
-            source->cached_signal.load(std::memory_order_relaxed) != 1;
+            source->input_resolution.current() != onekvm::kMaxViReceiver;
         if (need_fast)
             (void)maybe_rebuild_for_hdmi_change_now(
                 source, error, sizeof(error));

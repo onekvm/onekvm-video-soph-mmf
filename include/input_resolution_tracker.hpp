@@ -157,17 +157,19 @@ constexpr InputResolution choose_vi_receiver_size(
     return {};
 }
 
-/* Leave any sub-1080 mode for 1920 as soon as HDMI is no longer that
-   mode (blanking, garbage, or a new timing). Overflow is worse than
-   a brief 1920 CSIBDG. */
+/* Leave a sub-1080 CSIBDG when HDMI is blanking or already a larger
+   mode. I2C garbage (3568x256) must not flap 800↔1920. */
 constexpr bool should_grow_to_max_vi_receiver(
     InputResolution current, InputResolution hdmi)
 {
-    if (current == kMaxViReceiver)
+    if (current == kMaxViReceiver || current.width == 0)
         return false;
-    if (current.width == 0)
-        return false;
-    return hdmi != current;
+    if (hdmi.width == 0)
+        return true;
+    if (supported_input_resolution(hdmi) &&
+        resolution_pixels(hdmi) > resolution_pixels(current))
+        return true;
+    return infer_hdmi_mode(hdmi) == kMaxViReceiver && hdmi != current;
 }
 
 constexpr bool should_rebuild_vi_receiver(

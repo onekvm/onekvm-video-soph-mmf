@@ -94,6 +94,8 @@ int main() {
         return 44;
     if (should_grow_to_max_vi_receiver({1920, 1080}, {0, 0}))
         return 45;
+    if (should_grow_to_max_vi_receiver({800, 600}, {3568, 256}))
+        return 46;
 
     return 0;
 }
