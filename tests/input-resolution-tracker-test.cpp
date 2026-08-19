@@ -73,6 +73,14 @@ int main() {
     if (should_rebuild_vi_receiver(
             {800, 600}, {}, {800, 600}))
         return 35;
+    if (infer_hdmi_mode({960, 366}) != InputResolution{1920, 1080})
+        return 36;
+    if (infer_hdmi_mode({1920, 888}) != InputResolution{1920, 1080})
+        return 37;
+    if (infer_hdmi_mode({800, 600}) != InputResolution{800, 600})
+        return 38;
+    if (infer_hdmi_mode({1366, 768}) != InputResolution{1366, 768})
+        return 39;
 
     return 0;
 }

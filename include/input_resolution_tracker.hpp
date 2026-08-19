@@ -115,6 +115,22 @@ constexpr uint64_t resolution_pixels(InputResolution resolution)
 /* CSIBDG must never be smaller than the MIPI frame about to arrive.
    Grow immediately when HDMI timing is already larger (800→1080).
    Shrink only when CSI active size has actually followed (1080→800). */
+/* LT6911C HDMI counters often show half-width and a garbage height for one
+   or two samples while the source is locking 1080p. Treat those as the
+   matching supported mode so CSIBDG can grow before the first 1920 line. */
+constexpr InputResolution infer_hdmi_mode(InputResolution hdmi)
+{
+    if (supported_input_resolution(hdmi))
+        return hdmi;
+    if (hdmi.width == 960 || hdmi.width == 1920)
+        return {1920, 1080};
+    if (hdmi.width == 640 || hdmi.width == 1280)
+        return {1280, 720};
+    if (hdmi.width == 400 || hdmi.width == 800)
+        return {800, 600};
+    return hdmi;
+}
+
 constexpr InputResolution choose_vi_receiver_size(
     InputResolution csi,
     InputResolution hdmi,

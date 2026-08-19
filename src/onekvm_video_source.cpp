@@ -382,6 +382,7 @@ int rebuild_for_hdmi_timing(Source *source, bool force_probe, char *error,
     if (!read_hdmi_timing(&csi, &hdmi))
         return 0;
 
+    hdmi = onekvm::infer_hdmi_mode(hdmi);
     const auto current = source->input_resolution.current();
     const auto reported = hdmi.width != 0 ? hdmi : csi;
     if (reported.width != 0) {
