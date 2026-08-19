@@ -12,7 +12,8 @@
 - VPSS/VENC 画面宽保持真实 HDMI/目标尺寸（800 就是 800）。64 对齐只用于 VB stride，不要改 `u32PicWidth`。
 - 目标分辨率只改 VPSS/VENC。VI/CSI：HDMI 变大（800→1080）立刻放大接收端；HDMI 变小要等 CSI 有效尺寸跟上再缩。只信 HDMI 会把 VI 配成 800 而 MIPI 仍 1920；只信 CSI 会在 800→1080 时把接收端留在 800。
 - 没有 WebRTC 消费者时 Core `videoLoop` 停在 `waitForConsumer`，不会调 `maybe_rebuild`。HDMI 探测必须在 MMF source 自己的 watcher 里跑。
-- r33 `4506982`：`open_source` 写一次 `D283=0x11` 启动 HDMI 测量。重启后若 I2C HDMI 仍是 0x0 而主机以为 connected，是 HPD/线没真正出 TMDS，拔插 HDMI。
+- r34 `f1fa3e7`：活 1080 不探 I2C。OOR 垃圾读数不要插无信号 IDR。占位图等 VENC 停 1.5s。
+- r33 `4506982`：`open_source` 写一次 `D283=0x11`。HDMI 计数 0x0 时拔插线。
 - 活 VENC 通道上的 `SetChnAttr` / `RequestIDR` / `close_encoder` 只能在 reader 线程、两次 `GetStream` 之间做。HTTP/`g_mmf_mutex` 上调会和 `GetStream` 抢 `EnterVcodecLock`。
 
 ## 2026-08-19：目标 FPS 热改（r17 已上 137）
