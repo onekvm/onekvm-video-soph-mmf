@@ -901,6 +901,21 @@ int take_ready_h26x_packet(int ch, uint8_t *dst, int capacity, bool *key_frame)
 	return size;
 }
 
+bool wait_ready_h26x_packet(int ch, int timeout_ms)
+{
+	if (ch < 0 || ch >= MMF_VENC_MAX_CHN || timeout_ms < 0)
+		return false;
+	H26xReader &reader = g_readers[ch];
+	std::unique_lock<std::mutex> lock(reader.mu);
+	if (!reader.queue.empty())
+		return true;
+	reader.cv.wait_for(lock, std::chrono::milliseconds(timeout_ms), [&] {
+		return !reader.queue.empty() ||
+			reader.stop.load(std::memory_order_relaxed);
+	});
+	return !reader.queue.empty();
+}
+
 uint64_t h26x_reader_last_packet_ns(int ch)
 {
 	if (ch < 0 || ch >= MMF_VENC_MAX_CHN)

@@ -491,6 +491,33 @@ int encode_bound_placeholder(Encoder *encoder, Source *source,
     return 0;
 }
 
+int32_t fill_bound_live_packet(Encoder *encoder, Source *source,
+                               onekvm_video_packet_v1 *packet,
+                               const uint8_t *output_data, int result,
+                               bool key_frame) {
+    source->last_frame_ns.store(monotonic_ns(), std::memory_order_relaxed);
+    /* A live AU is enough to keep the decoder fed. Do not read
+       /proc/cvitek/vi here: that dump stalls the 60 fps path. HDMI
+       loss is detected when VENC goes stale, not per packet. */
+    source->cached_signal.store(1, std::memory_order_relaxed);
+    source->failures = 0;
+    packet->data = output_data;
+    packet->data_size = static_cast<uint64_t>(result);
+    packet->codec = public_codec(encoder->codec_type);
+    packet->key_frame = key_frame ? 1 : 0;
+    packet->pts_ns = monotonic_ns();
+    return 0;
+}
+
+int32_t fill_bound_empty_packet(Encoder *encoder, onekvm_video_packet_v1 *packet) {
+    packet->data = nullptr;
+    packet->data_size = 0;
+    packet->codec = public_codec(encoder->codec_type);
+    packet->key_frame = 0;
+    packet->pts_ns = monotonic_ns();
+    return 0;
+}
+
 int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
                             char *error, uint32_t error_capacity) {
     auto *encoder = static_cast<Encoder *>(opaque);
@@ -499,13 +526,13 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
         set_error(error, error_capacity, "invalid bound encoder read");
         return -1;
     }
-    std::lock_guard<std::mutex> lock(encoder->mutex);
+    std::unique_lock<std::mutex> lock(encoder->mutex);
     Source *source = encoder->bound_source;
     if (source == nullptr || encoder->codec_type == 0) {
         set_error(error, error_capacity, "encoder is not bound to a source");
         return -1;
     }
-    std::lock_guard<std::mutex> source_lock(source->mutex);
+    std::unique_lock<std::mutex> source_lock(source->mutex);
     invalidate_stale_encoder(encoder);
     if (!encoder->initialized ||
         (!encoder->source_bound && !encoder->placeholder_frames)) {
@@ -548,24 +575,9 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
         set_error(error, error_capacity, "read bound MMF frame failed: %d", result);
         return -1;
     }
-    if (result > 0) {
-        source->last_frame_ns.store(monotonic_ns(), std::memory_order_relaxed);
-        const int vi_live = cached_signal_present(source);
-        if (vi_live == 1)
-            source->cached_signal.store(1, std::memory_order_relaxed);
-        /* Do not I2C on the live packet path. The HDMI watcher owns
-           rebuilds; probing here interrupts CSI and flashes 无 HDMI. */
-        if (vi_live == 0)
-            source->failures++;
-        else
-            source->failures = 0;
-        packet->data = output_data;
-        packet->data_size = static_cast<uint64_t>(result);
-        packet->codec = public_codec(encoder->codec_type);
-        packet->key_frame = key_frame ? 1 : 0;
-        packet->pts_ns = monotonic_ns();
-        return 0;
-    }
+    if (result > 0)
+        return fill_bound_live_packet(
+            encoder, source, packet, output_data, result, key_frame);
 
     const uint64_t last_live = mmf::h26x_reader_last_packet_ns(encoder->channel);
     const uint64_t now = monotonic_ns();
@@ -580,13 +592,45 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
         now >= last_live && now - last_live <= live_ns;
     const bool venc_stale = last_live != 0 &&
         now > last_live && now - last_live > live_ns;
+
+    /* Between live access units the queue is often empty. The old path
+       read /proc/cvitek/vi and slept 10 ms while holding both mutexes,
+       which dropped Enc/actual_fps into the 30-50 range. Wait on the
+       reader and leave HDMI rebuilds to the watcher. */
+    if (live_recent) {
+        const int ch = encoder->channel;
+        source_lock.unlock();
+        lock.unlock();
+        (void)mmf::wait_ready_h26x_packet(ch, 20);
+        lock.lock();
+        source = encoder->bound_source;
+        if (source == nullptr || encoder->codec_type == 0) {
+            set_error(error, error_capacity, "encoder is not bound to a source");
+            return -1;
+        }
+        source_lock = std::unique_lock<std::mutex>(source->mutex);
+        invalidate_stale_encoder(encoder);
+        if (!encoder->initialized)
+            return fill_bound_empty_packet(encoder, packet);
+        result = drain_venc_packet(
+            encoder, &output_data, &output_pts_ns, &key_frame);
+        if (result < 0) {
+            set_error(error, error_capacity, "read bound MMF frame failed: %d", result);
+            return -1;
+        }
+        if (result > 0)
+            return fill_bound_live_packet(
+                encoder, source, packet, output_data, result, key_frame);
+        return fill_bound_empty_packet(encoder, packet);
+    }
+
     const bool missing_signal =
         source->out_of_range.load(std::memory_order_relaxed) ||
         cached_signal_present(source) == 0;
     /* Host mode changes often stop both VI and VENC. The placeholder
        used to return here and never increment failures, so the pipeline
        stayed on the old CSI geometry until a process restart. */
-    if (!live_recent && (missing_signal || venc_stale)) {
+    if (missing_signal || venc_stale) {
         source->failures++;
         const int rebuilt = maybe_rebuild_for_hdmi_change(
             source, error, error_capacity);
@@ -613,10 +657,13 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
                 encoder, source, error, error_capacity) != 0)
             return -1;
     }
+    const int codec = encoder->codec_type;
+    source_lock.unlock();
+    lock.unlock();
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    packet->data = result > 0 ? output_data : nullptr;
-    packet->data_size = result > 0 ? static_cast<uint64_t>(result) : 0;
-    packet->codec = public_codec(encoder->codec_type);
+    packet->data = nullptr;
+    packet->data_size = 0;
+    packet->codec = public_codec(codec);
     packet->key_frame = 0;
     packet->pts_ns = monotonic_ns();
     return 0;

@@ -89,6 +89,7 @@ void start_h26x_reader(int ch);
 void stop_h26x_reader(int ch);
 int take_ready_h26x_packet(int ch, uint8_t *dst, int capacity,
 	bool *key_frame = nullptr);
+bool wait_ready_h26x_packet(int ch, int timeout_ms);
 uint64_t h26x_reader_last_packet_ns(int ch);
 void h26x_reader_want_idr(int ch);
 int release_h26x_packet(int ch);
