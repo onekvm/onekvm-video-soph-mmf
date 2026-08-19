@@ -54,16 +54,34 @@ bool read_vi_fps(Source *source, double *fps) {
         }
         ViChnStatus status{};
         if (in_chn_status && parse_vi_chn_status(line, &status)) {
-            const int last = source->last_vi_int_cnt.exchange(
-                status.int_cnt, std::memory_order_relaxed);
-            if (!status.enabled)
+            const int last = source->last_vi_int_cnt.load(
+                std::memory_order_relaxed);
+            const uint64_t now = monotonic_ns();
+            if (!status.enabled) {
                 *fps = 0;
-            else if (status.frame_rate > 0)
+            } else if (status.frame_rate > 0) {
                 *fps = static_cast<double>(status.frame_rate);
-            else if (status.int_cnt > last)
+            } else if (status.int_cnt > last) {
                 *fps = 60;
-            else
+            } else if (status.int_cnt > 0) {
+                /* Another caller already consumed this IntCnt sample.
+                   Kernel FrameRate stays 0 for a full second; treat a
+                   recent increment as live so we do not flash 无 HDMI. */
+                const uint64_t changed = source->last_vi_int_change_ns.load(
+                    std::memory_order_relaxed);
+                *fps = (changed != 0 && now >= changed &&
+                        now - changed < 1500000000ull)
+                    ? 60
+                    : 0;
+            } else {
                 *fps = 0;
+            }
+            if (status.int_cnt != last) {
+                source->last_vi_int_cnt.store(
+                    status.int_cnt, std::memory_order_relaxed);
+                source->last_vi_int_change_ns.store(
+                    now, std::memory_order_relaxed);
+            }
             found = true;
             break;
         }
@@ -469,15 +487,12 @@ void hdmi_watch_loop(Source *source) {
             }
             continue;
         }
-        /* /proc/cvitek/vi is cheap. I2C is not: 100ms probes at a live
-           800x600 make the picture flap (HDMI 0 → rebuild 1920). Fast
-           I2C only while below 1080 and VI has already gone idle. */
-        double fps = 0;
-        const bool vi_live = read_vi_fps(source, &fps) && fps > 0;
-        source->cached_signal.store(vi_live ? 1 : 0, std::memory_order_relaxed);
+        /* Do not read /proc/cvitek/vi here. maybe_rebuild already samples
+           it; a second read in the same tick sees a flat IntCnt and used
+           to mark HDMI missing while VENC was still at 60fps. */
         const bool need_fast =
             source->input_resolution.current() != onekvm::kMaxViReceiver &&
-            !vi_live;
+            source->cached_signal.load(std::memory_order_relaxed) != 1;
         if (need_fast)
             (void)maybe_rebuild_for_hdmi_change_now(
                 source, error, sizeof(error));

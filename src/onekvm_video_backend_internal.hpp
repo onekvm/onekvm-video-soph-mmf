@@ -67,6 +67,7 @@ struct ONEKVM_VIDEO_INTERNAL Source {
     std::atomic<uint64_t> last_signal_probe_ns{0};
     std::atomic<int> cached_signal{-1};
     std::atomic<int> last_vi_int_cnt{0};
+    std::atomic<uint64_t> last_vi_int_change_ns{0};
     std::atomic_flag signal_probe_running = ATOMIC_FLAG_INIT;
     onekvm::InputResolutionTracker input_resolution;
     onekvm::InputResolution reported_input{};
