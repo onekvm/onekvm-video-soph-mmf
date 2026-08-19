@@ -307,6 +307,7 @@ int open_source(Source *source, const onekvm_video_source_config_v1 *config,
     source->last_recovery = {};
     source->input_resolution.set_current(input);
     source->reported_input = input;
+    source->hdmi_blanking_samples = 0;
     source->out_of_range.store(false, std::memory_order_relaxed);
     onekvm::InputResolution probed{};
     if (read_hdmi_input(&probed)) {
@@ -383,6 +384,10 @@ int rebuild_for_hdmi_timing(Source *source, bool force_probe, char *error,
         return 0;
 
     hdmi = onekvm::infer_hdmi_mode(hdmi);
+    if (hdmi.width == 0)
+        source->hdmi_blanking_samples++;
+    else
+        source->hdmi_blanking_samples = 0;
     const auto current = source->input_resolution.current();
     const auto reported = hdmi.width != 0 ? hdmi : csi;
     if (reported.width != 0) {
@@ -403,7 +408,8 @@ int rebuild_for_hdmi_timing(Source *source, bool force_probe, char *error,
 
     onekvm::InputResolution receiver =
         onekvm::choose_vi_receiver_size(csi, hdmi, current);
-    if (onekvm::should_grow_to_max_vi_receiver(current, hdmi))
+    if (onekvm::should_grow_to_max_vi_receiver(
+            current, hdmi, source->hdmi_blanking_samples))
         receiver = onekvm::kMaxViReceiver;
     if (!onekvm::should_rebuild_vi_receiver(current, receiver, csi, hdmi)) {
         if (kind == onekvm::HdmiInputClass::Supported)
@@ -463,11 +469,15 @@ void hdmi_watch_loop(Source *source) {
             }
             continue;
         }
-        /* 1920 is the CSIBDG maximum. Fast-poll only while a grow is
-           still possible. I2C every 100ms at 1080 with VI idle turns into
-           a death spiral of garbage HDMI reads and a frozen frontend. */
+        /* /proc/cvitek/vi is cheap. I2C is not: 100ms probes at a live
+           800x600 make the picture flap (HDMI 0 → rebuild 1920). Fast
+           I2C only while below 1080 and VI has already gone idle. */
+        double fps = 0;
+        const bool vi_live = read_vi_fps(source, &fps) && fps > 0;
+        source->cached_signal.store(vi_live ? 1 : 0, std::memory_order_relaxed);
         const bool need_fast =
-            source->input_resolution.current() != onekvm::kMaxViReceiver;
+            source->input_resolution.current() != onekvm::kMaxViReceiver &&
+            !vi_live;
         if (need_fast)
             (void)maybe_rebuild_for_hdmi_change_now(
                 source, error, sizeof(error));

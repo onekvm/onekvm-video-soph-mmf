@@ -86,13 +86,17 @@ int main() {
         return 38;
     if (infer_hdmi_mode({1366, 768}) != InputResolution{1366, 768})
         return 39;
-    if (!should_grow_to_max_vi_receiver({800, 600}, {0, 0}))
+    if (should_grow_to_max_vi_receiver({800, 600}, {0, 0}, 0))
         return 42;
+    if (should_grow_to_max_vi_receiver({800, 600}, {0, 0}, 2))
+        return 47;
+    if (!should_grow_to_max_vi_receiver({800, 600}, {0, 0}, 3))
+        return 48;
     if (!should_grow_to_max_vi_receiver({800, 600}, {1920, 1080}))
         return 43;
     if (should_grow_to_max_vi_receiver({800, 600}, {800, 600}))
         return 44;
-    if (should_grow_to_max_vi_receiver({1920, 1080}, {0, 0}))
+    if (should_grow_to_max_vi_receiver({1920, 1080}, {0, 0}, 3))
         return 45;
     if (should_grow_to_max_vi_receiver({800, 600}, {3568, 256}))
         return 46;

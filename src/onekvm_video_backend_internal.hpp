@@ -71,6 +71,7 @@ struct ONEKVM_VIDEO_INTERNAL Source {
     onekvm::InputResolutionTracker input_resolution;
     onekvm::InputResolution reported_input{};
     onekvm::InputResolution pending_receiver{};
+    unsigned hdmi_blanking_samples = 0;
     int capture_width = 0;
     int capture_height = 0;
     std::atomic<uint64_t> cached_input_size{0};

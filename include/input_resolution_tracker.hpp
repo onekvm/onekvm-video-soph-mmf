@@ -157,15 +157,19 @@ constexpr InputResolution choose_vi_receiver_size(
     return {};
 }
 
-/* Leave a sub-1080 CSIBDG when HDMI is blanking or already a larger
-   mode. I2C garbage (3568x256) must not flap 800↔1920. */
+/* Leave a sub-1080 CSIBDG when HDMI is already a larger mode, or after
+   consecutive blanking samples. A single HDMI 0/I2C miss at 800 must not
+   rebuild to 1920 or the picture flaps. */
+constexpr unsigned kHDMIBlankingGrowSamples = 3;
+
 constexpr bool should_grow_to_max_vi_receiver(
-    InputResolution current, InputResolution hdmi)
+    InputResolution current, InputResolution hdmi,
+    unsigned blanking_samples = 0)
 {
     if (current == kMaxViReceiver || current.width == 0)
         return false;
     if (hdmi.width == 0)
-        return true;
+        return blanking_samples >= kHDMIBlankingGrowSamples;
     if (supported_input_resolution(hdmi) &&
         resolution_pixels(hdmi) > resolution_pixels(current))
         return true;
