@@ -1,6 +1,6 @@
 # onekvm-nanokvm-mmf 约束
 
-本文件只放仍然约束下次行为的规则。排查流水账在仓库外 `../local-docs/nanokvm-mmf-notes.md`（已 gitignore）。
+本文件只放仍然约束下次行为的规则。排查流水账和待办在仓库外 `../local-docs/`（已 gitignore）。git 里的 TODO 文件不要删。
 
 ## 部署
 
@@ -20,7 +20,3 @@
 - 超范围 HDMI（1366x768 / 1440p / 4K）不得按旧几何继续采，应占位并报告实测尺寸。
 - 开机 `open_source` 写一次 `D283=0x11`，否则 HDMI 测量可能不起。
 - 0 FPS 可能只是显示器休眠，不是进程卡死；看门狗只认 D-Bus 心跳。
-
-## 未完成
-
-- 看门狗已写但未部署到 `10.100.99.137`（需同时更新 `onekvm-core` + `onekvm-watchdog`）。
