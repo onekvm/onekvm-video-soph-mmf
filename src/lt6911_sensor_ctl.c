@@ -272,12 +272,17 @@ int lt6911_get_input_size(VI_PIPE pipe, uint32_t *width, uint32_t *height)
 		goto error;
 	d_width *= 2;
 
-	if (supported_active_size(c_hdmi_width, c_hdmi_height)) {
-		*width = c_hdmi_width;
-		*height = c_hdmi_height;
-	} else if (supported_active_size(c_width, c_height)) {
+	/* CSI receiver width must match the MIPI frame on the wire, not HDMI
+	 * timing. Host 800x600 can still leave LT6911 CSI at 1920; programming
+	 * VI to 800 then logs "frm width greater than setting(800)". Prefer
+	 * CSI active size. HDMI timing is only used when CSI is down so a
+	 * real mode change can still be discovered. */
+	if (supported_active_size(c_width, c_height)) {
 		*width = c_width;
 		*height = c_height;
+	} else if (supported_active_size(c_hdmi_width, c_hdmi_height)) {
+		*width = c_hdmi_width;
+		*height = c_hdmi_height;
 	} else if (supported_active_size(uxc_width, uxc_height)) {
 		*width = uxc_width;
 		*height = uxc_height;
