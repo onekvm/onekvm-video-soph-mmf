@@ -233,14 +233,6 @@ int stop_capture_pipeline(void)
 	return s32Ret;
 }
 
-void aligned_capture_size(int width, int height, int *out_width, int *out_height)
-{
-	if (out_width != nullptr)
-		*out_width = ALIGN(width, DEFAULT_ALIGN);
-	if (out_height != nullptr)
-		*out_height = height;
-}
-
 static int create_capture_channel(int ch, int width, int height, int format, int fps) {
 	uint32_t pool_size_out = 0;
 	int pool_id = -1;
@@ -291,9 +283,7 @@ static int create_capture_channel(int ch, int width, int height, int format, int
 	/* A depth of one prevents VPSS from retaining an extra completed frame.
 	 * At 60 Hz that stale frame costs about 16.7 ms before encoding starts. */
 	const int depth = MMF_VPSS_LOW_LATENCY_DEPTH;
-	int width_out = 0;
-	int height_out = 0;
-	aligned_capture_size(width, height, &width_out, &height_out);
+	/* Keep the logical picture size. DEFAULT_ALIGN only pads the VB stride. */
 	PIXEL_FORMAT_E format_out = (PIXEL_FORMAT_E)format;
 	const bool mirror = g_capture_options.mirror[ch];
 	const bool flip = g_capture_options.flip[ch];
@@ -303,7 +293,7 @@ static int create_capture_channel(int ch, int width, int height, int format, int
 		return CVI_FAILURE;
 	}
 
-	s32Ret = configure_vpss_channel(0, ch, width_out, height_out, format_out, fps, depth, mirror, flip, 2);
+	s32Ret = configure_vpss_channel(0, ch, width, height, format_out, fps, depth, mirror, flip, 2);
 	if (s32Ret != CVI_SUCCESS) {
 		SAMPLE_PRT("configure_vpss_channel failed with %#x!\n", s32Ret);
 		return CVI_FAILURE;
@@ -311,7 +301,7 @@ static int create_capture_channel(int ch, int width, int height, int format, int
 
 	char name[20];
 	snprintf(name, 20, "vi_vpss%.1d", ch);
-	pool_size_out = COMMON_GetPicBufferSize(width_out, height_out, format_out, DATA_BITWIDTH_8, COMPRESS_MODE_NONE, DEFAULT_ALIGN);
+	pool_size_out = COMMON_GetPicBufferSize(width, height, format_out, DATA_BITWIDTH_8, COMPRESS_MODE_NONE, DEFAULT_ALIGN);
 	/* Three independent owners can overlap at 1080p60:
 	 *
 	 *   1 queued VPSS frame (`depth`)
