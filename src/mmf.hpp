@@ -18,6 +18,7 @@ int no_signal_h264(int width, int height, const uint8_t **data, size_t *size);
 int lt6911_get_input_timing(int pipe, struct onekvm_lt6911_input_timing *timing);
 int lt6911_get_input_size(int pipe, uint32_t *width, uint32_t *height);
 int lt6911_get_capture_size(uint32_t *width, uint32_t *height);
+int lt6911_kick_hdmi(void);
 int onekvm_lt6911_set_active_size(uint32_t width, uint32_t height);
 void onekvm_lt6911_get_active_size(uint32_t *width, uint32_t *height);
 }

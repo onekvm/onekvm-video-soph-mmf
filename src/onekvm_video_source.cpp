@@ -275,6 +275,9 @@ int open_source(Source *source, const onekvm_video_source_config_v1 *config,
         return -1;
     }
     std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
+    /* After reboot the LT6911 HDMI RX stays idle until D283 is written
+       once.  Repeating that from the watcher disrupts CSI. */
+    (void)lt6911_kick_hdmi();
     const onekvm::InputResolution input = requested_input != nullptr &&
         onekvm::supported_input_resolution(*requested_input)
         ? *requested_input : initial_input_resolution();

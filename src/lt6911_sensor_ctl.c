@@ -404,6 +404,31 @@ int lt6911_get_capture_size(uint32_t *width, uint32_t *height)
 	return lt6911_get_input_size(0, width, height);
 }
 
+int lt6911_kick_hdmi(void)
+{
+	const VI_PIPE pipe = 0;
+	int cleanup;
+
+	configure_pinmux_once();
+	if (lt6911_i2c_init(pipe) != CVI_SUCCESS)
+		return CVI_FAILURE;
+	/* D283=0x11 starts HDMI timing measurement.  Do this once when
+	   opening VI, never from the live watcher. */
+	pthread_mutex_lock(&g_i2c_lock);
+	if (lt6911_i2c_write(pipe, 0x80ee, 0x01) != CVI_SUCCESS)
+		goto error;
+	if (lt6911_i2c_write(pipe, 0xd283, 0x11) != CVI_SUCCESS)
+		goto error;
+	usleep(50000);
+	cleanup = lt6911_i2c_write(pipe, 0x80ee, 0x00);
+	pthread_mutex_unlock(&g_i2c_lock);
+	return cleanup == CVI_SUCCESS ? CVI_SUCCESS : CVI_FAILURE;
+error:
+	(void)lt6911_i2c_write(pipe, 0x80ee, 0x00);
+	pthread_mutex_unlock(&g_i2c_lock);
+	return CVI_FAILURE;
+}
+
 int lt6911_probe(VI_PIPE pipe)
 {
 	int id_high;
