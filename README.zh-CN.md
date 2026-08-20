@@ -15,6 +15,8 @@
 - 可以报告 HDMI 信号状态；使用原始画面接口时还能返回内置的无信号画面。
 - 可以通过官方 CVITEK SPACC 驱动加速 AES-GCM。
 
+采集通路、CSIBDG、HDMI watcher 与 VENC reader 的约定见 [docs/video-pipeline.md](docs/video-pipeline.md)。
+
 后端以单个动态库的形式部署：
 
 ```text

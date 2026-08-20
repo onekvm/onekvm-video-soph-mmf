@@ -17,6 +17,9 @@ OneKVM backend ABI while keeping device-specific implementation details out of
   callers using the raw-frame path.
 - Uses the official CVITEK SPACC driver for optional AES-GCM acceleration.
 
+The Cube HDMI capture path, CSI bridge matching, HDMI watcher, and VENC
+reader rules are documented in [docs/video-pipeline.md](docs/video-pipeline.md).
+
 The backend is deployed as a single shared library:
 
 ```text
