@@ -1,6 +1,6 @@
 #include "mmf_internal.hpp"
 #include "h264_annexb.hpp"
-#include "venc_pts_latency.hpp"
+#include "hw_latency_parser.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -418,6 +418,48 @@ static bool venc_stream_ready(int ch)
 	return status.u32CurPacks > 0;
 }
 
+/* Bound path: pack.u64PTS is encode-complete (~1 ms from QueryStatus), not
+   VI dqbuf. Sample VPSS CostTime and VENC HwEncTime at most twice a second.
+   Do not read /proc/cvitek/vi or vi_dbg here. */
+static void refresh_bound_hw_latency(H26xEncoderState *info)
+{
+	if (info == nullptr || !info->bound_to_capture)
+		return;
+	const uint64_t now = reader_now_ns();
+	const uint64_t last = __atomic_load_n(&info->last_hw_sample_ns, __ATOMIC_RELAXED);
+	if (last != 0 && now - last < 500000000ull)
+		return;
+	__atomic_store_n(&info->last_hw_sample_ns, now, __ATOMIC_RELAXED);
+
+	uint32_t vpss_us = 0;
+	if (FILE *vpss = fopen("/proc/cvitek/vpss", "r")) {
+		char line[512];
+		while (fgets(line, sizeof(line), vpss) != nullptr) {
+			if (parse_vpss_grp_cost_us(line, info->capture_group, &vpss_us))
+				break;
+		}
+		fclose(vpss);
+	}
+
+	uint32_t hwenc_us = 0;
+	if (FILE *venc = fopen("/proc/cvitek/venc", "r")) {
+		char line[512];
+		while (fgets(line, sizeof(line), venc) != nullptr) {
+			if (parse_venc_hwenc_us(line, info->ch, &hwenc_us))
+				break;
+		}
+		fclose(venc);
+	}
+
+	const uint32_t capture_us = bound_capture_us(vpss_us, info->cfg.input_fps);
+	if (capture_us > 0 && capture_us < 1000000u)
+		__atomic_store_n(&info->last_capture_ns,
+			static_cast<uint64_t>(capture_us) * 1000ull, __ATOMIC_RELAXED);
+	if (hwenc_us > 0 && hwenc_us < 1000000u)
+		__atomic_store_n(&info->last_encode_ns,
+			static_cast<uint64_t>(hwenc_us) * 1000ull, __ATOMIC_RELAXED);
+}
+
 // Copy one access unit directly from the vendor stream into caller storage.
 static int copy_h26x_packet(int ch, uint8_t *dst, int capacity,
 	int wait_timeout_us) {
@@ -445,7 +487,6 @@ static int copy_h26x_packet(int ch, uint8_t *dst, int capacity,
 
 	CVI_S32 ret = CVI_FAILURE;
 	uint64_t pack_ready_ns = 0;
-	CVI_U64 pack_ready_us = 0;
 	for (;;) {
 		gettimeofday(&now, NULL);
 		const int64_t remaining = wait_timeout_us > 0
@@ -463,11 +504,8 @@ static int copy_h26x_packet(int ch, uint8_t *dst, int capacity,
 				usleep(static_cast<useconds_t>(slice_us));
 			continue;
 		}
-		if (pack_ready_ns == 0) {
+		if (pack_ready_ns == 0)
 			pack_ready_ns = reader_now_ns();
-			if (CVI_SYS_GetCurPTS(&pack_ready_us) != CVI_SUCCESS)
-				pack_ready_us = 0;
-		}
 
 		stream->pstPack = info->packs;
 		/* Never ask GetStream to block. The vendor EnterVcodecLock path
@@ -518,38 +556,21 @@ static int copy_h26x_packet(int ch, uint8_t *dst, int capacity,
 		total += size;
 	}
 	const uint64_t done_ns = reader_now_ns();
-	/* Unbound: SendFrame → GetStream. Bound: pack already encoded when
-	   QueryStatus reports u32CurPacks; only time the dequeue/copy. */
-	uint64_t encode_start_ns = info->last_submit_ns;
-	if (encode_start_ns == 0)
-		encode_start_ns = pack_ready_ns;
-	uint64_t encode_ns = 0;
-	if (encode_start_ns > 0 && done_ns > encode_start_ns) {
-		encode_ns = done_ns - encode_start_ns;
-		if (encode_ns < 1000000000ull)
-			__atomic_store_n(&info->last_encode_ns, encode_ns, __ATOMIC_RELAXED);
-		else
-			encode_ns = 0;
-	}
-	info->last_submit_ns = 0;
-
-	/* Bound path never calls source_read. VI stamps CLOCK_MONOTONIC µs onto
-	   the frame; VENC copies that into pack.u64PTS. Capture is VI stamp to
-	   pack-ready so it does not include GetStream dequeue. */
-	CVI_U64 pack_pts_us = 0;
-	for (CVI_U32 index = 0; index < stream->u32PackCount; ++index) {
-		if (stream->pstPack[index].u64PTS > 0) {
-			pack_pts_us = stream->pstPack[index].u64PTS;
-			break;
+	/* Unbound: SendFrame → GetStream. Bound encode comes from VENC
+	   HwEncTime; pack.u64PTS is encode-complete and is not capture. */
+	if (!info->bound_to_capture) {
+		uint64_t encode_start_ns = info->last_submit_ns;
+		if (encode_start_ns == 0)
+			encode_start_ns = pack_ready_ns;
+		if (encode_start_ns > 0 && done_ns > encode_start_ns) {
+			const uint64_t encode_ns = done_ns - encode_start_ns;
+			if (encode_ns < 1000000000ull)
+				__atomic_store_n(&info->last_encode_ns, encode_ns,
+					__ATOMIC_RELAXED);
 		}
 	}
-	CVI_U64 capture_now_us = pack_ready_us;
-	if (capture_now_us == 0 && CVI_SYS_GetCurPTS(&capture_now_us) != CVI_SUCCESS)
-		capture_now_us = 0;
-	const uint64_t capture_ns = venc_capture_ns(
-		pack_pts_us, capture_now_us, capture_now_us == pack_ready_us ? 0 : encode_ns);
-	if (capture_ns > 0)
-		__atomic_store_n(&info->last_capture_ns, capture_ns, __ATOMIC_RELAXED);
+	info->last_submit_ns = 0;
+	refresh_bound_hw_latency(info);
 	return (int)total;
 }
 

@@ -35,10 +35,10 @@ if(BUILD_TESTING)
     onekvm_enable_warnings(h264_annexb_test)
     add_test(NAME h264-annexb COMMAND h264_annexb_test)
 
-    add_executable(venc_pts_latency_test tests/venc-pts-latency-test.cpp)
-    target_compile_features(venc_pts_latency_test PRIVATE cxx_std_17)
-    onekvm_enable_warnings(venc_pts_latency_test)
-    add_test(NAME venc-pts-latency COMMAND venc_pts_latency_test)
+    add_executable(hw_latency_parser_test tests/hw-latency-parser-test.cpp)
+    target_compile_features(hw_latency_parser_test PRIVATE cxx_std_17)
+    onekvm_enable_warnings(hw_latency_parser_test)
+    add_test(NAME hw-latency-parser COMMAND hw_latency_parser_test)
 
     add_executable(no_signal_frame_test
         tests/no-signal-frame-test.cpp

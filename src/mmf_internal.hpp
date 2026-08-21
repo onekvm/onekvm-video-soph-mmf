@@ -79,6 +79,7 @@ struct H26xEncoderState {
 	uint64_t last_submit_ns;
 	uint64_t last_encode_ns;
 	uint64_t last_capture_ns;
+	uint64_t last_hw_sample_ns;
 };
 
 struct BufferPool {
