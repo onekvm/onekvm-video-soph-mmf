@@ -443,7 +443,7 @@ static int copy_h26x_packet(int ch, uint8_t *dst, int capacity,
 		: 0;
 
 	CVI_S32 ret = CVI_FAILURE;
-	const uint64_t wait_start_ns = reader_now_ns();
+	uint64_t pack_ready_ns = 0;
 	for (;;) {
 		gettimeofday(&now, NULL);
 		const int64_t remaining = wait_timeout_us > 0
@@ -461,6 +461,8 @@ static int copy_h26x_packet(int ch, uint8_t *dst, int capacity,
 				usleep(static_cast<useconds_t>(slice_us));
 			continue;
 		}
+		if (pack_ready_ns == 0)
+			pack_ready_ns = reader_now_ns();
 
 		stream->pstPack = info->packs;
 		/* Never ask GetStream to block. The vendor EnterVcodecLock path
@@ -511,10 +513,12 @@ static int copy_h26x_packet(int ch, uint8_t *dst, int capacity,
 		total += size;
 	}
 	const uint64_t done_ns = reader_now_ns();
+	/* Unbound: SendFrame → GetStream. Bound: pack already encoded when
+	   QueryStatus reports u32CurPacks; only time the dequeue/copy. */
 	uint64_t encode_start_ns = info->last_submit_ns;
 	if (encode_start_ns == 0)
-		encode_start_ns = wait_start_ns;
-	if (done_ns > encode_start_ns) {
+		encode_start_ns = pack_ready_ns;
+	if (encode_start_ns > 0 && done_ns > encode_start_ns) {
 		const uint64_t encode_ns = done_ns - encode_start_ns;
 		if (encode_ns < 1000000000ull)
 			__atomic_store_n(&info->last_encode_ns, encode_ns, __ATOMIC_RELAXED);
