@@ -1,6 +1,7 @@
 #ifndef ONEKVM_VIDEO_BACKEND_V1_H
 #define ONEKVM_VIDEO_BACKEND_V1_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -64,13 +65,19 @@ struct onekvm_video_encoder_config_v1 {
     int32_t max_qp;
 };
 
+#define ONEKVM_VIDEO_FORMAT_OUT_OF_RANGE (1u << 0)
+
 struct onekvm_video_format_v1 {
     uint32_t struct_size;
     int32_t width;
     int32_t height;
     int32_t fps;
     uint32_t pixel_format;
+    uint32_t flags;
 };
+
+#define ONEKVM_VIDEO_FORMAT_V1_BASE_SIZE \
+    (offsetof(struct onekvm_video_format_v1, pixel_format) + sizeof(uint32_t))
 
 struct onekvm_video_frame_v1 {
     uint32_t struct_size;

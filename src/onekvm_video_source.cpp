@@ -599,33 +599,40 @@ int32_t source_reset(void *opaque, const onekvm_video_source_config_v1 *config,
     return 0;
 }
 
-int no_signal_frame(Source *source, onekvm_video_frame_v1 *frame,
-                    char *error, uint32_t error_capacity) {
-    const auto [width, height] = source_output_size(source);
+int ensure_no_signal_nv21(Source *source, int width, int height,
+                          char *error, uint32_t error_capacity) {
     size_t bytes = 0;
-    if (!nv21_size(width, height, &bytes)) {
+    if (source == nullptr || !nv21_size(width, height, &bytes)) {
         set_error(error, error_capacity, "invalid no-signal frame size %dx%d",
                   width, height);
         return -1;
     }
-    if (source->no_signal_frame.size() != bytes ||
-        source->no_signal_width != width || source->no_signal_height != height) {
-        try {
-            source->no_signal_frame.resize(bytes);
-        } catch (const std::bad_alloc &) {
-            set_error(error, error_capacity, "allocate no-signal frame: out of memory");
-            return -1;
-        }
-        int written = render_no_signal_nv21(source->no_signal_frame.data(),
-                                               static_cast<int>(bytes), width, height);
-        if (written != static_cast<int>(bytes)) {
-            set_error(error, error_capacity,
-                      "render no-signal frame returned %d, want %zu", written, bytes);
-            return -1;
-        }
-        source->no_signal_width = width;
-        source->no_signal_height = height;
+    if (source->no_signal_frame.size() == bytes &&
+        source->no_signal_width == width && source->no_signal_height == height)
+        return 0;
+    try {
+        source->no_signal_frame.resize(bytes);
+    } catch (const std::bad_alloc &) {
+        set_error(error, error_capacity, "allocate no-signal frame: out of memory");
+        return -1;
     }
+    int written = render_no_signal_nv21(source->no_signal_frame.data(),
+                                        static_cast<int>(bytes), width, height);
+    if (written != static_cast<int>(bytes)) {
+        set_error(error, error_capacity,
+                  "render no-signal frame returned %d, want %zu", written, bytes);
+        return -1;
+    }
+    source->no_signal_width = width;
+    source->no_signal_height = height;
+    return 0;
+}
+
+int no_signal_frame(Source *source, onekvm_video_frame_v1 *frame,
+                    char *error, uint32_t error_capacity) {
+    const auto [width, height] = source_output_size(source);
+    if (ensure_no_signal_nv21(source, width, height, error, error_capacity) != 0)
+        return -1;
     frame->data = source->no_signal_frame.data();
     frame->data_size = source->no_signal_frame.size();
     frame->width = width;
@@ -747,7 +754,7 @@ int32_t source_latency(void *opaque, onekvm_video_latency_v1 *latency) {
 int32_t source_input_format(void *opaque, onekvm_video_format_v1 *format) {
     auto *source = static_cast<Source *>(opaque);
     if (source == nullptr || format == nullptr ||
-        format->struct_size < sizeof(*format)) {
+        format->struct_size < ONEKVM_VIDEO_FORMAT_V1_BASE_SIZE) {
         return -1;
     }
     const uint64_t packed =
@@ -760,6 +767,11 @@ int32_t source_input_format(void *opaque, onekvm_video_format_v1 *format) {
     format->height = height;
     format->fps = source->cached_input_fps.load(std::memory_order_relaxed);
     format->pixel_format = ONEKVM_VIDEO_PIXEL_UNKNOWN;
+    if (format->struct_size >= offsetof(onekvm_video_format_v1, flags) +
+            sizeof(format->flags)) {
+        format->flags = source->out_of_range.load(std::memory_order_relaxed)
+            ? ONEKVM_VIDEO_FORMAT_OUT_OF_RANGE : 0;
+    }
     return 0;
 }
 

@@ -125,6 +125,9 @@ ONEKVM_VIDEO_INTERNAL int maybe_rebuild_for_hdmi_change(
     Source *source, char *error, uint32_t error_capacity);
 ONEKVM_VIDEO_INTERNAL int maybe_rebuild_for_hdmi_change_now(
     Source *source, char *error, uint32_t error_capacity);
+ONEKVM_VIDEO_INTERNAL int ensure_no_signal_nv21(
+    Source *source, int width, int height,
+    char *error, uint32_t error_capacity);
 ONEKVM_VIDEO_INTERNAL int no_signal_frame(
     Source *source, onekvm_video_frame_v1 *frame,
     char *error, uint32_t error_capacity);
