@@ -499,6 +499,9 @@ static int copy_h26x_packet(int ch, uint8_t *dst, int capacity,
 		if (!have_pack) {
 			if (wait_timeout_us <= 0 || past_deadline)
 				return 0;
+			/* Sample HW latency only while waiting for the next pack. */
+			if (remaining > 8000)
+				refresh_bound_hw_latency(info);
 			/* Bound-path poll(fd) is often silent. QueryStatus in 1 ms
 			   slices so a ready pack is not left sitting for 2 ms. */
 			struct pollfd pfd{};
@@ -871,8 +874,15 @@ void start_h26x_reader(int ch)
 			{
 				std::unique_lock<std::mutex> lock(self.mu);
 				while (self.queue.size() >= kReaderQueueMax &&
-					!self.stop.load(std::memory_order_relaxed))
-					self.cv.wait_for(lock, std::chrono::milliseconds(5));
+					!self.stop.load(std::memory_order_relaxed)) {
+					lock.unlock();
+					refresh_bound_hw_latency(&g_runtime.h26x_encoders[ch]);
+					lock.lock();
+					if (self.stop.load(std::memory_order_relaxed))
+						break;
+					if (self.queue.size() >= kReaderQueueMax)
+						self.cv.wait_for(lock, std::chrono::milliseconds(5));
+				}
 				if (self.stop.load(std::memory_order_relaxed))
 					break;
 			}
@@ -927,9 +937,6 @@ void start_h26x_reader(int ch)
 					self.cv.notify_all();
 				}
 			}
-			/* Proc dumps are slow; never hold an AU behind them. */
-			if (!overflow)
-				refresh_bound_hw_latency(&g_runtime.h26x_encoders[ch]);
 			if (overflow)
 				(void)request_h26x_idr(ch);
 		}
