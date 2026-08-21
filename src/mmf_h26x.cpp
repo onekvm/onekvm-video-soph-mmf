@@ -833,8 +833,11 @@ void start_h26x_reader(int ch)
 				});
 				continue;
 			}
-			const bool key = annexb_has_idr(
-				scratch.data(), static_cast<std::size_t>(got));
+			const bool key = g_runtime.h26x_encoders[ch].codec == H26xCodec::H265
+				? annexb_has_h265_irap(
+					scratch.data(), static_cast<std::size_t>(got))
+				: annexb_has_idr(
+					scratch.data(), static_cast<std::size_t>(got));
 			if (self.want_idr.load(std::memory_order_relaxed) && !key)
 				continue;
 			if (self.last_packet_ns.load(std::memory_order_relaxed) == 0)
