@@ -508,10 +508,13 @@ int32_t fill_bound_live_packet(Encoder *encoder, Source *source,
     packet->pts_ns = monotonic_ns();
     encoder->last_encode_ns.store(mmf::h26x_last_encode_ns(encoder->channel),
                                  std::memory_order_relaxed);
-    if (source != nullptr) {
-        encoder->last_capture_ns.store(
-            source->last_capture_ns.load(std::memory_order_relaxed),
-            std::memory_order_relaxed);
+    uint64_t capture_ns = mmf::h26x_last_capture_ns(encoder->channel);
+    if (capture_ns == 0 && source != nullptr)
+        capture_ns = source->last_capture_ns.load(std::memory_order_relaxed);
+    if (capture_ns > 0) {
+        encoder->last_capture_ns.store(capture_ns, std::memory_order_relaxed);
+        if (source != nullptr)
+            source->last_capture_ns.store(capture_ns, std::memory_order_relaxed);
     }
     return 0;
 }
@@ -682,13 +685,17 @@ int32_t encoder_latency(void *opaque, onekvm_video_latency_v1 *latency) {
         latency->struct_size < sizeof(*latency)) {
         return -1;
     }
+    uint64_t capture_ns = encoder->last_capture_ns.load(std::memory_order_relaxed);
     uint64_t encode_ns = encoder->last_encode_ns.load(std::memory_order_relaxed);
     if (encoder->channel >= kFirstVENCChannel) {
-        const uint64_t channel_ns = mmf::h26x_last_encode_ns(encoder->channel);
-        if (channel_ns > 0)
-            encode_ns = channel_ns;
+        const uint64_t channel_encode = mmf::h26x_last_encode_ns(encoder->channel);
+        if (channel_encode > 0)
+            encode_ns = channel_encode;
+        const uint64_t channel_capture = mmf::h26x_last_capture_ns(encoder->channel);
+        if (channel_capture > 0)
+            capture_ns = channel_capture;
     }
-    latency->capture_ns = encoder->last_capture_ns.load(std::memory_order_relaxed);
+    latency->capture_ns = capture_ns;
     latency->encode_ns = encode_ns;
     return 0;
 }

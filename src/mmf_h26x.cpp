@@ -1,5 +1,6 @@
 #include "mmf_internal.hpp"
 #include "h264_annexb.hpp"
+#include "venc_pts_latency.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -444,6 +445,7 @@ static int copy_h26x_packet(int ch, uint8_t *dst, int capacity,
 
 	CVI_S32 ret = CVI_FAILURE;
 	uint64_t pack_ready_ns = 0;
+	CVI_U64 pack_ready_us = 0;
 	for (;;) {
 		gettimeofday(&now, NULL);
 		const int64_t remaining = wait_timeout_us > 0
@@ -461,8 +463,11 @@ static int copy_h26x_packet(int ch, uint8_t *dst, int capacity,
 				usleep(static_cast<useconds_t>(slice_us));
 			continue;
 		}
-		if (pack_ready_ns == 0)
+		if (pack_ready_ns == 0) {
 			pack_ready_ns = reader_now_ns();
+			if (CVI_SYS_GetCurPTS(&pack_ready_us) != CVI_SUCCESS)
+				pack_ready_us = 0;
+		}
 
 		stream->pstPack = info->packs;
 		/* Never ask GetStream to block. The vendor EnterVcodecLock path
@@ -518,12 +523,33 @@ static int copy_h26x_packet(int ch, uint8_t *dst, int capacity,
 	uint64_t encode_start_ns = info->last_submit_ns;
 	if (encode_start_ns == 0)
 		encode_start_ns = pack_ready_ns;
+	uint64_t encode_ns = 0;
 	if (encode_start_ns > 0 && done_ns > encode_start_ns) {
-		const uint64_t encode_ns = done_ns - encode_start_ns;
+		encode_ns = done_ns - encode_start_ns;
 		if (encode_ns < 1000000000ull)
 			__atomic_store_n(&info->last_encode_ns, encode_ns, __ATOMIC_RELAXED);
+		else
+			encode_ns = 0;
 	}
 	info->last_submit_ns = 0;
+
+	/* Bound path never calls source_read. VI stamps CLOCK_MONOTONIC µs onto
+	   the frame; VENC copies that into pack.u64PTS. Capture is VI stamp to
+	   pack-ready so it does not include GetStream dequeue. */
+	CVI_U64 pack_pts_us = 0;
+	for (CVI_U32 index = 0; index < stream->u32PackCount; ++index) {
+		if (stream->pstPack[index].u64PTS > 0) {
+			pack_pts_us = stream->pstPack[index].u64PTS;
+			break;
+		}
+	}
+	CVI_U64 capture_now_us = pack_ready_us;
+	if (capture_now_us == 0 && CVI_SYS_GetCurPTS(&capture_now_us) != CVI_SUCCESS)
+		capture_now_us = 0;
+	const uint64_t capture_ns = venc_capture_ns(
+		pack_pts_us, capture_now_us, capture_now_us == pack_ready_us ? 0 : encode_ns);
+	if (capture_ns > 0)
+		__atomic_store_n(&info->last_capture_ns, capture_ns, __ATOMIC_RELAXED);
 	return (int)total;
 }
 
@@ -940,6 +966,13 @@ uint64_t h26x_last_encode_ns(int ch)
 	if (ch < 0 || ch >= MMF_VENC_MAX_CHN)
 		return 0;
 	return __atomic_load_n(&g_runtime.h26x_encoders[ch].last_encode_ns, __ATOMIC_RELAXED);
+}
+
+uint64_t h26x_last_capture_ns(int ch)
+{
+	if (ch < 0 || ch >= MMF_VENC_MAX_CHN)
+		return 0;
+	return __atomic_load_n(&g_runtime.h26x_encoders[ch].last_capture_ns, __ATOMIC_RELAXED);
 }
 
 uint64_t h26x_reader_last_packet_ns(int ch)

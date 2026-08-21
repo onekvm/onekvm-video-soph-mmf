@@ -13,6 +13,7 @@ HDMI 源
 ```
 
 - **绑定路径**：Core 调 `BindVideoSource` + `ReadEncodedVideo`（`encoder_read_packet`）。不要在这条路上调 `source_read`。
+- **延迟**：绑定路径没有 `acquire_capture_frame`。采集缓存来自 VENC pack `u64PTS`（VI `ktime_get` 微秒）到 `QueryStatus` 报告 `u32CurPacks` 的 `CVI_SYS_GetCurPTS`；编码缓存是随后 `GetStream` 出队。status/SSE 只读缓存。
 - **无消费者**：Core `videoLoop` 停在 `waitForConsumer`，不会替 MMF 探 HDMI。分辨率跟随必须在 source 自己的 **HDMI watcher** 里跑。
 - **VENC reader**：独立线程 `GetStream`。`SetChnAttr`（含改 FPS）、`RequestIDR`、`close_encoder` 只能在这个线程、两次 `GetStream` 之间做。HTTP 或 `g_mmf_mutex` 上对活通道调这些会和 `GetStream` 抢 `EnterVcodecLock`。
 - **绑定 VPSS→VENC** 时 `bIsoSendFrmEn` 必须关掉。绑定路径从不 `SendFrame`，打开隔离后编码计数涨、`GetStream` 队列为空。
