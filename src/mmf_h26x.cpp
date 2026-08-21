@@ -401,6 +401,7 @@ int submit_h26x_frame(int ch, uint8_t *data, int w, int h, int format) {
 		return s32Ret;
 	}
 
+	info->last_submit_ns = reader_now_ns();
 	info->packet_pending = 1;
 
 	return res;
@@ -442,6 +443,7 @@ static int copy_h26x_packet(int ch, uint8_t *dst, int capacity,
 		: 0;
 
 	CVI_S32 ret = CVI_FAILURE;
+	const uint64_t wait_start_ns = reader_now_ns();
 	for (;;) {
 		gettimeofday(&now, NULL);
 		const int64_t remaining = wait_timeout_us > 0
@@ -508,6 +510,16 @@ static int copy_h26x_packet(int ch, uint8_t *dst, int capacity,
 		}
 		total += size;
 	}
+	const uint64_t done_ns = reader_now_ns();
+	uint64_t encode_start_ns = info->last_submit_ns;
+	if (encode_start_ns == 0)
+		encode_start_ns = wait_start_ns;
+	if (done_ns > encode_start_ns) {
+		const uint64_t encode_ns = done_ns - encode_start_ns;
+		if (encode_ns < 1000000000ull)
+			__atomic_store_n(&info->last_encode_ns, encode_ns, __ATOMIC_RELAXED);
+	}
+	info->last_submit_ns = 0;
 	return (int)total;
 }
 
@@ -917,6 +929,13 @@ bool wait_ready_h26x_packet(int ch, int timeout_ms)
 			reader.stop.load(std::memory_order_relaxed);
 	});
 	return !reader.queue.empty();
+}
+
+uint64_t h26x_last_encode_ns(int ch)
+{
+	if (ch < 0 || ch >= MMF_VENC_MAX_CHN)
+		return 0;
+	return __atomic_load_n(&g_runtime.h26x_encoders[ch].last_encode_ns, __ATOMIC_RELAXED);
 }
 
 uint64_t h26x_reader_last_packet_ns(int ch)

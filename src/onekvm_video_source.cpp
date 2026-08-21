@@ -659,7 +659,13 @@ int32_t source_read(void *opaque, onekvm_video_frame_v1 *frame,
     int height = 0;
     int format = 0;
     std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
+    const uint64_t capture_start_ns = monotonic_ns();
     int result = mmf::acquire_capture_frame(source->channel, &data, &length, &width, &height, &format);
+    if (result == 0 && data != nullptr && length > 0) {
+        const uint64_t capture_ns = monotonic_ns() - capture_start_ns;
+        if (capture_ns < 1000000000ull)
+            source->last_capture_ns.store(capture_ns, std::memory_order_relaxed);
+    }
     if (result != 0 || data == nullptr || length <= 0) {
         if (result == 0) {
             mmf::release_capture_frame(source->channel);
@@ -725,6 +731,17 @@ int32_t source_signal_present(void *opaque) {
     if (source != nullptr && source->out_of_range.load(std::memory_order_relaxed))
         return 1;
     return cached_signal_present(source) > 0 ? 1 : 0;
+}
+
+int32_t source_latency(void *opaque, onekvm_video_latency_v1 *latency) {
+    auto *source = static_cast<Source *>(opaque);
+    if (source == nullptr || latency == nullptr ||
+        latency->struct_size < sizeof(*latency)) {
+        return -1;
+    }
+    latency->capture_ns = source->last_capture_ns.load(std::memory_order_relaxed);
+    latency->encode_ns = 0;
+    return 0;
 }
 
 int32_t source_input_format(void *opaque, onekvm_video_format_v1 *format) {

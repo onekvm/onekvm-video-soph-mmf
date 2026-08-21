@@ -76,6 +76,8 @@ struct H26xEncoderState {
 	VENC_PACK_S packs[MMF_VENC_INTERNAL_PACKS];
 	H26xEncoderConfig cfg;
 	uint32_t staging_pool_id;
+	uint64_t last_submit_ns;
+	uint64_t last_encode_ns;
 };
 
 struct BufferPool {

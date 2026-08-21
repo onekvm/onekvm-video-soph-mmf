@@ -506,6 +506,13 @@ int32_t fill_bound_live_packet(Encoder *encoder, Source *source,
     packet->codec = public_codec(encoder->codec_type);
     packet->key_frame = key_frame ? 1 : 0;
     packet->pts_ns = monotonic_ns();
+    encoder->last_encode_ns.store(mmf::h26x_last_encode_ns(encoder->channel),
+                                 std::memory_order_relaxed);
+    if (source != nullptr) {
+        encoder->last_capture_ns.store(
+            source->last_capture_ns.load(std::memory_order_relaxed),
+            std::memory_order_relaxed);
+    }
     return 0;
 }
 
@@ -669,6 +676,23 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
     return 0;
 }
 
+int32_t encoder_latency(void *opaque, onekvm_video_latency_v1 *latency) {
+    auto *encoder = static_cast<Encoder *>(opaque);
+    if (encoder == nullptr || latency == nullptr ||
+        latency->struct_size < sizeof(*latency)) {
+        return -1;
+    }
+    uint64_t encode_ns = encoder->last_encode_ns.load(std::memory_order_relaxed);
+    if (encoder->channel >= kFirstVENCChannel) {
+        const uint64_t channel_ns = mmf::h26x_last_encode_ns(encoder->channel);
+        if (channel_ns > 0)
+            encode_ns = channel_ns;
+    }
+    latency->capture_ns = encoder->last_capture_ns.load(std::memory_order_relaxed);
+    latency->encode_ns = encode_ns;
+    return 0;
+}
+
 int32_t encoder_unbind_source(void *opaque, char *error, uint32_t error_capacity) {
     auto *encoder = static_cast<Encoder *>(opaque);
     if (encoder == nullptr) {
@@ -730,6 +754,7 @@ int32_t encoder_encode(void *opaque, const onekvm_video_frame_v1 *frame,
             /* JPEG uses a borrowed VI/VB frame without copying it. Keep the
                Encode call synchronous so the pipeline cannot return that
                frame to VI before VENC has produced the JPEG bitstream. */
+            const uint64_t encode_start_ns = monotonic_ns();
             const int push_result = mmf::submit_jpeg_frame(
                 encoder->channel, const_cast<uint8_t *>(frame->data),
                 frame->width, frame->height, kMMFNV21,
@@ -745,7 +770,12 @@ int32_t encoder_encode(void *opaque, const onekvm_video_frame_v1 *frame,
                 set_error(error, error_capacity, "release MMF JPEG frame failed");
                 return -1;
             }
-            if (result > 0) output_data = encoder->output.data();
+            if (result > 0) {
+                output_data = encoder->output.data();
+                const uint64_t encode_ns = monotonic_ns() - encode_start_ns;
+                if (encode_ns < 1000000000ull)
+                    encoder->last_encode_ns.store(encode_ns, std::memory_order_relaxed);
+            }
         } else {
             /* The previous borrowed access unit is valid until this call. A
                v1 caller that does not use encoder_release_packet therefore
@@ -922,7 +952,8 @@ const onekvm_video_backend_v1 kBackend = {
     ONEKVM_VIDEO_FEATURE_SIGNAL_PRESENT | ONEKVM_VIDEO_FEATURE_KEYFRAME |
         ONEKVM_VIDEO_FEATURE_BORROWED_PACKET |
         ONEKVM_VIDEO_FEATURE_PREPARE_ENCODE |
-        ONEKVM_VIDEO_FEATURE_BOUND_ENCODER,
+        ONEKVM_VIDEO_FEATURE_BOUND_ENCODER |
+        ONEKVM_VIDEO_FEATURE_LATENCY,
     kFormats,
     static_cast<uint32_t>(sizeof(kFormats) / sizeof(kFormats[0])),
     source_create,
@@ -945,6 +976,8 @@ const onekvm_video_backend_v1 kBackend = {
     encoder_read_packet,
     encoder_unbind_source,
     source_input_format,
+    source_latency,
+    encoder_latency,
 };
 
 

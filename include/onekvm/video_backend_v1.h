@@ -42,6 +42,7 @@ enum onekvm_video_pixel_format_v1 {
 #define ONEKVM_VIDEO_FEATURE_BORROWED_PACKET (1ull << 3)
 #define ONEKVM_VIDEO_FEATURE_PREPARE_ENCODE  (1ull << 4)
 #define ONEKVM_VIDEO_FEATURE_BOUND_ENCODER   (1ull << 5)
+#define ONEKVM_VIDEO_FEATURE_LATENCY         (1ull << 6)
 
 struct onekvm_video_source_config_v1 {
     uint32_t struct_size;
@@ -91,6 +92,12 @@ struct onekvm_video_packet_v1 {
     uint64_t pts_ns;
 };
 
+struct onekvm_video_latency_v1 {
+    uint32_t struct_size;
+    uint64_t capture_ns;
+    uint64_t encode_ns;
+};
+
 struct onekvm_video_backend_v1 {
     uint32_t struct_size;
     uint32_t abi_version;
@@ -119,6 +126,8 @@ struct onekvm_video_backend_v1 {
     int32_t (*encoder_read_packet)(void *, struct onekvm_video_packet_v1 *, char *, uint32_t);
     int32_t (*encoder_unbind_source)(void *, char *, uint32_t);
     int32_t (*source_input_format)(void *, struct onekvm_video_format_v1 *);
+    int32_t (*source_latency)(void *, struct onekvm_video_latency_v1 *);
+    int32_t (*encoder_latency)(void *, struct onekvm_video_latency_v1 *);
 };
 
 typedef int32_t (*onekvm_video_backend_query_fn)(uint32_t, const void **);

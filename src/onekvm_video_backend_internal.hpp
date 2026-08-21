@@ -68,6 +68,7 @@ struct ONEKVM_VIDEO_INTERNAL Source {
     std::chrono::steady_clock::time_point last_recovery{};
     std::chrono::steady_clock::time_point last_hdmi_probe{};
     std::atomic<uint64_t> last_frame_ns{0};
+    std::atomic<uint64_t> last_capture_ns{0};
     std::atomic<uint64_t> last_signal_probe_ns{0};
     std::atomic<int> cached_signal{-1};
     std::atomic<int> last_vi_int_cnt{0};
@@ -106,6 +107,8 @@ struct ONEKVM_VIDEO_INTERNAL Encoder {
     std::vector<uint8_t> output;
     uint64_t mmf_generation = 0;
     Source *bound_source = nullptr;
+    std::atomic<uint64_t> last_capture_ns{0};
+    std::atomic<uint64_t> last_encode_ns{0};
 };
 
 extern ONEKVM_VIDEO_INTERNAL std::recursive_mutex g_mmf_mutex;
@@ -140,6 +143,8 @@ ONEKVM_VIDEO_INTERNAL void source_release(void *source, uint64_t token);
 ONEKVM_VIDEO_INTERNAL int32_t source_signal_present(void *source);
 ONEKVM_VIDEO_INTERNAL int32_t source_input_format(
     void *source, onekvm_video_format_v1 *format);
+ONEKVM_VIDEO_INTERNAL int32_t source_latency(
+    void *source, onekvm_video_latency_v1 *latency);
 ONEKVM_VIDEO_INTERNAL void source_destroy(void *source);
 
 ONEKVM_VIDEO_INTERNAL int32_t encoder_create(
@@ -167,6 +172,8 @@ ONEKVM_VIDEO_INTERNAL int32_t encoder_read_packet(
     char *error, uint32_t error_capacity);
 ONEKVM_VIDEO_INTERNAL int32_t encoder_unbind_source(
     void *encoder, char *error, uint32_t error_capacity);
+ONEKVM_VIDEO_INTERNAL int32_t encoder_latency(
+    void *encoder, onekvm_video_latency_v1 *latency);
 
 extern ONEKVM_VIDEO_INTERNAL const onekvm_video_backend_v1 kBackend;
 
