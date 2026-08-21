@@ -17,6 +17,7 @@ HDMI 源
 - **无消费者**：Core `videoLoop` 停在 `waitForConsumer`，不会替 MMF 探 HDMI。分辨率跟随必须在 source 自己的 **HDMI watcher** 里跑。
 - **VENC reader**：独立线程 `GetStream`。用户态队列只保留 1 个 AU，避免预取 4 帧。`SetChnAttr`（含改 FPS）、`RequestIDR`、`close_encoder` 只能在这个线程、两次 `GetStream` 之间做。HTTP 或 `g_mmf_mutex` 上对活通道调这些会和 `GetStream` 抢 `EnterVcodecLock`。VPSS/VENC 延迟 proc 只在等下一包或队满时读，不要挡 `GetStream`。
 - **绑定 VPSS→VENC** 时 `bIsoSendFrmEn` 必须关掉。绑定路径从不 `SendFrame`，打开隔离后编码计数涨、`GetStream` 队列为空。
+- **编码格式**：Cube WAVE4 进程里只有一个 H.264/H.265 worker。绑定后不要 `DestroyChn` / `StopRecvFrame` 切换 H.264↔H.265，VPSS 会把 `VENC waitq is full` 填满。RustDesk/RTSP 共用绑定主路，info 报实际 codec。要换编码走设备视频设置的 `ResetVideo`（先 unbind）。
 
 ## CSIBDG 与画面宽
 

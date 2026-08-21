@@ -297,6 +297,12 @@ int32_t encoder_reset(void *opaque, const onekvm_video_encoder_config_v1 *config
        GetStream holds EnterVcodecLock on the reader. Only fps/gop changes
        are posted for that thread. Suspend and quality/bitrate/QP still
        close the channel — after stop_h26x_reader joins. */
+    if (encoder->initialized && encoder->source_bound &&
+        encoder->codec_type != 0 && next_codec != encoder->codec_type) {
+        set_error(error, error_capacity,
+                  "cannot change bound VENC codec; VPSS would fill waitq");
+        return -1;
+    }
     if (encoder->initialized && encoder->codec_type != 0 &&
         encoder->codec_type == next_codec && encoder->channel >= 0 &&
         encoder_rc_unchanged(encoder->config, next)) {
