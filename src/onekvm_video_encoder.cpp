@@ -466,6 +466,8 @@ int32_t encoder_bind_source(void *encoder_opaque, void *source_opaque,
     return bind_encoder_to_source_locked(encoder, source, error, error_capacity);
 }
 
+int32_t fill_bound_empty_packet(Encoder *encoder, onekvm_video_packet_v1 *packet);
+
 int encode_bound_placeholder(Encoder *encoder, Source *source,
                              onekvm_video_packet_v1 *packet,
                              char *error, uint32_t error_capacity) {
