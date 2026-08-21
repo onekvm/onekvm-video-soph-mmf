@@ -619,9 +619,10 @@ int ensure_no_signal_nv21(Source *source, int width, int height,
     int written = render_no_signal_nv21(source->no_signal_frame.data(),
                                         static_cast<int>(bytes), width, height);
     if (written != static_cast<int>(bytes)) {
-        set_error(error, error_capacity,
-                  "render no-signal frame returned %d, want %zu", written, bytes);
-        return -1;
+        uint8_t *plane = source->no_signal_frame.data();
+        const size_t luma = static_cast<size_t>(width) * static_cast<size_t>(height);
+        std::memset(plane, 16, luma);
+        std::memset(plane + luma, 128, bytes - luma);
     }
     source->no_signal_width = width;
     source->no_signal_height = height;

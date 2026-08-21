@@ -469,16 +469,21 @@ int encode_bound_placeholder(Encoder *encoder, Source *source,
         set_error(error, error_capacity, "placeholder requires an open VENC channel");
         return -1;
     }
+    /* CloseFd/UnBind while the reader is in GetStream races EnterVcodecLock.
+       Join first, same order as close_encoder. Do not take g_mmf_mutex until
+       GetStream has returned. */
+    if (encoder->source_bound) {
+        mmf::stop_h26x_reader(encoder->channel);
+        std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
+        if (mmf::unbind_h26x_from_capture(encoder->channel) != 0) {
+            set_error(error, error_capacity,
+                      "unbind VPSS from VENC for placeholder failed");
+            return -1;
+        }
+        encoder->source_bound = false;
+    }
     {
         std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
-        if (encoder->source_bound) {
-            if (mmf::unbind_h26x_from_capture(encoder->channel) != 0) {
-                set_error(error, error_capacity,
-                          "unbind VPSS from VENC for placeholder failed");
-                return -1;
-            }
-            encoder->source_bound = false;
-        }
         mmf::start_h26x_reader(encoder->channel);
         if (entering)
             mmf::h26x_reader_want_idr(encoder->channel);
@@ -500,8 +505,13 @@ int encode_bound_placeholder(Encoder *encoder, Source *source,
     const uint8_t *output_data = nullptr;
     uint64_t output_pts_ns = 0;
     bool key_frame = false;
-    const int result = drain_venc_packet(
+    int result = drain_venc_packet(
         encoder, &output_data, &output_pts_ns, &key_frame);
+    if (result == 0) {
+        (void)mmf::wait_ready_h26x_packet(encoder->channel, 40);
+        result = drain_venc_packet(
+            encoder, &output_data, &output_pts_ns, &key_frame);
+    }
     if (result < 0) {
         set_error(error, error_capacity,
                   "read placeholder VENC packet failed: %d", result);
@@ -609,72 +619,94 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
         }
     }
     bool key_frame = false;
-    if (result == 0 && output_data == nullptr)
-        result = drain_venc_packet(encoder, &output_data, &output_pts_ns, &key_frame);
-    if (result < 0) {
-        set_error(error, error_capacity, "read bound MMF frame failed: %d", result);
-        return -1;
-    }
     const bool missing_signal =
         source->out_of_range.load(std::memory_order_relaxed) ||
         cached_signal_present(source) == 0;
-    if (result > 0 && !missing_signal && !encoder->placeholder_frames)
-        return fill_bound_live_packet(
-            encoder, source, packet, output_data, result, key_frame, true);
-
-    const uint64_t last_live = mmf::h26x_reader_last_packet_ns(encoder->channel);
-    const uint64_t now = monotonic_ns();
-    /* last_live==0 means the reader has not delivered a unit yet, not that
-       HDMI is gone. A recent live AU also suppresses the artwork: the VI
-       FrameRate field stays 0 for the first second, and inserting a canned
-       IDR between live P frames breaks the decoder. */
-    const uint64_t live_ns = static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::nanoseconds>(
-            kVencLiveRecentWindow).count());
-    const bool live_recent = last_live != 0 &&
-        now >= last_live && now - last_live <= live_ns;
-    const bool venc_stale = last_live != 0 &&
-        now > last_live && now - last_live > live_ns;
-
-    /* Between live access units the queue is often empty. The old path
-       read /proc/cvitek/vi and slept 10 ms while holding both mutexes,
-       which dropped Enc/actual_fps into the 30-50 range. Wait on the
-       reader and leave HDMI rebuilds to the watcher. */
-    if (live_recent && !encoder->placeholder_frames) {
-        const int ch = encoder->channel;
-        source_lock.unlock();
-        lock.unlock();
-        (void)mmf::wait_ready_h26x_packet(ch, 40);
-        lock.lock();
-        source = encoder->bound_source;
-        if (source == nullptr || encoder->codec_type == 0) {
-            set_error(error, error_capacity, "encoder is not bound to a source");
-            return -1;
-        }
-        source_lock = std::unique_lock<std::mutex>(source->mutex);
-        invalidate_stale_encoder(encoder);
-        if (!encoder->initialized)
-            return fill_bound_empty_packet(encoder, packet);
-        result = drain_venc_packet(
-            encoder, &output_data, &output_pts_ns, &key_frame);
+    /* Do not take_ready before the placeholder path. The reader queue holds
+       one AU: popping it here then draining again in encode_bound_placeholder
+       drops the still. Live HDMI still drains first so we can return it. */
+    if (!encoder->placeholder_frames) {
+        if (result == 0 && output_data == nullptr)
+            result = drain_venc_packet(
+                encoder, &output_data, &output_pts_ns, &key_frame);
         if (result < 0) {
             set_error(error, error_capacity, "read bound MMF frame failed: %d", result);
             return -1;
         }
-        const bool still_missing =
-            source->out_of_range.load(std::memory_order_relaxed) ||
-            cached_signal_present(source) == 0;
-        if (result > 0)
+        if (result > 0 && !missing_signal)
             return fill_bound_live_packet(
-                encoder, source, packet, output_data, result, key_frame,
-                !still_missing);
-        return fill_bound_empty_packet(encoder, packet);
-    }
+                encoder, source, packet, output_data, result, key_frame, true);
 
-    /* Host mode changes often stop both VI and VENC. The placeholder
-       used to return here and never increment failures, so the pipeline
-       stayed on the old CSI geometry until a process restart. */
-    if (missing_signal || venc_stale) {
+        const uint64_t last_live = mmf::h26x_reader_last_packet_ns(encoder->channel);
+        const uint64_t now = monotonic_ns();
+        /* last_live==0 means the reader has not delivered a unit yet, not that
+           HDMI is gone. A recent live AU also suppresses the artwork: the VI
+           FrameRate field stays 0 for the first second, and inserting a canned
+           IDR between live P frames breaks the decoder. */
+        const uint64_t live_ns = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                kVencLiveRecentWindow).count());
+        const bool live_recent = last_live != 0 &&
+            now >= last_live && now - last_live <= live_ns;
+        const bool venc_stale = last_live != 0 &&
+            now > last_live && now - last_live > live_ns;
+
+        /* Between live access units the queue is often empty. The old path
+           read /proc/cvitek/vi and slept 10 ms while holding both mutexes,
+           which dropped Enc/actual_fps into the 30-50 range. Wait on the
+           reader and leave HDMI rebuilds to the watcher. */
+        if (live_recent) {
+            const int ch = encoder->channel;
+            source_lock.unlock();
+            lock.unlock();
+            (void)mmf::wait_ready_h26x_packet(ch, 40);
+            lock.lock();
+            source = encoder->bound_source;
+            if (source == nullptr || encoder->codec_type == 0) {
+                set_error(error, error_capacity, "encoder is not bound to a source");
+                return -1;
+            }
+            source_lock = std::unique_lock<std::mutex>(source->mutex);
+            invalidate_stale_encoder(encoder);
+            if (!encoder->initialized)
+                return fill_bound_empty_packet(encoder, packet);
+            result = drain_venc_packet(
+                encoder, &output_data, &output_pts_ns, &key_frame);
+            if (result < 0) {
+                set_error(error, error_capacity, "read bound MMF frame failed: %d", result);
+                return -1;
+            }
+            const bool still_missing =
+                source->out_of_range.load(std::memory_order_relaxed) ||
+                cached_signal_present(source) == 0;
+            if (result > 0)
+                return fill_bound_live_packet(
+                    encoder, source, packet, output_data, result, key_frame,
+                    !still_missing);
+            return fill_bound_empty_packet(encoder, packet);
+        }
+
+        if (!missing_signal && !venc_stale) {
+            source->failures++;
+            const int rebuilt = maybe_rebuild_for_hdmi_change(
+                source, error, error_capacity);
+            if (rebuilt != 0) {
+                encoder->placeholder_frames = false;
+                invalidate_stale_encoder(encoder);
+                return -1;
+            }
+            const int codec = encoder->codec_type;
+            source_lock.unlock();
+            lock.unlock();
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            packet->data = nullptr;
+            packet->data_size = 0;
+            packet->codec = public_codec(codec);
+            packet->key_frame = 0;
+            packet->pts_ns = monotonic_ns();
+            return 0;
+        }
+    } else if (!missing_signal) {
         source->failures++;
         const int rebuilt = maybe_rebuild_for_hdmi_change(
             source, error, error_capacity);
@@ -683,9 +715,26 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
             invalidate_stale_encoder(encoder);
             return -1;
         }
-        return encode_bound_placeholder(encoder, source, packet, error, error_capacity);
+        encoder->placeholder_frames = false;
+        encoder->request_keyframe = true;
+        if (bind_encoder_to_source_locked(
+                encoder, source, error, error_capacity) != 0)
+            return -1;
+        const int codec = encoder->codec_type;
+        source_lock.unlock();
+        lock.unlock();
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        packet->data = nullptr;
+        packet->data_size = 0;
+        packet->codec = public_codec(codec);
+        packet->key_frame = 0;
+        packet->pts_ns = monotonic_ns();
+        return 0;
     }
 
+    /* Host mode changes often stop both VI and VENC. The placeholder
+       used to return here and never increment failures, so the pipeline
+       stayed on the old CSI geometry until a process restart. */
     source->failures++;
     const int rebuilt = maybe_rebuild_for_hdmi_change(
         source, error, error_capacity);
@@ -694,23 +743,7 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
         invalidate_stale_encoder(encoder);
         return -1;
     }
-    if (encoder->placeholder_frames) {
-        encoder->placeholder_frames = false;
-        encoder->request_keyframe = true;
-        if (bind_encoder_to_source_locked(
-                encoder, source, error, error_capacity) != 0)
-            return -1;
-    }
-    const int codec = encoder->codec_type;
-    source_lock.unlock();
-    lock.unlock();
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    packet->data = nullptr;
-    packet->data_size = 0;
-    packet->codec = public_codec(codec);
-    packet->key_frame = 0;
-    packet->pts_ns = monotonic_ns();
-    return 0;
+    return encode_bound_placeholder(encoder, source, packet, error, error_capacity);
 }
 
 int32_t encoder_latency(void *opaque, onekvm_video_latency_v1 *latency) {
@@ -748,10 +781,13 @@ int32_t encoder_unbind_source(void *opaque, char *error, uint32_t error_capacity
        StartRecvFrame may succeed without recreating it, after which VPSS
        fills the input waitq forever.  mmf::unbind_h26x_from_capture disconnects only
        the producer; close_encoder performs the worker's single Stop when the
-       encoder is reset or finally released. */
-    std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
+       encoder is reset or finally released. Join our GetStream reader before
+       CloseFd so the two never share EnterVcodecLock. */
     const bool live = encoder->initialized && encoder->source_bound &&
         encoder->mmf_generation == g_mmf_generation.load(std::memory_order_acquire);
+    if (live && encoder->codec_type != 0 && encoder->channel >= 0)
+        mmf::stop_h26x_reader(encoder->channel);
+    std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
     if (live && mmf::unbind_h26x_from_capture(encoder->channel) != 0) {
         set_error(error, error_capacity, "unbind VPSS from VENC failed");
         return -1;

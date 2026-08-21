@@ -46,7 +46,7 @@ HDMI 重建、I2C、`/proc/cvitek/vi` 归 **watcher**。活 1080 且 VI 在跑�
 
 ## 无信号占位
 
-无信号图是缓存的 NV21 素材（由 PNG 打包装入 `no_signal_frames.inc`）。绑定路径在 HDMI 丢失后 **解绑 VPSS**，把这帧 `SendFrame` 进 VENC，让码率控制出 P 帧。不要每圈塞一份预编码 IDR，那会把码率打到十几 Mbps。
+无信号图是缓存的 NV21 素材（由 PNG 打包装入 `no_signal_frames.inc`）。绑定路径在 HDMI 丢失后 **先停 reader，再解绑 VPSS**，把这帧 `SendFrame` 进 VENC，让码率控制出 P 帧。不要每圈塞一份预编码 IDR，那会把码率打到十几 Mbps。打包 PNG 只有 1080/720/480；其它 VENC 尺寸 letterbox/scale，失败填黑帧，不要让 `encoder_read_packet` 失败。占位期间不要在 `encode_bound_placeholder` 之前 `take_ready`：队列只有 1 个 AU，提前弹出再 drain 会把静帧丢掉。
 
 不支持的 HDMI 模式（如 1366×768、1440p）同样走这套占位编码，但 status 带 `hdmi_error=out_of_range` 和实测 `input_width/height`，UI 显示「不支持的分辨率」，不要只显示无信号。
 

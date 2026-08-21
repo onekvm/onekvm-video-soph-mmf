@@ -31,5 +31,30 @@ int main()
 		return 11;
 	if (no_signal_h264(0, 0, &h264, &h264_size) != 0 || h264_size < 8)
 		return 12;
+
+	{
+		constexpr int width = 1024;
+		constexpr int height = 768;
+		constexpr int image_size = width * height * 3 / 2;
+		std::vector<uint8_t> frame(image_size, 0xa5);
+		if (render_no_signal_nv21(frame.data(), image_size, width, height) != image_size)
+			return 13;
+		if (frame[0] != 16)
+			return 14;
+		auto y_end = frame.begin() + width * height;
+		if (std::all_of(frame.begin(), y_end,
+			[](uint8_t value) { return value == 16; }))
+			return 15;
+		if (*std::max_element(frame.begin(), y_end) <= 200)
+			return 16;
+	}
+	{
+		constexpr int width = 800;
+		constexpr int height = 600;
+		constexpr int image_size = width * height * 3 / 2;
+		std::vector<uint8_t> frame(image_size);
+		if (render_no_signal_nv21(frame.data(), image_size, width, height) != image_size)
+			return 17;
+	}
 	return 0;
 }
