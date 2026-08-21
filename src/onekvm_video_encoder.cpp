@@ -611,7 +611,7 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
         const int ch = encoder->channel;
         source_lock.unlock();
         lock.unlock();
-        (void)mmf::wait_ready_h26x_packet(ch, 20);
+        (void)mmf::wait_ready_h26x_packet(ch, 40);
         lock.lock();
         source = encoder->bound_source;
         if (source == nullptr || encoder->codec_type == 0) {

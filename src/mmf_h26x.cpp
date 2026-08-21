@@ -8,12 +8,14 @@
 #include <cstring>
 #include <deque>
 #include <mutex>
+#include <poll.h>
 #include <thread>
 #include <vector>
 
 namespace onekvm::mmf {
 
-constexpr std::size_t kReaderQueueMax = 4;
+/* Hold at most one ready AU. Prefetching 4 frames added up to ~66 ms at 60 fps. */
+constexpr std::size_t kReaderQueueMax = 1;
 
 struct H26xQueuedPacket {
 	std::vector<uint8_t> data;
@@ -497,11 +499,14 @@ static int copy_h26x_packet(int ch, uint8_t *dst, int capacity,
 		if (!have_pack) {
 			if (wait_timeout_us <= 0 || past_deadline)
 				return 0;
-			/* Poll is often silent on the bound path. Sleep a short
-			   slice of the remaining budget, then QueryStatus again. */
-			const int64_t slice_us = remaining > 2000 ? 2000 : remaining;
-			if (slice_us > 0)
-				usleep(static_cast<useconds_t>(slice_us));
+			/* Bound-path poll(fd) is often silent. QueryStatus in 1 ms
+			   slices so a ready pack is not left sitting for 2 ms. */
+			struct pollfd pfd{};
+			pfd.fd = info->fd;
+			pfd.events = POLLIN;
+			const int timeout_ms = remaining > 1000 ? 1 : 0;
+			if (poll(&pfd, 1, timeout_ms) <= 0 && remaining > 0 && timeout_ms == 0)
+				usleep(static_cast<useconds_t>(remaining > 200 ? 200 : remaining));
 			continue;
 		}
 		if (pack_ready_ns == 0)
@@ -515,7 +520,7 @@ static int copy_h26x_packet(int ch, uint8_t *dst, int capacity,
 		if (ret == CVI_ERR_VENC_BUSY) {
 			if (wait_timeout_us <= 0 || past_deadline)
 				return 0;
-			usleep(2000);
+			usleep(200);
 			continue;
 		}
 		if (ret != CVI_SUCCESS)
@@ -570,7 +575,6 @@ static int copy_h26x_packet(int ch, uint8_t *dst, int capacity,
 		}
 	}
 	info->last_submit_ns = 0;
-	refresh_bound_hw_latency(info);
 	return (int)total;
 }
 
@@ -923,6 +927,9 @@ void start_h26x_reader(int ch)
 					self.cv.notify_all();
 				}
 			}
+			/* Proc dumps are slow; never hold an AU behind them. */
+			if (!overflow)
+				refresh_bound_hw_latency(&g_runtime.h26x_encoders[ch]);
 			if (overflow)
 				(void)request_h26x_idr(ch);
 		}
