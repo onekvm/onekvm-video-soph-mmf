@@ -575,8 +575,6 @@ static int copy_h26x_packet(int ch, uint8_t *dst, int capacity,
 				__atomic_store_n(&info->last_encode_ns, encode_ns,
 					__ATOMIC_RELAXED);
 		}
-	} else {
-		refresh_bound_hw_latency(info);
 	}
 	info->last_submit_ns = 0;
 	return (int)total;
@@ -594,6 +592,7 @@ static int copy_and_release_h26x_packet(int ch, uint8_t *dst, int capacity,
 		return result;
 	if (release_h26x_packet(ch) != 0)
 		return -1;
+	refresh_h26x_hw_latency(ch);
 	/* H.264/H.265 P frames form a reference chain.  Returning a newer access
 	 * unit after silently discarding an older P frame produces an undecodable
 	 * stream even when it lowers the apparent queue latency.  Consume exactly
