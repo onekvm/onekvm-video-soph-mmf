@@ -499,9 +499,8 @@ static int copy_h26x_packet(int ch, uint8_t *dst, int capacity,
 		if (!have_pack) {
 			if (wait_timeout_us <= 0 || past_deadline)
 				return 0;
-			/* Sample HW latency only while waiting for the next pack. */
-			if (remaining > 8000)
-				refresh_bound_hw_latency(info);
+			/* Sample HwEncTime/CostTime off the ready-pack path. */
+			refresh_bound_hw_latency(info);
 			/* Bound-path poll(fd) is often silent. QueryStatus in 1 ms
 			   slices so a ready pack is not left sitting for 2 ms. */
 			struct pollfd pfd{};
@@ -576,6 +575,8 @@ static int copy_h26x_packet(int ch, uint8_t *dst, int capacity,
 				__atomic_store_n(&info->last_encode_ns, encode_ns,
 					__ATOMIC_RELAXED);
 		}
+	} else {
+		refresh_bound_hw_latency(info);
 	}
 	info->last_submit_ns = 0;
 	return (int)total;
@@ -1001,6 +1002,13 @@ uint64_t h26x_last_encode_ns(int ch)
 	if (ch < 0 || ch >= MMF_VENC_MAX_CHN)
 		return 0;
 	return __atomic_load_n(&g_runtime.h26x_encoders[ch].last_encode_ns, __ATOMIC_RELAXED);
+}
+
+void refresh_h26x_hw_latency(int ch)
+{
+	if (ch < 0 || ch >= MMF_VENC_MAX_CHN)
+		return;
+	refresh_bound_hw_latency(&g_runtime.h26x_encoders[ch]);
 }
 
 uint64_t h26x_last_capture_ns(int ch)

@@ -760,6 +760,8 @@ int32_t encoder_latency(void *opaque, onekvm_video_latency_v1 *latency) {
         latency->struct_size < sizeof(*latency)) {
         return -1;
     }
+    if (encoder->channel >= kFirstVENCChannel)
+        mmf::refresh_h26x_hw_latency(encoder->channel);
     uint64_t capture_ns = encoder->last_capture_ns.load(std::memory_order_relaxed);
     uint64_t encode_ns = encoder->last_encode_ns.load(std::memory_order_relaxed);
     if (encoder->channel >= kFirstVENCChannel) {

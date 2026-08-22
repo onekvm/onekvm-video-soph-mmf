@@ -93,6 +93,7 @@ bool wait_ready_h26x_packet(int ch, int timeout_ms);
 uint64_t h26x_reader_last_packet_ns(int ch);
 uint64_t h26x_last_encode_ns(int ch);
 uint64_t h26x_last_capture_ns(int ch);
+void refresh_h26x_hw_latency(int ch);
 void h26x_reader_want_idr(int ch);
 int release_h26x_packet(int ch);
 int request_h26x_idr(int ch);
