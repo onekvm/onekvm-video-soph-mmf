@@ -15,8 +15,10 @@ HDMI 源
 - **绑定路径**：Core 调 `BindVideoSource` + `ReadEncodedVideo`（`encoder_read_packet`）。不要在这条路上调 `source_read`。
 - **延迟**：绑定路径没有 `acquire_capture_frame`。VENC pack `u64PTS` 是编码完成时刻，不能当采集起点。采集缓存 = 一场输入周期（`1/input_fps`）+ `/proc/cvitek/vpss` 的 `CostTime`；编码缓存 = `/proc/cvitek/venc` 的 `HwEncTime`。reader 最多 2Hz 读这两份 proc（不要读 `vi`/`vi_dbg`）。status/SSE 只读缓存。
 - **无消费者**：Core `videoLoop` 停在 `waitForConsumer`，不会替 MMF 探 HDMI。分辨率跟随必须在 source 自己的 **HDMI watcher** 里跑。
-- **VENC reader**：独立线程 `GetStream`。用户态队列只保留 1 个 AU，避免预取 4 帧。`SetChnAttr`（含改 FPS）、`RequestIDR`、`close_encoder` 只能在这个线程、两次 `GetStream` 之间做。HTTP 或 `g_mmf_mutex` 上对活通道调这些会和 `GetStream` 抢 `EnterVcodecLock`。VPSS/VENC 延迟 proc 只在等下一包或队满时读，不要挡 `GetStream`。
+- **VENC reader**：独立线程 `GetStream`。用户态有界队列最多保留 16 个 AU，只用于吸收同步 CryptoDMA/网络发送的短暂调度停顿；队满时不能等待消费者，否则 50 ms 的停顿就会把背压传回 VPSS 并触发 `VENC waitq is full`。reader 必须立即丢弃陈旧链、在两次 `GetStream` 之间请求一次新 IDR，并继续排空硬件流。`SetChnAttr`（含改 FPS）、`RequestIDR`、`close_encoder` 也只能在这个线程、两次 `GetStream` 之间做。HTTP 或 `g_mmf_mutex` 上对活通道调这些会和 `GetStream` 抢 `EnterVcodecLock`。VPSS/VENC 延迟 proc 只在等下一包或队满时读，不要挡 `GetStream`。
+- **参数集**：CVITEK 会把 H.264 PPS（H.265 还包括 VPS/SPS/PPS）拆成 IDR 前的独立 AU。reader 等待 IDR 时仍须缓存这些参数集，并在关键 AU 缺项时按 VPS/SPS/PPS 顺序补齐；直接丢掉所有非 IDR 会让浏览器收到 RTP 但无法初始化解码器。
 - **绑定 VPSS→VENC** 时 `bIsoSendFrmEn` 必须关掉。绑定路径从不 `SendFrame`，打开隔离后编码计数涨、`GetStream` 队列为空。
+- **首次绑定等待**：HDMI watcher 的初始信号状态可能晚于 WebRTC 建链。VENC 第一个 AU 到达前沿用 1.5 秒 live grace，不能因初始 `cached_signal` 未就绪而立即 unbind 后直送静帧；此时 VENC 里仍有 VPSS 输入，会造成 `venc-handler`/`SendFrame` 锁反转并耗尽 VPSS VB pool。
 - **编码格式**：Cube WAVE4 进程里只有一个 H.264/H.265 worker。绑定后不要 `DestroyChn` / `StopRecvFrame` 切换 H.264↔H.265，VPSS 会把 `VENC waitq is full` 填满。RustDesk/RTSP 共用绑定主路，info 报实际 codec。要换编码走设备视频设置的 `ResetVideo`（先 unbind）。
 
 ## CSIBDG 与画面宽
@@ -47,11 +49,11 @@ HDMI 重建、I2C、`/proc/cvitek/vi` 归 **watcher**。活 1080 且 VI 在跑�
 
 ## 无信号占位
 
-无信号图是缓存的 NV21 素材（由 PNG 打包装入 `no_signal_frames.inc`）。绑定路径在 HDMI 丢失后 **先停 reader，再解绑 VPSS**，把这帧 `SendFrame` 进 VENC，让码率控制出 P 帧。不要每圈塞一份预编码 IDR，那会把码率打到十几 Mbps。打包 PNG 只有 1080/720/480；其它 VENC 尺寸 letterbox/scale，失败填黑帧，不要让 `encoder_read_packet` 失败。占位期间不要在 `encode_bound_placeholder` 之前 `take_ready`：队列只有 1 个 AU，提前弹出再 drain 会把静帧丢掉。
+绑定路径不能在 HDMI 丢失后把同一个 VENC 通道改成 `SendFrame` 占位：`VPSS_UnBind` 不会清掉厂商驱动的 `currBindMode`，随后直送帧会和 `venc-handler` 在全局 VPU 锁上互锁，并耗尽 VPSS VB pool。无信号期间保持 VPSS→VENC 通道生命周期并返回空包，浏览器暂时保留最后画面；输入恢复后原绑定链自动继续。缓存的 NV21 无信号素材（由 PNG 打包装入 `no_signal_frames.inc`）只留给非绑定编码路径。若以后恢复绑定占位图，必须把占位帧送到 VPSS 上游，不能对已启动的绑定 VENC 调 `SendFrame`。
 
-不支持的 HDMI 模式（如 1366×768、1440p）同样走这套占位编码，但 status 带 `hdmi_error=out_of_range` 和实测 `input_width/height`，UI 显示「不支持的分辨率」，不要只显示无信号。
+不支持的 HDMI 模式（如 1366×768、1440p）仍在 status 中提供 `hdmi_error=out_of_range` 和实测 `input_width/height`，UI 显示「不支持的分辨率」；绑定视频在安全的 VPSS 上游占位实现前返回空包。
 
-不要把占位 IDR 插进还在出的 P 帧。VI `FrameRate` 列开机约 1 秒是 0，不能单靠这一列判无信号。占位图要等 VENC 最近一包超过存活窗口（当前 1.5s）。
+VI `FrameRate` 列开机约 1 秒是 0，不能单靠这一列判无信号。判定输入消失仍要等 VENC 最近一包超过存活窗口（当前 1.5s），避免短暂的 reader/IDR 间隙触发重建。
 
 ## 帧率
 

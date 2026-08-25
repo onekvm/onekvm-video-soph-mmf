@@ -14,8 +14,11 @@
 
 namespace onekvm::mmf {
 
-/* Hold at most one ready AU. Prefetching 4 frames added up to ~66 ms at 60 fps. */
-constexpr std::size_t kReaderQueueMax = 1;
+/* Keep enough complete access units to absorb the scheduler stalls caused by
+ * synchronous CryptoDMA batches. The Core sender normally drains faster than
+ * VENC produces, so this capacity does not add steady-state prefetch latency;
+ * it only preserves the P-frame chain across short 50-200 ms stalls. */
+constexpr std::size_t kReaderQueueMax = 16;
 
 struct H26xQueuedPacket {
 	std::vector<uint8_t> data;
@@ -537,7 +540,6 @@ static int copy_h26x_packet(int ch, uint8_t *dst, int capacity,
 		info->stream_held = 0;
 		return -1;
 	}
-
 	CVI_U32 total = 0;
 	for (CVI_U32 index = 0; index < stream->u32PackCount; ++index) {
 		VENC_PACK_S *pack = &stream->pstPack[index];
@@ -716,7 +718,12 @@ int bind_h26x_to_capture(int ch, int vpss_group, int vpss_channel) {
 	info->capture_group = (uint8_t)vpss_group;
 	info->capture_channel = (uint8_t)vpss_channel;
 	info->packet_pending = 1;
-	start_h26x_reader(ch);
+	/* A newly started worker emits a complete parameter-set + IDR access unit
+	 * for its first frame.  Requesting another IDR here races that pending AU:
+	 * the vendor recovery path discards it and the replacement carries SPS but
+	 * no PPS.  Existing workers still need an explicit IDR when they are rebound
+	 * after an idle or placeholder interval. */
+	start_h26x_reader(ch, !start_worker);
 	return 0;
 }
 
@@ -786,6 +793,16 @@ int request_h26x_idr(int ch) {
 	if (ch < 0 || ch >= MMF_VENC_MAX_CHN || !g_runtime.h26x_encoders[ch].initialized)
 		return -1;
 	h26x_reader_want_idr(ch);
+	H26xReader &reader = g_readers[ch];
+	/* StartRecvFrame naturally makes the first encoded frame an IDR with the
+	 * complete SPS/PPS set.  WebRTC and WebSocket subscribers both request a
+	 * keyframe as they attach; if that request reaches the vendor before the
+	 * first AU is dequeued, its GOP-reset path replaces the complete AU with an
+	 * SPS-only IDR.  The reader is already waiting for the natural keyframe, so
+	 * coalesce only this startup request. */
+	if (reader.running.load(std::memory_order_acquire) &&
+	    reader.last_packet_ns.load(std::memory_order_relaxed) == 0)
+		return 0;
 	return CVI_VENC_RequestIDR(ch, CVI_TRUE);
 }
 
@@ -844,7 +861,7 @@ int set_h26x_output_fps(int ch, int output_fps, int gop)
 	return 0;
 }
 
-void start_h26x_reader(int ch)
+void start_h26x_reader(int ch, bool request_idr)
 {
 	if (ch < 0 || ch >= MMF_VENC_MAX_CHN)
 		return;
@@ -862,29 +879,46 @@ void start_h26x_reader(int ch)
 		reader.queue.clear();
 	}
 	reader.running.store(true, std::memory_order_release);
-	reader.thread = std::thread([ch]() {
+	reader.thread = std::thread([ch, request_idr]() {
 		H26xReader &self = g_readers[ch];
 		std::vector<uint8_t> scratch(1024 * 1024);
-		bool idr_ioctl_sent = false;
-		if (request_h26x_idr(ch) != 0)
-			printf("OneKVM: reader IDR request failed on ch %d\n", ch);
-		else
-			idr_ioctl_sent = true;
+		AnnexBParameterSets parameter_sets;
+		bool idr_ioctl_sent = !request_idr;
+		if (request_idr) {
+			/* This is the reader's own between-GetStream request.  Calling
+			 * request_h26x_idr() here would mistake it for a subscriber's
+			 * concurrent startup request and coalesce it while last_packet_ns is
+			 * still zero, so an existing worker rebound after idle would wait for
+			 * the natural GOP instead of receiving the requested recovery IDR. */
+			if (CVI_VENC_RequestIDR(ch, CVI_TRUE) != CVI_SUCCESS)
+				printf("OneKVM: reader IDR request failed on ch %d\n", ch);
+			else
+				idr_ioctl_sent = true;
+		}
 		while (!self.stop.load(std::memory_order_relaxed)) {
+			bool queue_overrun = false;
 			{
-				std::unique_lock<std::mutex> lock(self.mu);
-				while (self.queue.size() >= kReaderQueueMax &&
-					!self.stop.load(std::memory_order_relaxed)) {
-					lock.unlock();
-					refresh_bound_hw_latency(&g_runtime.h26x_encoders[ch]);
-					lock.lock();
-					if (self.stop.load(std::memory_order_relaxed))
-						break;
-					if (self.queue.size() >= kReaderQueueMax)
-						self.cv.wait_for(lock, std::chrono::milliseconds(5));
-				}
+				std::lock_guard<std::mutex> lock(self.mu);
 				if (self.stop.load(std::memory_order_relaxed))
 					break;
+				/* Never propagate a slow consumer back into the vendor VENC.
+				 * Once its stream buffers fill, VPSS fills the VENC input waitq
+				 * and the worker cannot recover.  In particular, waiting here for
+				 * the consumer used to stop GetStream for 50 ms and directly cause
+				 * "VENC waitq is full".  Drop the stale userspace chain immediately,
+				 * drain through a fresh IDR, and resume with decodable output. */
+				if (self.queue.size() >= kReaderQueueMax) {
+					self.queue.clear();
+					self.want_idr.store(true, std::memory_order_relaxed);
+					queue_overrun = true;
+				}
+			}
+			if (queue_overrun) {
+				/* The ioctl runs only here, between GetStream calls.  Issue it once
+				 * for this overrun instead of freezing until the next regular GOP;
+				 * idr_ioctl_sent prevents repeats while that IDR is pending. */
+				idr_ioctl_sent = false;
+				refresh_bound_hw_latency(&g_runtime.h26x_encoders[ch]);
 			}
 			const int pending_fps = self.pending_output_fps.exchange(
 				0, std::memory_order_acq_rel);
@@ -897,9 +931,10 @@ void start_h26x_reader(int ch)
 			if (!self.want_idr.load(std::memory_order_relaxed))
 				idr_ioctl_sent = false;
 			else if (!idr_ioctl_sent) {
-				if (request_h26x_idr(ch) != 0)
+				if (CVI_VENC_RequestIDR(ch, CVI_TRUE) != CVI_SUCCESS)
 					printf("OneKVM: reader IDR request failed on ch %d\n", ch);
-				idr_ioctl_sent = true;
+				else
+					idr_ioctl_sent = true;
 			}
 			const int got = read_latest_h26x_packet(
 				ch, scratch.data(), static_cast<int>(scratch.size()));
@@ -910,7 +945,11 @@ void start_h26x_reader(int ch)
 				});
 				continue;
 			}
-			const bool key = g_runtime.h26x_encoders[ch].codec == H26xCodec::H265
+			const bool h265 =
+				g_runtime.h26x_encoders[ch].codec == H26xCodec::H265;
+			parameter_sets.update(
+				scratch.data(), static_cast<std::size_t>(got), h265);
+			const bool key = h265
 				? annexb_has_h265_irap(
 					scratch.data(), static_cast<std::size_t>(got))
 				: annexb_has_idr(
@@ -927,7 +966,12 @@ void start_h26x_reader(int ch)
 					overflow = true;
 				} else {
 					H26xQueuedPacket packet;
-					packet.data.assign(scratch.begin(), scratch.begin() + got);
+					if (key) {
+						packet.data = parameter_sets.augment_keyframe(
+							scratch.data(), static_cast<std::size_t>(got), h265);
+					} else {
+						packet.data.assign(scratch.begin(), scratch.begin() + got);
+					}
 					packet.key_frame = key;
 					self.queue.push_back(std::move(packet));
 					if (key)
@@ -937,8 +981,14 @@ void start_h26x_reader(int ch)
 					self.cv.notify_all();
 				}
 			}
-			if (overflow)
-				(void)request_h26x_idr(ch);
+			if (overflow) {
+				self.want_idr.store(true, std::memory_order_relaxed);
+				/* The consumer may drain one AU before the next loop, so the
+				 * queue-overrun check at the top is not guaranteed to run. Keep
+				 * the request armed here; otherwise we can wait for the natural
+				 * GOP after already discarding the dependent P-frame chain. */
+				idr_ioctl_sent = false;
+			}
 		}
 		self.running.store(false, std::memory_order_release);
 	});

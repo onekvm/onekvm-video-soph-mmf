@@ -25,5 +25,44 @@ int main()
 	if (annexb_has_h265_irap(h265_p, sizeof(h265_p))) return 11;
 	if (annexb_has_h265_irap(empty, sizeof(empty))) return 12;
 	if (annexb_has_h265_irap(nullptr, 8)) return 13;
+
+	const uint8_t h264_pps[] = {0, 0, 0, 1, 0x68, 0xce, 0x3c, 0x80};
+	AnnexBParameterSets h264_parameters;
+	h264_parameters.update(h264_pps, sizeof(h264_pps), false);
+	h264_parameters.update(sps_idr, sizeof(sps_idr), false);
+	if (!h264_parameters.complete(false)) return 14;
+	const std::vector<uint8_t> h264_augmented =
+		h264_parameters.augment_keyframe(sps_idr, sizeof(sps_idr), false);
+	if (h264_augmented.size() <= sizeof(sps_idr)) return 15;
+	if ((annexb_parameter_set_mask(h264_augmented.data(), h264_augmented.size(), false) &
+	     (kAnnexBParamSPS | kAnnexBParamPPS)) !=
+	    (kAnnexBParamSPS | kAnnexBParamPPS)) return 16;
+	if (!annexb_has_idr(h264_augmented.data(), h264_augmented.size())) return 17;
+
+	const uint8_t h264_complete[] = {
+		0, 0, 0, 1, 0x67, 1,
+		0, 0, 0, 1, 0x68, 2,
+		0, 0, 0, 1, 0x65, 3,
+	};
+	const std::vector<uint8_t> unchanged = h264_parameters.augment_keyframe(
+		h264_complete, sizeof(h264_complete), false);
+	if (unchanged.size() != sizeof(h264_complete)) return 18;
+	for (std::size_t index = 0; index < unchanged.size(); ++index)
+		if (unchanged[index] != h264_complete[index]) return 19;
+
+	const uint8_t h265_vps[] = {0, 0, 0, 1, 0x40, 1, 7};
+	const uint8_t h265_sps[] = {0, 0, 1, 0x42, 1, 8};
+	const uint8_t h265_pps[] = {0, 0, 0, 1, 0x44, 1, 9};
+	AnnexBParameterSets h265_parameters;
+	h265_parameters.update(h265_vps, sizeof(h265_vps), true);
+	h265_parameters.update(h265_sps, sizeof(h265_sps), true);
+	h265_parameters.update(h265_pps, sizeof(h265_pps), true);
+	if (!h265_parameters.complete(true)) return 20;
+	const std::vector<uint8_t> h265_augmented = h265_parameters.augment_keyframe(
+		h265_idr, sizeof(h265_idr), true);
+	if ((annexb_parameter_set_mask(h265_augmented.data(), h265_augmented.size(), true) &
+	     (kAnnexBParamVPS | kAnnexBParamSPS | kAnnexBParamPPS)) !=
+	    (kAnnexBParamVPS | kAnnexBParamSPS | kAnnexBParamPPS)) return 21;
+	if (!annexb_has_h265_irap(h265_augmented.data(), h265_augmented.size())) return 22;
 	return 0;
 }

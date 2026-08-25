@@ -104,6 +104,7 @@ struct ONEKVM_VIDEO_INTERNAL Encoder {
     uint64_t pending_pts_ns = 0;
     size_t prepared_size = 0;
     uint64_t prepared_pts_ns = 0;
+    uint64_t bound_since_ns = 0;
     std::vector<uint8_t> output;
     uint64_t mmf_generation = 0;
     Source *bound_source = nullptr;

@@ -180,3 +180,13 @@ install(FILES
     include/onekvm/crypto_backend_v1.h
     include/onekvm/video_backend_v1.h
     DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/onekvm")
+
+if(BUILD_TESTING)
+    add_executable(bound_reader_stress tests/bound-reader-stress.cpp)
+    target_include_directories(bound_reader_stress PRIVATE include)
+    target_compile_features(bound_reader_stress PRIVATE cxx_std_17)
+    target_link_libraries(bound_reader_stress PRIVATE dl pthread)
+    onekvm_enable_warnings(bound_reader_stress)
+    install(TARGETS bound_reader_stress
+        RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+endif()

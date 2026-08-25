@@ -85,7 +85,7 @@ int read_latest_h26x_packet(int ch, uint8_t *dst, int capacity);
 int read_latest_h26x_packet_nowait(int ch, uint8_t *dst, int capacity);
 // Release every access unit already queued without waiting for a new one.
 int drain_h26x_packets(int ch, uint8_t *scratch, int capacity);
-void start_h26x_reader(int ch);
+void start_h26x_reader(int ch, bool request_idr = true);
 void stop_h26x_reader(int ch);
 int take_ready_h26x_packet(int ch, uint8_t *dst, int capacity,
 	bool *key_frame = nullptr);

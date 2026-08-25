@@ -109,6 +109,7 @@ void close_encoder(Encoder *encoder) {
     encoder->pending_pts_ns = 0;
     encoder->prepared_size = 0;
     encoder->prepared_pts_ns = 0;
+    encoder->bound_since_ns = 0;
     encoder->mmf_generation = 0;
     encoder->bound_source = nullptr;
 }
@@ -129,6 +130,7 @@ void invalidate_stale_encoder(Encoder *encoder) {
     encoder->pending_pts_ns = 0;
     encoder->prepared_size = 0;
     encoder->prepared_pts_ns = 0;
+    encoder->bound_since_ns = 0;
     encoder->mmf_generation = 0;
 }
 
@@ -450,6 +452,7 @@ int bind_encoder_to_source_locked(Encoder *encoder, Source *source,
     encoder->frame_pending = false;
     encoder->prepared_size = 0;
     encoder->prepared_pts_ns = 0;
+    encoder->bound_since_ns = monotonic_ns();
     return 0;
 }
 
@@ -490,25 +493,28 @@ int encode_bound_placeholder(Encoder *encoder, Source *source,
         }
         encoder->source_bound = false;
     }
-    {
-        std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
-        mmf::start_h26x_reader(encoder->channel);
-        if (entering)
-            mmf::h26x_reader_want_idr(encoder->channel);
-    }
     const auto [width, height] = source_output_size(source);
     if (ensure_no_signal_nv21(source, width, height, error, error_capacity) != 0)
         return -1;
     {
         std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
+        /* The vendor GetStream and SendFrame ioctls share EnterVcodecLock.
+           Submit the first still while the reader is stopped; starting the
+           reader first makes SendFrame intermittently return VENC_BUSY. */
+        if (entering)
+            (void)mmf::request_h26x_idr(encoder->channel);
         const int push = mmf::submit_h26x_frame(
             encoder->channel, source->no_signal_frame.data(),
             width, height, kMMFNV21);
         if (push != 0) {
+            mmf::start_h26x_reader(encoder->channel, false);
             set_error(error, error_capacity,
                       "submit no-signal frame to VENC failed: %d", push);
             return -1;
         }
+        /* request_h26x_idr above already marked the reader as waiting for an
+           IDR.  Suppress a second ioctl while the submitted still encodes. */
+        mmf::start_h26x_reader(encoder->channel, false);
     }
     const uint8_t *output_data = nullptr;
     uint64_t output_pts_ns = 0;
@@ -654,6 +660,17 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
         const uint64_t live_ns = static_cast<uint64_t>(
             std::chrono::duration_cast<std::chrono::nanoseconds>(
                 kVencLiveRecentWindow).count());
+        /* cached_signal starts at unknown/no-signal and the HDMI watcher may
+           not publish its first sample before Core opens WebRTC.  Do not tear
+           down a newly bound producer merely because the VENC worker has not
+           emitted its first AU yet.  Unbinding with its first VPSS frames
+           still queued and immediately calling SendFrame creates a vendor
+           lock inversion (venc-handler waits for EnterVcodecLock while the
+           caller waits for the VPU timelock), permanently pinning the VPSS
+           VB pool. */
+        const bool awaiting_first_au = last_live == 0 &&
+            encoder->bound_since_ns != 0 && now >= encoder->bound_since_ns &&
+            now - encoder->bound_since_ns <= live_ns;
         const bool live_recent = last_live != 0 &&
             now >= last_live && now - last_live <= live_ns;
         const bool venc_stale = last_live != 0 &&
@@ -663,7 +680,7 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
            read /proc/cvitek/vi and slept 10 ms while holding both mutexes,
            which dropped Enc/actual_fps into the 30-50 range. Wait on the
            reader and leave HDMI rebuilds to the watcher. */
-        if (live_recent) {
+        if (awaiting_first_au || live_recent) {
             const int ch = encoder->channel;
             source_lock.unlock();
             lock.unlock();
@@ -740,9 +757,15 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
         return 0;
     }
 
-    /* Host mode changes often stop both VI and VENC. The placeholder
-       used to return here and never increment failures, so the pipeline
-       stayed on the old CSI geometry until a process restart. */
+    /* Host mode changes often stop both VI and VENC. Keep probing/rebuilding
+       the source, but do not turn this already-started bound channel into a
+       userspace SendFrame channel. VPSS_UnBind does not clear the vendor
+       driver's currBindMode flag; SendFrame after that point can retain the
+       global VPU lock while venc-handler waits for it, pinning every VPSS VB
+       block and making StopRecvFrame hang in kthread_stop. Keep the producer
+       relationship intact and return an empty packet while HDMI is absent.
+       The bound worker resumes without a channel-mode transition when input
+       frames return. */
     source->failures++;
     const int rebuilt = maybe_rebuild_for_hdmi_change(
         source, error, error_capacity);
@@ -751,7 +774,7 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
         invalidate_stale_encoder(encoder);
         return -1;
     }
-    return encode_bound_placeholder(encoder, source, packet, error, error_capacity);
+    return fill_bound_empty_packet(encoder, packet);
 }
 
 int32_t encoder_latency(void *opaque, onekvm_video_latency_v1 *latency) {
@@ -806,6 +829,7 @@ int32_t encoder_unbind_source(void *opaque, char *error, uint32_t error_capacity
     encoder->pending_pts_ns = 0;
     encoder->prepared_size = 0;
     encoder->prepared_pts_ns = 0;
+    encoder->bound_since_ns = 0;
     encoder->bound_source = nullptr;
     return 0;
 }
