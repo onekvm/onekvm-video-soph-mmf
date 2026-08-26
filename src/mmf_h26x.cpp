@@ -19,6 +19,7 @@ namespace onekvm::mmf {
  * VENC produces, so this capacity does not add steady-state prefetch latency;
  * it only preserves the P-frame chain across short 50-200 ms stalls. */
 constexpr std::size_t kReaderQueueMax = 16;
+constexpr int64_t kVencPollWatchdogUs = 40 * 1000;
 
 struct H26xQueuedPacket {
 	std::vector<uint8_t> data;
@@ -498,21 +499,40 @@ static int copy_h26x_packet(int ch, uint8_t *dst, int capacity,
 			? deadline_us - ((int64_t)now.tv_sec * 1000000 + now.tv_usec)
 			: 0;
 		const bool past_deadline = wait_timeout_us > 0 && remaining <= 0;
-		const bool have_pack = venc_stream_ready(ch);
-		if (!have_pack) {
-			if (wait_timeout_us <= 0 || past_deadline)
+		if (past_deadline)
+			return 0;
+
+		/* The driver reports already queued streams from its poll callback and
+		 * wakes this fd after the bound worker publishes a new stream.  A longer
+		 * watchdog retains a bounded recovery path without issuing QueryStatus on
+		 * every millisecond of a normal 60 fps frame interval. */
+		struct pollfd pfd{};
+		pfd.fd = info->fd;
+		pfd.events = POLLIN;
+		const int64_t poll_us = wait_timeout_us > 0
+			? (remaining < kVencPollWatchdogUs ? remaining : kVencPollWatchdogUs)
+			: 0;
+		const int timeout_ms = static_cast<int>((poll_us + 999) / 1000);
+		const int poll_ret = poll(&pfd, 1, timeout_ms);
+		if (poll_ret < 0) {
+			if (errno == EINTR)
+				continue;
+			return -1;
+		}
+		if (poll_ret == 0) {
+			if (wait_timeout_us <= 0)
 				return 0;
-			/* Sample HwEncTime/CostTime off the ready-pack path. */
-			refresh_bound_hw_latency(info);
-			/* Bound-path poll(fd) is often silent. QueryStatus in 1 ms
-			   slices so a ready pack is not left sitting for 2 ms. */
-			struct pollfd pfd{};
-			pfd.fd = info->fd;
-			pfd.events = POLLIN;
-			const int timeout_ms = remaining > 1000 ? 1 : 0;
-			if (poll(&pfd, 1, timeout_ms) <= 0 && remaining > 0 && timeout_ms == 0)
-				usleep(static_cast<useconds_t>(remaining > 200 ? 200 : remaining));
-			continue;
+			/* A timeout is exceptional with the fixed bound-mode driver. Check
+			 * status once as a watchdog for older or missed-wakeup drivers. */
+			if (!venc_stream_ready(ch)) {
+				refresh_bound_hw_latency(info);
+				continue;
+			}
+		} else {
+			if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL))
+				return -1;
+			if (!(pfd.revents & (POLLIN | POLLRDNORM)))
+				continue;
 		}
 		if (pack_ready_ns == 0)
 			pack_ready_ns = reader_now_ns();
@@ -520,7 +540,7 @@ static int copy_h26x_packet(int ch, uint8_t *dst, int capacity,
 		stream->pstPack = info->packs;
 		/* Never ask GetStream to block. The vendor EnterVcodecLock path
 		   ignores a millisecond timeout when the worker already holds
-		   the lock. QueryStatus is the only bounded wait. */
+		   the lock. The fd poll above is the bounded wait. */
 		ret = CVI_VENC_GetStream(ch, stream, 0);
 		if (ret == CVI_ERR_VENC_BUSY) {
 			if (wait_timeout_us <= 0 || past_deadline)
