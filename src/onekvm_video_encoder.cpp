@@ -39,16 +39,16 @@ int bitrate(int width, int height, double quality, int fps = 0) {
        100 kbps safety floor. */
     const int64_t base = static_cast<int64_t>(width) * height * 10000 /
                          (static_cast<int64_t>(1920) * 1080);
-    const int output_fps = mmf::clamp_output_fps(fps);
+    const int output_fps = mmf::clamp_output_fps(fps, width, height);
     const double fps_scale = output_fps > mmf::kDefaultInputFps
         ? static_cast<double>(output_fps) / mmf::kDefaultInputFps
         : 1.0;
     return std::max(100, static_cast<int>(static_cast<double>(base) * quality * fps_scale));
 }
 
-static int normalized_output_fps(int fps)
+static int normalized_output_fps(int fps, int width = 0, int height = 0)
 {
-    return mmf::clamp_output_fps(fps);
+    return mmf::clamp_output_fps(fps, width, height);
 }
 
 static int normalized_gop(int gop, int fps)
@@ -171,7 +171,7 @@ int configure_encoder(Encoder *encoder, int width, int height,
         set_error(error, error_capacity, "allocate encoder output: out of memory");
         return -1;
     }
-    int fps = normalized_output_fps(encoder->config.fps);
+    int fps = normalized_output_fps(encoder->config.fps, width, height);
     // The capture/VPSS path can continue delivering frames at the HDMI input
     // cadence even when the requested output is lower.  Tell VENC the
     // expected input cadence separately from the requested destination rate;
@@ -308,9 +308,11 @@ int32_t encoder_reset(void *opaque, const onekvm_video_encoder_config_v1 *config
     if (encoder->initialized && encoder->codec_type != 0 &&
         encoder->codec_type == next_codec && encoder->channel >= 0 &&
         encoder_rc_unchanged(encoder->config, next)) {
-        const int fps = normalized_output_fps(next.fps);
+        const int fps = normalized_output_fps(
+            next.fps, encoder->width, encoder->height);
         const int gop = normalized_gop(next.gop, fps);
-        const int cur_fps = normalized_output_fps(encoder->config.fps);
+        const int cur_fps = normalized_output_fps(
+            encoder->config.fps, encoder->width, encoder->height);
         const int cur_gop = normalized_gop(encoder->config.gop, cur_fps);
         if (fps != cur_fps || gop != cur_gop) {
             if (mmf::set_h26x_output_fps(encoder->channel, fps, gop) != 0) {

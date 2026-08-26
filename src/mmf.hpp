@@ -33,12 +33,17 @@ enum class H26xCodec : uint8_t {
 constexpr int kDefaultInputFps = 60;
 constexpr int kMaxOutputFps = 120;
 
-inline int clamp_output_fps(int fps)
+inline int clamp_output_fps(int fps, int width = 0, int height = 0)
 {
 	if (fps <= 0)
 		return 30;
-	if (fps > kMaxOutputFps)
-		return kMaxOutputFps;
+	int cap = kMaxOutputFps;
+	/* 720p120 is inside WAVE4/H.264 L4.2. 1080p120 is not. */
+	if (width > 0 && height > 0 &&
+	    static_cast<int64_t>(width) * height > 1280 * 720)
+		cap = kDefaultInputFps;
+	if (fps > cap)
+		return cap;
 	return fps;
 }
 
