@@ -85,6 +85,15 @@ int initialize(void);
 int shutdown(void);
 
 // manage vi channels(vi->vpssgroup->vpss->frame)
+/* CV181x phy chn 0 is sc_d (max 1920). Dest wider than that must use
+   chn 1 (sc_v1, max 2880) or the driver tiles and NV21 comes out empty. */
+inline int vpss_phy_channel(int width)
+{
+	if (width > 1920)
+		return 1;
+	return 0;
+}
+
 int find_free_capture_channel(void);
 int start_capture_pipeline(void);
 int stop_capture_pipeline(void);

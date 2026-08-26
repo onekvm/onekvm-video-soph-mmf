@@ -1,5 +1,7 @@
 #include "mmf_internal.hpp"
 
+#include <cstdio>
+
 namespace onekvm::mmf {
 void set_capture_mirror(int channel, bool enabled)
 {
@@ -290,6 +292,8 @@ static int create_capture_channel(int ch, int width, int height, int format, int
 	PIXEL_FORMAT_E format_out = (PIXEL_FORMAT_E)format;
 	const bool mirror = g_capture_options.mirror[ch];
 	const bool flip = g_capture_options.flip[ch];
+	std::fprintf(stderr, "OneKVM: VPSS phy chn %d (%s) %dx%d\n",
+		     ch, ch == 1 ? "sc_v1" : "sc_d", width, height);
 	s32Ret = disable_vpss_channel(0, ch);
 	if (s32Ret != CVI_SUCCESS) {
 		SAMPLE_PRT("disable_vpss_channel failed with %#x!\n", s32Ret);
@@ -336,7 +340,8 @@ static int create_capture_channel(int ch, int width, int height, int format, int
 	 * VI only after the output pool is usable; otherwise the first VI frame
 	 * enters an unbuffered channel and the worker retries forever, starving
 	 * the userspace thread before it can reach AttachVbPool(). */
-	s32Ret = SAMPLE_COMM_VI_Bind_VPSS(0, ch, 0);
+	/* VI only has chn 0. `ch` is the VPSS physical scaler (0=sc_d, 1=sc_v1). */
+	s32Ret = SAMPLE_COMM_VI_Bind_VPSS(0, 0, 0);
 	if (s32Ret != CVI_SUCCESS) {
 		SAMPLE_PRT("vi bind vpss failed. s32Ret: 0x%x !\n", s32Ret);
 		goto _need_detach_vb_pool;
@@ -423,7 +428,7 @@ int close_capture_channel(int ch) {
 	}
 
 	CVI_S32 s32Ret = CVI_SUCCESS;
-	s32Ret = SAMPLE_COMM_VI_UnBind_VPSS(0, ch, 0);
+	s32Ret = SAMPLE_COMM_VI_UnBind_VPSS(0, 0, 0);
 	if (s32Ret != CVI_SUCCESS) {
 		SAMPLE_PRT("vi unbind vpss failed. s32Ret: 0x%x !\n", s32Ret);
 		// return -1; // continue to deinit vpss
@@ -462,7 +467,8 @@ bool capture_channel_open(int ch) {
 int reset_capture_channel(int ch, int width, int height, int format, int fps)
 {
 	close_capture_channel(ch);
-	return open_capture_channel(ch, width, height, format, fps);
+	const int out_ch = vpss_phy_channel(width) == 1 ? 1 : ch;
+	return open_capture_channel(out_ch, width, height, format, fps);
 }
 
 int acquire_capture_frame(int ch, void **data, int *len, int *width, int *height, int *format) {

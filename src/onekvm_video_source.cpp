@@ -301,8 +301,10 @@ int open_source(Source *source, const onekvm_video_source_config_v1 *config,
         set_error(error, error_capacity, "start MMF capture pipeline failed");
         return -1;
     }
-    int channel = mmf::find_free_capture_channel();
-    if (channel < 0) {
+    int channel = onekvm::mmf::vpss_phy_channel(width);
+    if (channel == 0)
+        channel = mmf::find_free_capture_channel();
+    if (channel < 0 || mmf::capture_channel_open(channel)) {
         mmf::stop_capture_pipeline();
         mmf::shutdown();
         set_error(error, error_capacity, "no free MMF VI channel");
@@ -592,6 +594,8 @@ int32_t source_reset(void *opaque, const onekvm_video_source_config_v1 *config,
         set_error(error, error_capacity, "reset MMF capture channel failed: %d", result);
         return -1;
     }
+    if (onekvm::mmf::vpss_phy_channel(width) == 1)
+        source->channel = 1;
     source->config = *config;
     source->config.device = nullptr;
     source->capture_width = width;
