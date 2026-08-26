@@ -310,7 +310,10 @@ int open_source(Source *source, const onekvm_video_source_config_v1 *config,
     }
     mmf::set_capture_mirror(channel, false);
     mmf::set_capture_flip(channel, false);
-    const int fps = config->fps > 0 ? static_cast<int>(config->fps) : 60;
+    const int requested_fps = config->fps > 0 ? static_cast<int>(config->fps) : 60;
+    const int fps = onekvm::mmf::clamp_output_fps(
+        requested_fps, static_cast<int>(input.width),
+        static_cast<int>(input.height));
     int result = mmf::open_capture_channel(channel, width, height, kMMFNV21, fps);
     if (result != 0) {
         mmf::stop_capture_pipeline();

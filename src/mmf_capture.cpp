@@ -19,7 +19,7 @@ static CVI_S32 configure_vpss_channel(VPSS_GRP VpssGrp, VPSS_CHN VpssChn, int wi
 {
 #if 1
 	VPSS_GRP_ATTR_S stGrpAttr;
-	VPSS_CROP_INFO_S   stChnCropInfo;
+	VPSS_CROP_INFO_S   stChnCropInfo{};
 	VPSS_CHN_ATTR_S chn_attr{};
 	CVI_S32 s32Ret = CVI_SUCCESS;
 
@@ -90,13 +90,14 @@ static CVI_S32 configure_vpss_channel(VPSS_GRP VpssGrp, VPSS_CHN VpssChn, int wi
 		}
 
 		stChnCropInfo.bEnable = true;
+		stChnCropInfo.enCropCoordinate = VPSS_CROP_ABS_COOR;
 		stChnCropInfo.stCropRect.s32X = (stGrpAttr.u32MaxW - crop_w) / 2;
 		stChnCropInfo.stCropRect.s32Y = (stGrpAttr.u32MaxH - crop_h) / 2;
 		stChnCropInfo.stCropRect.u32Width = crop_w;
 		stChnCropInfo.stCropRect.u32Height = crop_h;
 	}
 
-	if (crop_w != 0 && crop_h != 0) {
+	if (stChnCropInfo.bEnable) {
 		s32Ret = CVI_VPSS_SetChnCrop(VpssGrp, VpssChn, &stChnCropInfo);
 		if (s32Ret != CVI_SUCCESS) {
 			SAMPLE_PRT("set vpss group crop failed. s32Ret: 0x%x !\n", s32Ret);
@@ -170,6 +171,8 @@ static CVI_S32 create_vpss_group(VPSS_GRP VpssGrp, CVI_U32 width, CVI_U32 height
 	stVpssGrpAttr.enPixelFormat                  = format;
 	stVpssGrpAttr.u32MaxW                        = width;
 	stVpssGrpAttr.u32MaxH                        = height;
+	/* Leave 0: the driver remaps YUV groups onto input_mem (dev 1).
+	   Forcing 1 makes CVI_VPSS_CreateGrp fail in single mode. */
 	stVpssGrpAttr.u8VpssDev                      = 0;
 
 	s32Ret = CVI_VPSS_CreateGrp(VpssGrp, &stVpssGrpAttr);
@@ -293,7 +296,9 @@ static int create_capture_channel(int ch, int width, int height, int format, int
 		return CVI_FAILURE;
 	}
 
-	s32Ret = configure_vpss_channel(0, ch, width, height, format_out, fps, depth, mirror, flip, 2);
+	/* fit=2 enables an identity crop. At 2560x1440 that crop path
+	   produces a zero NV21 while the UYVY VI pool still has pixels. */
+	s32Ret = configure_vpss_channel(0, ch, width, height, format_out, fps, depth, mirror, flip, 0);
 	if (s32Ret != CVI_SUCCESS) {
 		SAMPLE_PRT("configure_vpss_channel failed with %#x!\n", s32Ret);
 		return CVI_FAILURE;
