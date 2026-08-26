@@ -388,10 +388,11 @@ int rebuild_for_hdmi_timing(Source *source, bool force_probe, char *error,
     source->cached_signal.store(recent_frames ? 1 : 0, std::memory_order_relaxed);
     source->last_signal_probe_ns.store(monotonic_ns(), std::memory_order_relaxed);
 
-    /* Live 1080p does not need I2C. Touching 80ee here is what produced
-       490x404 "out of range" samples and flashed the no-signal artwork. */
+    /* A live supported mode does not need I2C. Touching 80ee here is what
+       produced 490x404 "out of range" samples and flashed the no-signal
+       artwork. 1440p is the same LT6911 as 1080p. */
     if (!force_probe && recent_frames &&
-        source->input_resolution.current() == onekvm::kMaxViReceiver)
+        onekvm::supported_input_resolution(source->input_resolution.current()))
         return 0;
 
     const auto now = std::chrono::steady_clock::now();
@@ -510,7 +511,8 @@ void hdmi_watch_loop(Source *source) {
            it; a second read in the same tick sees a flat IntCnt and used
            to mark HDMI missing while VENC was still at 60fps. */
         const bool need_fast =
-            source->input_resolution.current() != onekvm::kMaxViReceiver &&
+            !onekvm::supported_input_resolution(
+                source->input_resolution.current()) &&
             source->cached_signal.load(std::memory_order_relaxed) != 1;
         if (need_fast)
             (void)maybe_rebuild_for_hdmi_change_now(

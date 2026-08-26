@@ -1,4 +1,5 @@
 #include "mmf_internal.hpp"
+#include "input_resolution_tracker.hpp"
 
 namespace onekvm::mmf {
 
@@ -363,6 +364,17 @@ static void shutdown_vendor_system(void)
 	SAMPLE_COMM_SYS_Exit();
 }
 
+static void drain_vendor_vb(void)
+{
+	/* SIGKILL and failed VI EnableChn leave CVI_VB_Init refs. One Exit
+	   then makes VB_SetConfig a no-op ("vb has already inited"), so the
+	   previous 1080p common pool (4.18 MiB) is reused for 1440p. */
+	for (int i = 0; i < 16; ++i) {
+		CVI_SYS_Exit();
+		CVI_VB_Exit();
+	}
+}
+
 static CVI_S32 initialize_vendor_system(SIZE_S stSize)
 {
 	VB_CONFIG_S	   stVbConf;
@@ -370,6 +382,7 @@ static CVI_S32 initialize_vendor_system(SIZE_S stSize)
 	CVI_S32 s32Ret = CVI_SUCCESS;
 	COMPRESS_MODE_E    enCompressMode   = COMPRESS_MODE_NONE;
 
+	drain_vendor_vb();
 	memset(&stVbConf, 0, sizeof(VB_CONFIG_S));
 	memcpy(&stVbConf, &g_runtime.vb_conf, sizeof(VB_CONFIG_S));
 
@@ -380,9 +393,16 @@ static CVI_S32 initialize_vendor_system(SIZE_S stSize)
 		DATA_BITWIDTH_8, enCompressMode, DEFAULT_ALIGN);
 	u32BlkSize = MAX(u32BlkSize, u32BlkRotSize);
 	stVbConf.astCommPool[MMF_VB_VI_ID].u32BlkSize	= u32BlkSize;
-	stVbConf.astCommPool[MMF_VB_VI_ID].u32BlkCnt	= 3;
+	/* 1080p keeps 3 UYVY blocks. 1440p UYVY×3 plus VPSS NV21×3 leaves
+	   ~11 MiB of the 48 MiB ION carveout; WAVE4 needs two ~5.5 MiB recon
+	   frames and then fails with "fail to allocate recon buffer". */
+	stVbConf.astCommPool[MMF_VB_VI_ID].u32BlkCnt =
+		(stSize.u32Width * stSize.u32Height > 1920u * 1080u) ? 2 : 3;
 	stVbConf.astCommPool[MMF_VB_VI_ID].enRemapMode	= VB_REMAP_MODE_CACHED;
 	stVbConf.u32MaxPoolCnt = 1;
+	fprintf(stderr, "OneKVM: common VB %ux%u blk=%u count=%u\n",
+		stSize.u32Width, stSize.u32Height, u32BlkSize,
+		stVbConf.astCommPool[MMF_VB_VI_ID].u32BlkCnt);
 
 	s32Ret = SAMPLE_COMM_SYS_Init(&stVbConf);
 	if (s32Ret != CVI_SUCCESS) {
@@ -632,10 +652,15 @@ static CVI_S32 initialize_runtime(void)
 		SAMPLE_PRT("free leak vb memory error\n");
 	}
 
-	/* Keep common VB blocks large enough for the configured 1080p VPSS output
-	 * even when the current HDMI input is smaller.  The VI/pipe dimensions
-	 * below remain the real LT6911 active size. */
-	SIZE_S stPoolSize = {1920, 1080};
+	/* Common VB must cover 1080p VPSS output and the current HDMI frame.
+	 * 1440p VI EnableChn asks for 2560x1440 NV21 (5.53 MiB); a 1080p UYVY
+	 * pool (4.18 MiB) fails with "No valid pool for size(5529600)". */
+	const auto pool = onekvm::common_vb_pool_size(
+		{stSize.u32Width, stSize.u32Height});
+	SIZE_S stPoolSize = {pool.width, pool.height};
+	SAMPLE_PRT("common VB pool %ux%u (HDMI %ux%u)\n",
+		   stPoolSize.u32Width, stPoolSize.u32Height,
+		   stSize.u32Width, stSize.u32Height);
 	s32Ret = initialize_vendor_system(stPoolSize);
 	if (s32Ret != CVI_SUCCESS) {
 		SAMPLE_PRT("sys init failed. s32Ret: 0x%x !\n", s32Ret);

@@ -106,6 +106,22 @@ int main() {
         return 45;
     if (should_grow_to_max_vi_receiver({800, 600}, {3568, 256}))
         return 46;
+    if (common_vb_pool_size({800, 600}) != kMaxCaptureSize)
+        return 50;
+    if (common_vb_pool_size({1920, 1080}) != kMaxCaptureSize)
+        return 51;
+    if (common_vb_pool_size({2560, 1440}) != kMaxCaptureSize)
+        return 52;
+    if (choose_vi_receiver_size({800, 600}, {2560, 1440}, {800, 600}) !=
+        InputResolution{2560, 1440})
+        return 53;
+    if (should_grow_to_max_vi_receiver({800, 600}, {2560, 1440}))
+        return 54;
+    if (should_grow_to_max_vi_receiver({1920, 1080}, {2560, 1440}))
+        return 55;
+    if (!should_rebuild_vi_receiver(
+            {1920, 1080}, {2560, 1440}, {2560, 1440}, {2560, 1440}))
+        return 56;
 
     return 0;
 }

@@ -61,3 +61,4 @@ VI `FrameRate` 列开机约 1 秒是 0，不能单靠这一列判无信号。判
 - 只改目标 FPS 时不要拆 VI/VENC 通道；由 reader 在 `GetStream` 前 `SetChnAttr`。
 - Core 绑定路径的 RTP 时戳用 `1/目标FPS`，不要用墙钟间隔。
 - 720p@120 已在 107 上验证：VI/VPSS FrameRate 119–120、LostFrame=0，HwEncTime ≈ 4.3 ms。HDMI 源必须真出 1280x720@120（CEA VIC 47）；Cube EDID 默认不含该模式。
+- 2560×1440@30 已在 107 上验证：VI/VPSS 30、LostFrame=0，VENC Src/Tar 30，HwEncTime ≈ 16.5 ms，WebRTC 30 fps。公共 VB 按 1440p UYVY 建，**2** 块（3 块会把 48 MiB ION 吃到 WAVE4 recon 申请失败）。`kMaxViReceiver` 仍是 1920×1080（blanking 不能预写成 2560）。活着的受支持模式不要探 LT6911 I2C。

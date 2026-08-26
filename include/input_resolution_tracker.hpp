@@ -114,6 +114,22 @@ constexpr uint64_t resolution_pixels(InputResolution resolution)
 
 constexpr InputResolution kMaxViReceiver{1920, 1080};
 
+/* Common VB is sized for the largest supported capture, the same way the
+   old path reserved 1080p even on 800x600 HDMI. kMaxViReceiver is only
+   the blanking-grow target; following current HDMI left the pool at
+   1920x1080 while VI EnableChn asked for 2560x1440 NV21. */
+constexpr InputResolution kMaxCaptureSize{2560, 1440};
+
+constexpr InputResolution common_vb_pool_size(InputResolution active)
+{
+    InputResolution pool = active;
+    if (pool.width < kMaxCaptureSize.width)
+        pool.width = kMaxCaptureSize.width;
+    if (pool.height < kMaxCaptureSize.height)
+        pool.height = kMaxCaptureSize.height;
+    return pool;
+}
+
 /* LT6911C HDMI counters often show half-width and a garbage height for one
    or two samples while the source is locking 1080p. Treat those as the
    matching supported mode so CSIBDG can grow before the first 1920 line. */
@@ -172,9 +188,9 @@ constexpr bool should_grow_to_max_vi_receiver(
         return false;
     if (hdmi.width == 0)
         return blanking_samples >= kHDMIBlankingGrowSamples;
-    if (supported_input_resolution(hdmi) &&
-        resolution_pixels(hdmi) > resolution_pixels(current))
-        return true;
+    /* Do not cover choose_vi_receiver_size() for a larger supported mode.
+       800→1440 would otherwise program CSIBDG as 1920 and GT-fault the
+       2560 MIPI frame. 800→1080 still matches infer_hdmi_mode. */
     return infer_hdmi_mode(hdmi) == kMaxViReceiver && hdmi != current;
 }
 
