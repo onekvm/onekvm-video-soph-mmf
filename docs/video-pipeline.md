@@ -61,4 +61,4 @@ VI `FrameRate` 列开机约 1 秒是 0，不能单靠这一列判无信号。判
 - 只改目标 FPS 时不要拆 VI/VENC 通道；由 reader 在 `GetStream` 前 `SetChnAttr`。
 - Core 绑定路径的 RTP 时戳用 `1/目标FPS`，不要用墙钟间隔。
 - 720p@120 已在 107 上验证：VI/VPSS FrameRate 119–120、LostFrame=0，HwEncTime ≈ 4.3 ms。HDMI 源必须真出 1280x720@120（CEA VIC 47）；Cube EDID 默认不含该模式。
-- 2560×1440@30 已在 107 上验证：VI/VPSS 30、LostFrame=0，VENC Src/Tar 30，HwEncTime ≈ 16.5 ms，WebRTC 30 fps。ION 现为 **64 MiB @ 0x85000000**（不能从 `0x8fe00000` 往下长，会盖住 U-Boot ramdisk）。公共 VB 按 1440p UYVY **3** 块。`kMaxViReceiver` 仍是 1920×1080。活着的受支持模式不要探 LT6911 I2C。
+- 2560×1440@30：107 上 VI/VPSS/WebRTC 都能到 30 fps、LostFrame=0，码流尺寸也对；**像素是纯黑**。99 本机 spectacle 在同一时刻有桌面。重建时 CSI 计数 0x0、只信 HDMI I2C。详见仓库 `docs/2k-30.md`。ION 现为 **64 MiB @ 0x85000000**。公共 VB 按 1440p UYVY **3** 块。`kMaxViReceiver` 仍是 1920×1080。活着的受支持模式不要探 LT6911 I2C。
