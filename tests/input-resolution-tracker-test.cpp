@@ -4,6 +4,7 @@ int main() {
     using namespace onekvm;
 
     static_assert(supported_input_resolution({1920, 1080}));
+    static_assert(supported_input_resolution({2560, 1440}));
     static_assert(supported_input_resolution({640, 480}));
     static_assert(!supported_input_resolution({1366, 768}));
     static_assert(!supported_input_resolution({0, 0}));
@@ -27,7 +28,7 @@ int main() {
     if (classify_hdmi_input({0, 0}) != HdmiInputClass::None) return 11;
     if (classify_hdmi_input({1920, 1080}) != HdmiInputClass::Supported) return 12;
     if (classify_hdmi_input({1366, 768}) != HdmiInputClass::OutOfRange) return 13;
-    if (classify_hdmi_input({2560, 1440}) != HdmiInputClass::OutOfRange) return 14;
+    if (classify_hdmi_input({2560, 1440}) != HdmiInputClass::Supported) return 14;
     if (classify_hdmi_input({3840, 2160}) != HdmiInputClass::OutOfRange) return 15;
     if (classify_hdmi_input({1921, 1080}) != HdmiInputClass::None) return 16;
 
@@ -35,6 +36,11 @@ int main() {
     if (decode_target_resolution(720) != InputResolution{1280, 720}) return 18;
     if (decode_target_resolution(480) != InputResolution{640, 480}) return 19;
     if (decode_target_resolution(12801024) != InputResolution{1280, 1024}) return 20;
+    if (decode_target_resolution(25601440) != InputResolution{2560, 1440}) return 42;
+    if (target_output_resolution(0, {2560, 1440}) != InputResolution{2560, 1440})
+        return 43;
+    if (infer_hdmi_mode({1280, 1440}) != InputResolution{2560, 1440}) return 44;
+    if (infer_hdmi_mode({1280, 720}) != InputResolution{1280, 720}) return 45;
     if (decode_target_resolution(8540480).width != 0) return 21;
     if (!valid_target_resolution_code(0) || !valid_target_resolution_code(12800800))
         return 22;

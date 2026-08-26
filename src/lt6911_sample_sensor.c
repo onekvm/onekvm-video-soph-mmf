@@ -102,7 +102,9 @@ static CVI_S32 onekvm_lt6911_get_rx_attr(VI_PIPE pipe,
 
 CVI_S32 onekvm_lt6911_set_active_size(CVI_U32 width, CVI_U32 height)
 {
-	if (width == 0 || height == 0 || width > 1920 || height > 1080)
+	if (width == 0 || height == 0 || width > 2880 || height > 1620)
+		return CVI_FAILURE;
+	if ((width & 1u) != 0 || (height & 1u) != 0)
 		return CVI_FAILURE;
 
 	g_active_width = width;

@@ -11,7 +11,7 @@ OneKVM backend ABI while keeping device-specific implementation details out of
 
 - Captures video from the LT6911 HDMI input.
 - Encodes H.264, H.265, and MJPEG in hardware.
-- Recognizes common HDMI input modes from 640x480 through 1920x1080.
+- Recognizes common HDMI input modes from 640x480 through 2560x1440.
 - Provides 1080p, 720p, and 480p OneKVM output profiles. 1080p is up to 60 FPS;
   720p can follow a 120 Hz HDMI source.
 - Reports the HDMI signal state and provides a built-in no-signal frame to
@@ -37,14 +37,15 @@ Input detection and stream output are handled independently. The LT6911 input
 path currently recognizes the following 12 HDMI resolutions:
 
 ```text
-1920x1080  1600x900  1440x1080  1440x900
+2560x1440  1920x1080  1600x900  1440x1080  1440x900
 1280x1024  1280x960  1280x800   1280x720
 1152x864   1024x768  800x600    640x480
 ```
 
-The SG2002 VPSS pipeline scales or crops the input to one of three OneKVM
-output profiles: 1920x1080, 1280x720, or 640x480. 1080p output is up to 60 FPS.
-720p output can run at 120 FPS when the HDMI source actually emits 1280x720@120.
+The SG2002 VPSS pipeline scales or crops the input. Auto mode follows a
+supported HDMI input, including 2560x1440@30. Explicit output can still be
+1920x1080, 1280x720, or 640x480. 1440p is up to 30 FPS, 1080p up to 60 FPS,
+and 720p can run at 120 FPS when the HDMI source emits 1280x720@120.
 
 ## Driver sources and versions
 

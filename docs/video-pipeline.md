@@ -31,7 +31,7 @@ CSI 桥是 **精确匹配**：宽度大于设定（GT）或小于设定（LS）�
 - 目标分辨率只改 VPSS/VENC。VI 接收端：HDMI 变大立刻放大；HDMI 变小要等 CSI 有效尺寸跟上。HDMI 时序空白时不要缩小。
 - 不要只信 HDMI I2C，也不要只信 CSI 当前宽。只信 HDMI 会在 MIPI 仍是 1920 时把 VI 配成 800；只信 CSI 会在 800→1080 时把接收端留在 800。
 
-支持的 HDMI 输入见 [README](../README.md#resolution-handling)。超范围（1366x768、1440p、4K）不要按旧几何继续采，占位并报告实测尺寸。CSI 已是合法模式时，忽略 I2C 垃圾 OOR 读数。
+支持的 HDMI 输入见 [README](../README.md#resolution-handling)。超范围（1366x768、4K）不要按旧几何继续采，占位并报告实测尺寸。2560x1440@30 是支持的采集/编码档。CSI 已是合法模式时，忽略 I2C 垃圾 OOR 读数。
 
 ## 热路径与 HDMI 探测
 
@@ -51,7 +51,7 @@ HDMI 重建、I2C、`/proc/cvitek/vi` 归 **watcher**。活 1080 且 VI 在跑�
 
 绑定路径不能在 HDMI 丢失后把同一个 VENC 通道改成 `SendFrame` 占位：`VPSS_UnBind` 不会清掉厂商驱动的 `currBindMode`，随后直送帧会和 `venc-handler` 在全局 VPU 锁上互锁，并耗尽 VPSS VB pool。无信号期间保持 VPSS→VENC 通道生命周期并返回空包，浏览器暂时保留最后画面；输入恢复后原绑定链自动继续。缓存的 NV21 无信号素材（由 PNG 打包装入 `no_signal_frames.inc`）只留给非绑定编码路径。若以后恢复绑定占位图，必须把占位帧送到 VPSS 上游，不能对已启动的绑定 VENC 调 `SendFrame`。
 
-不支持的 HDMI 模式（如 1366×768、1440p）仍在 status 中提供 `hdmi_error=out_of_range` 和实测 `input_width/height`，UI 显示「不支持的分辨率」；绑定视频在安全的 VPSS 上游占位实现前返回空包。
+不支持的 HDMI 模式（如 1366×768、4K）仍在 status 中提供 `hdmi_error=out_of_range` 和实测 `input_width/height`，UI 显示「不支持的分辨率」；绑定视频在安全的 VPSS 上游占位实现前返回空包。
 
 VI `FrameRate` 列开机约 1 秒是 0，不能单靠这一列判无信号。判定输入消失仍要等 VENC 最近一包超过存活窗口（当前 1.5s），避免短暂的 reader/IDR 间隙触发重建。
 

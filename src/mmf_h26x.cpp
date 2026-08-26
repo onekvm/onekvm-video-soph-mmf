@@ -830,7 +830,9 @@ static int apply_h26x_output_fps(int ch, int output_fps, int gop)
 {
 	if (ch < 0 || ch >= MMF_VENC_MAX_CHN || !g_runtime.h26x_encoders[ch].initialized)
 		return -1;
-	if (output_fps <= 0 || output_fps > kMaxOutputFps)
+	const H26xEncoderConfig &cfg = g_runtime.h26x_encoders[ch].cfg;
+	output_fps = clamp_output_fps(output_fps, cfg.width, cfg.height);
+	if (output_fps <= 0)
 		return -1;
 	if (gop <= 0)
 		gop = output_fps;
@@ -841,7 +843,8 @@ static int apply_h26x_output_fps(int ch, int output_fps, int gop)
 		printf("CVI_VENC_GetChnAttr [%d] failed with %d\n", ch, ret);
 		return ret;
 	}
-	const CVI_U32 src_fps = static_cast<CVI_U32>(venc_src_fps(output_fps));
+	const CVI_U32 src_fps = static_cast<CVI_U32>(
+		venc_src_fps(output_fps, cfg.width, cfg.height));
 	if (attr.stVencAttr.enType == PT_H264 &&
 	    attr.stRcAttr.enRcMode == VENC_RC_MODE_H264VBR) {
 		attr.stRcAttr.stH264Vbr.u32SrcFrameRate = src_fps;
@@ -871,7 +874,7 @@ int set_h26x_output_fps(int ch, int output_fps, int gop)
 {
 	if (ch < 0 || ch >= MMF_VENC_MAX_CHN)
 		return -1;
-	if (output_fps <= 0 || output_fps > kMaxOutputFps)
+	if (output_fps <= 0)
 		return -1;
 	if (gop <= 0)
 		gop = output_fps;

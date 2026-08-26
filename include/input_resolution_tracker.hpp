@@ -18,8 +18,8 @@ struct InputResolution {
     }
 };
 
-constexpr std::array<InputResolution, 12> kSupportedInputResolutions{{
-    {1920, 1080}, {1600, 900}, {1440, 1080}, {1440, 900},
+constexpr std::array<InputResolution, 13> kSupportedInputResolutions{{
+    {2560, 1440}, {1920, 1080}, {1600, 900}, {1440, 1080}, {1440, 900},
     {1280, 1024}, {1280, 960}, {1280, 800}, {1280, 720},
     {1152, 864}, {1024, 768}, {800, 600}, {640, 480},
 }};
@@ -123,6 +123,8 @@ constexpr InputResolution infer_hdmi_mode(InputResolution hdmi)
         return hdmi;
     if (hdmi.width == 960 || hdmi.width == 1920)
         return {1920, 1080};
+    if (hdmi.width == 1280 && hdmi.height == 1440)
+        return {2560, 1440};
     if (hdmi.width == 640 || hdmi.width == 1280)
         return {1280, 720};
     if (hdmi.width == 400 || hdmi.width == 800)

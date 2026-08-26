@@ -38,21 +38,29 @@ inline int clamp_output_fps(int fps, int width = 0, int height = 0)
 	if (fps <= 0)
 		return 30;
 	int cap = kMaxOutputFps;
-	/* 720p120 is inside WAVE4/H.264 L4.2. 1080p120 is not. */
-	if (width > 0 && height > 0 &&
-	    static_cast<int64_t>(width) * height > 1280 * 720)
-		cap = kDefaultInputFps;
+	if (width > 0 && height > 0) {
+		const auto pixels = static_cast<int64_t>(width) * height;
+		/* 1440p60 overruns WAVE4; 1080p120 overruns H.264 L4.2. */
+		if (pixels > 1920 * 1080)
+			cap = 30;
+		else if (pixels > 1280 * 720)
+			cap = kDefaultInputFps;
+	}
 	if (fps > cap)
 		return cap;
 	return fps;
 }
 
-/* VENC src must be >= dest. HDMI 60 still uses src 60 when dest is 30;
-   720p120 uses src 120 so dest 120 is valid. */
-inline int venc_src_fps(int output_fps)
+/* VENC src must be >= dest. 1080p30 still uses src 60; 1440p30 uses src 30;
+   720p120 uses src 120. */
+inline int venc_src_fps(int output_fps, int width = 0, int height = 0)
 {
-	const int fps = clamp_output_fps(output_fps);
-	return fps < kDefaultInputFps ? kDefaultInputFps : fps;
+	const int fps = clamp_output_fps(output_fps, width, height);
+	int floor = kDefaultInputFps;
+	if (width > 0 && height > 0 &&
+	    static_cast<int64_t>(width) * height > 1920 * 1080)
+		floor = 30;
+	return fps < floor ? floor : fps;
 }
 
 struct H26xEncoderConfig {

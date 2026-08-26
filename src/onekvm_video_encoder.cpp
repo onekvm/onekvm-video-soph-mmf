@@ -178,7 +178,7 @@ int configure_encoder(Encoder *encoder, int width, int height,
     // using the target for both fields makes the driver assume every submitted
     // frame is already at the target rate and it will not perform rate
     // conversion (the stream then remains close to the source FPS).
-    const int venc_input_fps = mmf::venc_src_fps(fps);
+    const int venc_input_fps = mmf::venc_src_fps(fps, width, height);
     /* Keep the default GOP at one second. This avoids spending excessive VBR
        budget on IDR frames while still bounding decoder recovery latency. */
     int gop = encoder->config.gop > 0 ? encoder->config.gop : std::max(1, fps);
@@ -1049,6 +1049,7 @@ void encoder_destroy(void *opaque) {
 }
 
 const onekvm_video_format_v1 kFormats[] = {
+    {sizeof(onekvm_video_format_v1), 2560, 1440, 30, ONEKVM_VIDEO_PIXEL_NV21},
     {sizeof(onekvm_video_format_v1), 1920, 1080, 60, ONEKVM_VIDEO_PIXEL_NV21},
     {sizeof(onekvm_video_format_v1), 1280, 720, 60, ONEKVM_VIDEO_PIXEL_NV21},
     {sizeof(onekvm_video_format_v1), 640, 480, 60, ONEKVM_VIDEO_PIXEL_NV21},
