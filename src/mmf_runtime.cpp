@@ -393,11 +393,9 @@ static CVI_S32 initialize_vendor_system(SIZE_S stSize)
 		DATA_BITWIDTH_8, enCompressMode, DEFAULT_ALIGN);
 	u32BlkSize = MAX(u32BlkSize, u32BlkRotSize);
 	stVbConf.astCommPool[MMF_VB_VI_ID].u32BlkSize	= u32BlkSize;
-	/* 1080p keeps 3 UYVY blocks. 1440p UYVY×3 plus VPSS NV21×3 leaves
-	   ~11 MiB of the 48 MiB ION carveout; WAVE4 needs two ~5.5 MiB recon
-	   frames and then fails with "fail to allocate recon buffer". */
-	stVbConf.astCommPool[MMF_VB_VI_ID].u32BlkCnt =
-		(stSize.u32Width * stSize.u32Height > 1920u * 1080u) ? 2 : 3;
+	/* 64 MiB ION holds 1440p UYVY×3 plus VPSS NV21×3 plus WAVE4 recon.
+	   Keep three blocks at every supported size. */
+	stVbConf.astCommPool[MMF_VB_VI_ID].u32BlkCnt	= 3;
 	stVbConf.astCommPool[MMF_VB_VI_ID].enRemapMode	= VB_REMAP_MODE_CACHED;
 	stVbConf.u32MaxPoolCnt = 1;
 	fprintf(stderr, "OneKVM: common VB %ux%u blk=%u count=%u\n",
