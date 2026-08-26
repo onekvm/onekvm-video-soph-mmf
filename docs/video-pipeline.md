@@ -57,6 +57,7 @@ VI `FrameRate` 列开机约 1 秒是 0，不能单靠这一列判无信号。判
 
 ## 帧率
 
-- 输入侧按源 60 送给 VENC（`input_fps=60`），输出 `TarFr` 跟用户目标 FPS。
+- 1080p 输入仍按源 60 送给 VENC。720p 高刷时 `input_fps`/`TarFr` 可到 120（`venc_src_fps` = max(60, dest)）。
 - 只改目标 FPS 时不要拆 VI/VENC 通道；由 reader 在 `GetStream` 前 `SetChnAttr`。
 - Core 绑定路径的 RTP 时戳用 `1/目标FPS`，不要用墙钟间隔。
+- 720p@120 已在 107 上验证：VI/VPSS FrameRate 119–120、LostFrame=0，HwEncTime ≈ 4.3 ms。HDMI 源必须真出 1280x720@120（CEA VIC 47）；Cube EDID 默认不含该模式。

@@ -830,7 +830,7 @@ static int apply_h26x_output_fps(int ch, int output_fps, int gop)
 {
 	if (ch < 0 || ch >= MMF_VENC_MAX_CHN || !g_runtime.h26x_encoders[ch].initialized)
 		return -1;
-	if (output_fps <= 0 || output_fps > 60)
+	if (output_fps <= 0 || output_fps > kMaxOutputFps)
 		return -1;
 	if (gop <= 0)
 		gop = output_fps;
@@ -841,14 +841,15 @@ static int apply_h26x_output_fps(int ch, int output_fps, int gop)
 		printf("CVI_VENC_GetChnAttr [%d] failed with %d\n", ch, ret);
 		return ret;
 	}
+	const CVI_U32 src_fps = static_cast<CVI_U32>(venc_src_fps(output_fps));
 	if (attr.stVencAttr.enType == PT_H264 &&
 	    attr.stRcAttr.enRcMode == VENC_RC_MODE_H264VBR) {
-		attr.stRcAttr.stH264Vbr.u32SrcFrameRate = 60;
+		attr.stRcAttr.stH264Vbr.u32SrcFrameRate = src_fps;
 		attr.stRcAttr.stH264Vbr.fr32DstFrameRate = output_fps;
 		attr.stRcAttr.stH264Vbr.u32Gop = static_cast<CVI_U32>(gop);
 	} else if (attr.stVencAttr.enType == PT_H265 &&
 		   attr.stRcAttr.enRcMode == VENC_RC_MODE_H265VBR) {
-		attr.stRcAttr.stH265Vbr.u32SrcFrameRate = 60;
+		attr.stRcAttr.stH265Vbr.u32SrcFrameRate = src_fps;
 		attr.stRcAttr.stH265Vbr.fr32DstFrameRate = output_fps;
 		attr.stRcAttr.stH265Vbr.u32Gop = static_cast<CVI_U32>(gop);
 	} else {
@@ -870,7 +871,7 @@ int set_h26x_output_fps(int ch, int output_fps, int gop)
 {
 	if (ch < 0 || ch >= MMF_VENC_MAX_CHN)
 		return -1;
-	if (output_fps <= 0 || output_fps > 60)
+	if (output_fps <= 0 || output_fps > kMaxOutputFps)
 		return -1;
 	if (gop <= 0)
 		gop = output_fps;

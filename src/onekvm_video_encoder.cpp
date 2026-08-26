@@ -29,7 +29,7 @@ int jpeg_quality(double quality) {
     return 55 + static_cast<int>(quality * 35);
 }
 
-int bitrate(int width, int height, double quality) {
+int bitrate(int width, int height, double quality, int fps = 0) {
     if (quality <= 0) quality = 1.0;
     quality = std::min(quality, 1.0);
     /* NanoKVM's highest H.264 quality preset is 5 Mbps.  OneKVM's maximum
@@ -39,16 +39,16 @@ int bitrate(int width, int height, double quality) {
        100 kbps safety floor. */
     const int64_t base = static_cast<int64_t>(width) * height * 10000 /
                          (static_cast<int64_t>(1920) * 1080);
-    return std::max(100, static_cast<int>(static_cast<double>(base) * quality));
+    const int output_fps = mmf::clamp_output_fps(fps);
+    const double fps_scale = output_fps > mmf::kDefaultInputFps
+        ? static_cast<double>(output_fps) / mmf::kDefaultInputFps
+        : 1.0;
+    return std::max(100, static_cast<int>(static_cast<double>(base) * quality * fps_scale));
 }
 
 static int normalized_output_fps(int fps)
 {
-    if (fps <= 0)
-        return 30;
-    if (fps > 60)
-        return 60;
-    return fps;
+    return mmf::clamp_output_fps(fps);
 }
 
 static int normalized_gop(int gop, int fps)
@@ -171,14 +171,14 @@ int configure_encoder(Encoder *encoder, int width, int height,
         set_error(error, error_capacity, "allocate encoder output: out of memory");
         return -1;
     }
-    int fps = encoder->config.fps > 0 ? encoder->config.fps : 30;
+    int fps = normalized_output_fps(encoder->config.fps);
     // The capture/VPSS path can continue delivering frames at the HDMI input
     // cadence even when the requested output is lower.  Tell VENC the
     // expected input cadence separately from the requested destination rate;
     // using the target for both fields makes the driver assume every submitted
     // frame is already at the target rate and it will not perform rate
     // conversion (the stream then remains close to the source FPS).
-    constexpr int kVencInputFPS = 60;
+    const int venc_input_fps = mmf::venc_src_fps(fps);
     /* Keep the default GOP at one second. This avoids spending excessive VBR
        budget on IDR frames while still bounding decoder recovery latency. */
     int gop = encoder->config.gop > 0 ? encoder->config.gop : std::max(1, fps);
@@ -198,11 +198,11 @@ int configure_encoder(Encoder *encoder, int width, int height,
             config.height = height;
             config.pixel_format = kMMFNV21;
             config.gop = gop;
-            config.input_fps = kVencInputFPS;
+            config.input_fps = venc_input_fps;
             config.output_fps = fps;
             config.bitrate_kbps = encoder->config.bitrate_kbps > 0
                 ? encoder->config.bitrate_kbps
-                : bitrate(width, height, encoder->config.quality_factor);
+                : bitrate(width, height, encoder->config.quality_factor, fps);
             mmf::RateControl rc{};
             rc.initial_qp = encoder->config.initial_qp;
             rc.min_qp = encoder->config.min_qp;

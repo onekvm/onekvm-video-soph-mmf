@@ -31,5 +31,9 @@ int main()
 		return 12;
 	if (parse_vi_chn_status_fps("  1  0  Y   60 1 1    0    019201080\n", &fps))
 		return 13;
+	if (!parse_vi_chn_status_fps("  0  0  Y  120 1403 1403    0    0 1280  720\n",
+					&fps) ||
+	    fps != 120)
+		return 15;
 	return 0;
 }

@@ -30,6 +30,26 @@ enum class H26xCodec : uint8_t {
     H264 = 2,
 };
 
+constexpr int kDefaultInputFps = 60;
+constexpr int kMaxOutputFps = 120;
+
+inline int clamp_output_fps(int fps)
+{
+	if (fps <= 0)
+		return 30;
+	if (fps > kMaxOutputFps)
+		return kMaxOutputFps;
+	return fps;
+}
+
+/* VENC src must be >= dest. HDMI 60 still uses src 60 when dest is 30;
+   720p120 uses src 120 so dest 120 is valid. */
+inline int venc_src_fps(int output_fps)
+{
+	const int fps = clamp_output_fps(output_fps);
+	return fps < kDefaultInputFps ? kDefaultInputFps : fps;
+}
+
 struct H26xEncoderConfig {
     H26xCodec codec;
     int width;

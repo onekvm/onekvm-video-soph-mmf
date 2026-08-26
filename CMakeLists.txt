@@ -30,6 +30,11 @@ if(BUILD_TESTING)
     onekvm_enable_warnings(vi_fps_parser_test)
     add_test(NAME vi-fps-parser COMMAND vi_fps_parser_test)
 
+    add_executable(output_fps_test tests/output-fps-test.cpp)
+    target_compile_features(output_fps_test PRIVATE cxx_std_17)
+    onekvm_enable_warnings(output_fps_test)
+    add_test(NAME output-fps COMMAND output_fps_test)
+
     add_executable(h264_annexb_test tests/h264-annexb-test.cpp)
     target_compile_features(h264_annexb_test PRIVATE cxx_std_17)
     onekvm_enable_warnings(h264_annexb_test)
