@@ -134,6 +134,7 @@ struct onekvm_video_edid_caps_v1 {
     uint32_t flags;
     uint32_t min_bytes;
     uint32_t max_bytes;
+    /* Expected activation after a successful edid_set on this board. */
     uint32_t apply_policy;
     const char *chip_id;
     const char *board_id;
@@ -147,6 +148,7 @@ struct onekvm_video_edid_blob_v1 {
 
 struct onekvm_video_edid_apply_result_v1 {
     uint32_t struct_size;
+    /* What the host/UI must do after this write. Must not reboot here. */
     uint32_t apply_required;
 };
 
