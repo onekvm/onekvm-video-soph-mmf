@@ -19,6 +19,8 @@ int lt6911_get_input_timing(int pipe, struct onekvm_lt6911_input_timing *timing)
 int lt6911_get_input_size(int pipe, uint32_t *width, uint32_t *height);
 int lt6911_get_capture_size(uint32_t *width, uint32_t *height);
 int lt6911_kick_hdmi(void);
+void onekvm_lt6911_i2c_lock(void);
+void onekvm_lt6911_i2c_unlock(void);
 int onekvm_lt6911_set_active_size(uint32_t width, uint32_t height);
 void onekvm_lt6911_get_active_size(uint32_t *width, uint32_t *height);
 }

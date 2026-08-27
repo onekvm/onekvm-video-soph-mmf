@@ -178,6 +178,13 @@ ONEKVM_VIDEO_INTERNAL int32_t encoder_unbind_source(
     void *encoder, char *error, uint32_t error_capacity);
 ONEKVM_VIDEO_INTERNAL int32_t encoder_latency(
     void *encoder, onekvm_video_latency_v1 *latency);
+ONEKVM_VIDEO_INTERNAL int32_t edid_capabilities(onekvm_video_edid_caps_v1 *caps);
+ONEKVM_VIDEO_INTERNAL int32_t edid_get(
+    onekvm_video_edid_blob_v1 *edid, char *error, uint32_t error_capacity);
+ONEKVM_VIDEO_INTERNAL int32_t edid_set(
+    const onekvm_video_edid_blob_v1 *edid,
+    onekvm_video_edid_apply_result_v1 *apply,
+    char *error, uint32_t error_capacity);
 
 extern ONEKVM_VIDEO_INTERNAL const onekvm_video_backend_v1 kBackend;
 

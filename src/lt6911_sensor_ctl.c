@@ -37,6 +37,16 @@ static int g_fd[VI_MAX_PIPE_NUM] = {[0 ... (VI_MAX_PIPE_NUM - 1)] = -1};
 static int g_pinmux_configured;
 static pthread_mutex_t g_i2c_lock = PTHREAD_MUTEX_INITIALIZER;
 
+void onekvm_lt6911_i2c_lock(void)
+{
+	pthread_mutex_lock(&g_i2c_lock);
+}
+
+void onekvm_lt6911_i2c_unlock(void)
+{
+	pthread_mutex_unlock(&g_i2c_lock);
+}
+
 static int valid_pipe(VI_PIPE pipe)
 {
 	return pipe >= 0 && pipe < VI_MAX_PIPE_NUM;

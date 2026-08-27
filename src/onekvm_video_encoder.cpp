@@ -1068,7 +1068,8 @@ const onekvm_video_backend_v1 kBackend = {
         ONEKVM_VIDEO_FEATURE_BORROWED_PACKET |
         ONEKVM_VIDEO_FEATURE_PREPARE_ENCODE |
         ONEKVM_VIDEO_FEATURE_BOUND_ENCODER |
-        ONEKVM_VIDEO_FEATURE_LATENCY,
+        ONEKVM_VIDEO_FEATURE_LATENCY |
+        ONEKVM_VIDEO_FEATURE_EDID,
     kFormats,
     static_cast<uint32_t>(sizeof(kFormats) / sizeof(kFormats[0])),
     source_create,
@@ -1093,6 +1094,9 @@ const onekvm_video_backend_v1 kBackend = {
     source_input_format,
     source_latency,
     encoder_latency,
+    edid_capabilities,
+    edid_get,
+    edid_set,
 };
 
 

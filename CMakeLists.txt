@@ -52,6 +52,12 @@ if(BUILD_TESTING)
     target_compile_features(no_signal_frame_test PRIVATE cxx_std_17)
     onekvm_enable_warnings(no_signal_frame_test)
     add_test(NAME no-signal-frame COMMAND no_signal_frame_test)
+
+    add_executable(edid_board_test tests/edid-board-test.cpp)
+    target_include_directories(edid_board_test PRIVATE src)
+    target_compile_features(edid_board_test PRIVATE cxx_std_17)
+    onekvm_enable_warnings(edid_board_test)
+    add_test(NAME edid-board COMMAND edid_board_test)
 endif()
 
 if(NOT ONEKVM_BUILD_MMF_BACKEND)
@@ -78,7 +84,9 @@ set(MMF_SOURCES
     src/onekvm_crypto_backend.cpp
     src/onekvm_video_backend.cpp
     src/onekvm_video_encoder.cpp
-    src/onekvm_video_source.cpp)
+    src/onekvm_video_source.cpp
+    src/edid.cpp
+    src/lt6911_edid.cpp)
 
 add_library(kvm_mmf SHARED
     ${MMF_SOURCES}
@@ -185,6 +193,9 @@ install(FILES
     include/onekvm/crypto_backend_v1.h
     include/onekvm/video_backend_v1.h
     DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/onekvm")
+install(DIRECTORY assets/edid/presets/
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/onekvm/edid/presets"
+    FILES_MATCHING PATTERN "*.bin")
 
 if(BUILD_TESTING)
     add_executable(bound_reader_stress tests/bound-reader-stress.cpp)

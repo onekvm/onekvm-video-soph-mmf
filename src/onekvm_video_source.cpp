@@ -1,4 +1,5 @@
 #include "onekvm_video_backend_internal.hpp"
+#include "lt6911_edid.hpp"
 
 #include <exception>
 
@@ -554,6 +555,7 @@ int32_t source_create(const onekvm_video_source_config_v1 *config, void **result
         set_error(error, error_capacity, "allocate source: out of memory");
         return -1;
     }
+    (void)restore_active_edid_if_needed();
     if (open_source(source, config, error, error_capacity) != 0) {
         delete source;
         return -1;
