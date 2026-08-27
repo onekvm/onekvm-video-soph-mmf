@@ -1,6 +1,7 @@
 #include "mmf_internal.hpp"
 
 #include <cstdio>
+#include <stdio.h>
 
 namespace onekvm::mmf {
 void set_capture_mirror(int channel, bool enabled)
@@ -359,6 +360,11 @@ static int create_capture_channel(int ch, int width, int height, int format, int
 
 	g_runtime.vi_chn_pool_id[ch] = pool_id;
 	g_runtime.vi_chn_is_inited[ch] = true;
+	g_runtime.vi_chn_running[ch] = true;
+	/* Keep VI alive for HDMI presence. Stop the scaler until VENC or a raw
+	   reader actually consumes frames. */
+	if (pause_vpss_channel(ch) != 0)
+		SAMPLE_PRT("pause VPSS chn %d after open failed\n", ch);
 
 	return 0;
 _need_detach_vb_pool:
@@ -444,6 +450,7 @@ int close_capture_channel(int ch) {
 
 	g_runtime.vi_chn_pool_id[ch] = -1;
 	g_runtime.vi_chn_is_inited[ch] = false;
+	g_runtime.vi_chn_running[ch] = false;
 	return s32Ret;
 }
 
@@ -462,6 +469,56 @@ bool capture_channel_open(int ch) {
 	}
 
 	return g_runtime.vi_chn_is_inited[ch];
+}
+
+int pause_vpss_channel(int ch)
+{
+	if (!capture_channel_open(ch) || !g_runtime.vi_chn_running[ch])
+		return 0;
+	const CVI_S32 ret = CVI_VPSS_DisableChn(0, ch);
+	if (ret != CVI_SUCCESS) {
+		SAMPLE_PRT("CVI_VPSS_DisableChn(%d) failed with %#x\n", ch, ret);
+		return ret;
+	}
+	g_runtime.vi_chn_running[ch] = false;
+	std::fprintf(stderr, "OneKVM: VPSS chn %d paused\n", ch);
+	return 0;
+}
+
+int resume_vpss_channel(int ch)
+{
+	if (!capture_channel_open(ch))
+		return -1;
+	if (g_runtime.vi_chn_running[ch])
+		return 0;
+	const CVI_S32 ret = CVI_VPSS_EnableChn(0, ch);
+	if (ret != CVI_SUCCESS) {
+		SAMPLE_PRT("CVI_VPSS_EnableChn(%d) failed with %#x\n", ch, ret);
+		return ret;
+	}
+	g_runtime.vi_chn_running[ch] = true;
+	std::fprintf(stderr, "OneKVM: VPSS chn %d resumed\n", ch);
+	return 0;
+}
+
+void park_unbound_vpss_channels()
+{
+	for (int ch = 0; ch < MMF_VI_MAX_CHN; ++ch) {
+		if (!capture_channel_open(ch) || !g_runtime.vi_chn_running[ch])
+			continue;
+		bool bound = false;
+		for (int venc = 0; venc < MMF_VENC_MAX_CHN; ++venc) {
+			const H26xEncoderState *info = &g_runtime.h26x_encoders[venc];
+			if (info->initialized && info->bound_to_capture &&
+			    info->capture_channel == ch) {
+				bound = true;
+				break;
+			}
+		}
+		if (bound)
+			continue;
+		(void)pause_vpss_channel(ch);
+	}
 }
 
 int reset_capture_channel(int ch, int width, int height, int format, int fps)
@@ -488,6 +545,8 @@ int acquire_capture_frame(int ch, void **data, int *len, int *width, int *height
     }
 
 	int ret = -1;
+	if (resume_vpss_channel(ch) != 0)
+		return -1;
 	VIDEO_FRAME_INFO_S *frame = &g_runtime.vi_frame[ch];
 	if (CVI_VPSS_GetChnFrame(0, ch, frame, 1000) == 0) {
         int image_size = frame->stVFrame.u32Length[0]

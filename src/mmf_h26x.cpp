@@ -686,6 +686,8 @@ int bind_h26x_to_capture(int ch, int vpss_group, int vpss_channel) {
 	if (info->bound_to_capture) {
 		if (info->capture_group == vpss_group &&
 			info->capture_channel == vpss_channel) {
+			if (resume_vpss_channel(vpss_channel) != 0)
+				return -1;
 			start_h26x_reader(ch);
 			return 0;
 		}
@@ -696,6 +698,8 @@ int bind_h26x_to_capture(int ch, int vpss_group, int vpss_channel) {
 	 * keep the vendor worker alive across client disconnects: this driver
 	 * cannot safely stop and restart a VENC worker, but it can wait idle while
 	 * its VPSS producer is temporarily unbound. */
+	if (resume_vpss_channel(vpss_channel) != 0)
+		return -1;
 	CVI_S32 ret = CVI_SUCCESS;
 	const bool start_worker = !info->receiver_started;
 	if (info->fd >= 0) {
@@ -706,21 +710,26 @@ int bind_h26x_to_capture(int ch, int vpss_group, int vpss_channel) {
 	recv_param.s32RecvPicNum = -1;
 	VPSS_CHN_ATTR_S attr;
 	ret = CVI_VPSS_GetChnAttr(vpss_group, vpss_channel, &attr);
-	if (ret != CVI_SUCCESS)
+	if (ret != CVI_SUCCESS) {
+		(void)pause_vpss_channel(vpss_channel);
 		return ret;
+	}
 	const CVI_U32 old_depth = attr.u32Depth;
 	/* A bound output is consumed by VENC and does not need a userspace dequeue
 	 * queue. Depth zero removes one full-frame hold and lowers capture latency. */
 	attr.u32Depth = 0;
 	ret = CVI_VPSS_SetChnAttr(vpss_group, vpss_channel, &attr);
-	if (ret != CVI_SUCCESS)
+	if (ret != CVI_SUCCESS) {
+		(void)pause_vpss_channel(vpss_channel);
 		return ret;
+	}
 	ret = SAMPLE_COMM_VPSS_Bind_VENC(vpss_group, vpss_channel, ch);
 	if (ret != CVI_SUCCESS) {
 		attr.u32Depth = old_depth;
 		CVI_VPSS_SetChnAttr(vpss_group, vpss_channel, &attr);
 		printf("VPSS(%d,%d) bind VENC(%d) failed with %#x\n",
 			vpss_group, vpss_channel, ch, ret);
+		(void)pause_vpss_channel(vpss_channel);
 		return ret;
 	}
 	if (start_worker) {
@@ -730,6 +739,7 @@ int bind_h26x_to_capture(int ch, int vpss_group, int vpss_channel) {
 			attr.u32Depth = old_depth;
 			CVI_VPSS_SetChnAttr(vpss_group, vpss_channel, &attr);
 			CVI_VENC_ResetChn(ch);
+			(void)pause_vpss_channel(vpss_channel);
 			return ret;
 		}
 		info->receiver_started = 1;
@@ -751,8 +761,10 @@ int unbind_h26x_from_capture(int ch) {
 	if (ch < 0 || ch >= MMF_VENC_MAX_CHN || !g_runtime.h26x_encoders[ch].initialized)
 		return -1;
 	H26xEncoderState *info = &g_runtime.h26x_encoders[ch];
-	if (!info->bound_to_capture)
+	if (!info->bound_to_capture) {
+		park_unbound_vpss_channels();
 		return 0;
+	}
 	const int vpss_group = info->capture_group;
 	const int vpss_channel = info->capture_channel;
 	if (info->stream_held && release_h26x_packet(ch) != 0)
@@ -789,6 +801,7 @@ int unbind_h26x_from_capture(int ch) {
 	}
 	if (ret == CVI_SUCCESS && depth_ret != CVI_SUCCESS)
 		ret = depth_ret;
+	park_unbound_vpss_channels();
 	return ret;
 }
 

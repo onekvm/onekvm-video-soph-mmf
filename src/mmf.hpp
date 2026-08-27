@@ -102,6 +102,9 @@ int close_capture_channel(int ch);
 int close_all_capture_channels(void);
 int reset_capture_channel(int ch, int width, int height, int format, int fps);
 bool capture_channel_open(int ch);
+int pause_vpss_channel(int ch);
+int resume_vpss_channel(int ch);
+void park_unbound_vpss_channels();
 void set_capture_mirror(int ch, bool en);
 void set_capture_flip(int ch, bool en);
 

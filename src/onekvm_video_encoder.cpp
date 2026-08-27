@@ -807,8 +807,11 @@ int32_t encoder_unbind_source(void *opaque, char *error, uint32_t error_capacity
         return -1;
     }
     std::lock_guard<std::mutex> lock(encoder->mutex);
-    if (!encoder->source_bound && encoder->bound_source == nullptr)
+    if (!encoder->source_bound && encoder->bound_source == nullptr) {
+        std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
+        mmf::park_unbound_vpss_channels();
         return 0;
+    }
     /* Keep the configured channel and its receive worker across reconnects.
        This CVITEK driver cannot reliably restart a stopped VENC worker:
        StartRecvFrame may succeed without recreating it, after which VPSS
