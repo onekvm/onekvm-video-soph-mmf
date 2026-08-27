@@ -42,7 +42,9 @@ path currently recognizes the following 12 HDMI resolutions:
 1152x864   1024x768  800x600    640x480
 ```
 
-The SG2002 VPSS pipeline scales or crops the input. Auto mode follows a
+The SG2002 VPSS pipeline scales or crops the input on phy channel 1
+(`sc_v1`, max width 2880). Channel 0 (`sc_d`) maxes out at 1920; a 2560-wide
+1:1 convert there is tiled and the NV21 comes out empty. Auto mode follows a
 supported HDMI input, including 2560x1440@30. Explicit output can still be
 1920x1080, 1280x720, or 640x480. 1440p is up to 30 FPS, 1080p up to 60 FPS,
 and 720p can run at 120 FPS when the HDMI source emits 1280x720@120.
