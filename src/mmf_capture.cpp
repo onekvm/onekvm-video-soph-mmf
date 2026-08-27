@@ -466,8 +466,10 @@ bool capture_channel_open(int ch) {
 
 int reset_capture_channel(int ch, int width, int height, int format, int fps)
 {
-	close_capture_channel(ch);
-	const int out_ch = vpss_phy_channel(width) == 1 ? 1 : ch;
+	const int out_ch = vpss_phy_channel(width);
+	if (ch != out_ch)
+		close_capture_channel(ch);
+	close_capture_channel(out_ch);
 	return open_capture_channel(out_ch, width, height, format, fps);
 }
 

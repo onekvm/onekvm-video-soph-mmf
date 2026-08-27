@@ -301,9 +301,7 @@ int open_source(Source *source, const onekvm_video_source_config_v1 *config,
         set_error(error, error_capacity, "start MMF capture pipeline failed");
         return -1;
     }
-    int channel = onekvm::mmf::vpss_phy_channel(width);
-    if (channel == 0)
-        channel = mmf::find_free_capture_channel();
+    const int channel = onekvm::mmf::vpss_phy_channel(width);
     if (channel < 0 || mmf::capture_channel_open(channel)) {
         mmf::stop_capture_pipeline();
         mmf::shutdown();
@@ -594,8 +592,7 @@ int32_t source_reset(void *opaque, const onekvm_video_source_config_v1 *config,
         set_error(error, error_capacity, "reset MMF capture channel failed: %d", result);
         return -1;
     }
-    if (onekvm::mmf::vpss_phy_channel(width) == 1)
-        source->channel = 1;
+    source->channel = onekvm::mmf::vpss_phy_channel(width);
     source->config = *config;
     source->config.device = nullptr;
     source->capture_width = width;
@@ -707,6 +704,7 @@ int32_t source_read(void *opaque, onekvm_video_frame_v1 *frame,
                 ? static_cast<int>(source->config.fps) : 60;
             int reset = mmf::reset_capture_channel(
                 source->channel, reset_width, reset_height, kMMFNV21, reset_fps);
+            source->channel = onekvm::mmf::vpss_phy_channel(reset_width);
             set_error(error, error_capacity, "MMF VI read failed; channel reset returned %d", reset);
         } else {
             set_error(error, error_capacity, "MMF VI read failed: %d", result);

@@ -20,7 +20,8 @@ int main()
 	if (venc_src_fps(200) != kMaxOutputFps) return 8;
 	if (venc_src_fps(30, 2560, 1440) != 30) return 12;
 	if (venc_src_fps(60, 2560, 1440) != 30) return 13;
-	if (onekvm::mmf::vpss_phy_channel(1920) != 0) return 14;
-	if (onekvm::mmf::vpss_phy_channel(2560) != 1) return 15;
+	if (onekvm::mmf::vpss_phy_channel(1280) != 1) return 14;
+	if (onekvm::mmf::vpss_phy_channel(1920) != 1) return 15;
+	if (onekvm::mmf::vpss_phy_channel(2560) != 1) return 16;
 	return 0;
 }

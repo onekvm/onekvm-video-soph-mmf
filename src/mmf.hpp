@@ -85,13 +85,13 @@ int initialize(void);
 int shutdown(void);
 
 // manage vi channels(vi->vpssgroup->vpss->frame)
-/* CV181x phy chn 0 is sc_d (max 1920). Dest wider than that must use
-   chn 1 (sc_v1, max 2880) or the driver tiles and NV21 comes out empty. */
-inline int vpss_phy_channel(int width)
+/* CV181x phy chn 0 is sc_d (max 1920). Always use chn 1 (sc_v1, max
+   2880) so 1080p and 1440p share one scaler; HDMI grow/shrink does
+   not switch channels. `width` is unused and kept for call sites. */
+inline int vpss_phy_channel(int width = 0)
 {
-	if (width > 1920)
-		return 1;
-	return 0;
+	(void)width;
+	return 1;
 }
 
 int find_free_capture_channel(void);
