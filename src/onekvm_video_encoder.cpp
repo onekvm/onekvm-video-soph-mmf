@@ -58,16 +58,6 @@ static int normalized_gop(int gop, int fps)
     return std::max(1, fps);
 }
 
-static bool encoder_rc_unchanged(const onekvm_video_encoder_config_v1 &cur,
-                                 const onekvm_video_encoder_config_v1 &next)
-{
-    return cur.quality_factor == next.quality_factor &&
-           cur.bitrate_kbps == next.bitrate_kbps &&
-           cur.initial_qp == next.initial_qp &&
-           cur.min_qp == next.min_qp &&
-           cur.max_qp == next.max_qp;
-}
-
 void close_encoder(Encoder *encoder) {
     if (!encoder->initialized) {
         return;
@@ -296,34 +286,38 @@ int32_t encoder_reset(void *opaque, const onekvm_video_encoder_config_v1 *config
     const auto next = normalized_encoder_config(config);
     const int next_codec = codec_type(config->codec);
     /* Cube cannot close/recreate a live VENC channel from this thread:
-       GetStream holds EnterVcodecLock on the reader. Only fps/gop changes
-       are posted for that thread. Suspend and quality/bitrate/QP still
-       close the channel — after stop_h26x_reader joins. */
+       GetStream holds EnterVcodecLock on the reader. FPS/GOP/bitrate/QP
+       are posted for that thread. Bound codec changes still fail. */
     if (encoder->initialized && encoder->source_bound &&
         encoder->codec_type != 0 && next_codec != encoder->codec_type) {
         set_error(error, error_capacity,
                   "cannot change bound VENC codec; VPSS would fill waitq");
         return -1;
     }
+    if (encoder->initialized && encoder->codec_type == 0 && next_codec == 0) {
+        encoder->config = next;
+        encoder->codec_type = next_codec;
+        return 0;
+    }
     if (encoder->initialized && encoder->codec_type != 0 &&
         encoder->codec_type == next_codec && encoder->channel >= 0 &&
-        encoder_rc_unchanged(encoder->config, next)) {
+        encoder->width > 0 && encoder->height > 0) {
         const int fps = normalized_output_fps(
             next.fps, encoder->width, encoder->height);
         const int gop = normalized_gop(next.gop, fps);
-        const int cur_fps = normalized_output_fps(
-            encoder->config.fps, encoder->width, encoder->height);
-        const int cur_gop = normalized_gop(encoder->config.gop, cur_fps);
-        if (fps != cur_fps || gop != cur_gop) {
-            if (mmf::set_h26x_output_fps(encoder->channel, fps, gop) != 0) {
-                set_error(error, error_capacity,
-                          "queue VENC output fps %d failed", fps);
-                return -1;
-            }
-            encoder->config = next;
-            encoder->codec_type = next_codec;
-            return 0;
+        const int bitrate_kbps = next.bitrate_kbps > 0
+            ? next.bitrate_kbps
+            : bitrate(encoder->width, encoder->height, next.quality_factor, fps);
+        if (mmf::set_h26x_rate_control(
+                encoder->channel, fps, gop, bitrate_kbps,
+                next.initial_qp, next.min_qp, next.max_qp) != 0) {
+            set_error(error, error_capacity,
+                      "queue VENC rate control failed");
+            return -1;
         }
+        encoder->config = next;
+        encoder->codec_type = next_codec;
+        return 0;
     }
     close_encoder(encoder);
     encoder->config = next;
@@ -987,13 +981,24 @@ int32_t encoder_set_quality(void *opaque, double quality,
         return -1;
     }
     std::lock_guard<std::mutex> lock(encoder->mutex);
-    // JPEG quality is supplied to every mmf::submit_jpeg_frame call,
-    // so changing it does not require tearing down channel 0. NanoKVM's
-    // vendor JPEG teardown also disturbs the VPSS path shared by H.26x.
-    if (encoder->codec_type != 0) {
-        close_encoder(encoder);
-    }
+    // JPEG quality is supplied to every mmf::submit_jpeg_frame call.
     encoder->config.quality_factor = quality;
+    if (encoder->codec_type == 0 || !encoder->initialized ||
+        encoder->channel < 0 || encoder->width <= 0 || encoder->height <= 0)
+        return 0;
+    const int fps = normalized_output_fps(
+        encoder->config.fps, encoder->width, encoder->height);
+    const int gop = normalized_gop(encoder->config.gop, fps);
+    const int bitrate_kbps = encoder->config.bitrate_kbps > 0
+        ? encoder->config.bitrate_kbps
+        : bitrate(encoder->width, encoder->height, quality, fps);
+    if (mmf::set_h26x_rate_control(
+            encoder->channel, fps, gop, bitrate_kbps,
+            encoder->config.initial_qp, encoder->config.min_qp,
+            encoder->config.max_qp) != 0) {
+        set_error(error, error_capacity, "queue VENC quality bitrate failed");
+        return -1;
+    }
     return 0;
 }
 

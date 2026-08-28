@@ -33,6 +33,11 @@ struct H26xReader {
 	std::atomic<bool> want_idr{false};
 	std::atomic<int> pending_output_fps{0};
 	std::atomic<int> pending_gop{0};
+	std::atomic<int> pending_bitrate_kbps{0};
+	std::atomic<int> pending_initial_qp{0};
+	std::atomic<int> pending_min_qp{0};
+	std::atomic<int> pending_max_qp{0};
+	std::atomic<uint32_t> pending_rc_mask{0};
 	std::atomic<uint64_t> last_packet_ns{0};
 	std::mutex mu;
 	std::mutex join_mu;
@@ -839,48 +844,76 @@ int request_h26x_idr(int ch) {
 	return CVI_VENC_RequestIDR(ch, CVI_TRUE);
 }
 
-static int apply_h26x_output_fps(int ch, int output_fps, int gop)
+constexpr uint32_t kH26xRcFpsGop = 1u << 0;
+constexpr uint32_t kH26xRcBitrate = 1u << 1;
+constexpr uint32_t kH26xRcQp = 1u << 2;
+
+static int apply_h26x_rate_control(int ch, int output_fps, int gop,
+	int bitrate_kbps, int initial_qp, int min_qp, int max_qp, uint32_t mask)
 {
 	if (ch < 0 || ch >= MMF_VENC_MAX_CHN || !g_runtime.h26x_encoders[ch].initialized)
 		return -1;
-	const H26xEncoderConfig &cfg = g_runtime.h26x_encoders[ch].cfg;
-	output_fps = clamp_output_fps(output_fps, cfg.width, cfg.height);
-	if (output_fps <= 0)
-		return -1;
-	if (gop <= 0)
-		gop = output_fps;
-
-	VENC_CHN_ATTR_S attr{};
-	CVI_S32 ret = CVI_VENC_GetChnAttr(ch, &attr);
-	if (ret != CVI_SUCCESS) {
-		printf("CVI_VENC_GetChnAttr [%d] failed with %d\n", ch, ret);
-		return ret;
-	}
-	const CVI_U32 src_fps = static_cast<CVI_U32>(
-		venc_src_fps(output_fps, cfg.width, cfg.height));
-	if (attr.stVencAttr.enType == PT_H264 &&
-	    attr.stRcAttr.enRcMode == VENC_RC_MODE_H264VBR) {
-		attr.stRcAttr.stH264Vbr.u32SrcFrameRate = src_fps;
-		attr.stRcAttr.stH264Vbr.fr32DstFrameRate = output_fps;
-		attr.stRcAttr.stH264Vbr.u32Gop = static_cast<CVI_U32>(gop);
-	} else if (attr.stVencAttr.enType == PT_H265 &&
-		   attr.stRcAttr.enRcMode == VENC_RC_MODE_H265VBR) {
-		attr.stRcAttr.stH265Vbr.u32SrcFrameRate = src_fps;
-		attr.stRcAttr.stH265Vbr.fr32DstFrameRate = output_fps;
-		attr.stRcAttr.stH265Vbr.u32Gop = static_cast<CVI_U32>(gop);
+	if (mask == 0)
+		return 0;
+	H26xEncoderConfig &cfg = g_runtime.h26x_encoders[ch].cfg;
+	if ((mask & kH26xRcFpsGop) != 0) {
+		output_fps = clamp_output_fps(output_fps, cfg.width, cfg.height);
+		if (output_fps <= 0)
+			return -1;
+		if (gop <= 0)
+			gop = output_fps;
 	} else {
+		output_fps = cfg.output_fps;
+		gop = cfg.gop;
+	}
+	if ((mask & kH26xRcBitrate) != 0 && bitrate_kbps <= 0)
 		return -1;
+	if ((mask & kH26xRcBitrate) == 0)
+		bitrate_kbps = cfg.bitrate_kbps;
+
+	if ((mask & (kH26xRcFpsGop | kH26xRcBitrate)) != 0) {
+		VENC_CHN_ATTR_S attr{};
+		CVI_S32 ret = CVI_VENC_GetChnAttr(ch, &attr);
+		if (ret != CVI_SUCCESS) {
+			printf("CVI_VENC_GetChnAttr [%d] failed with %d\n", ch, ret);
+			return ret;
+		}
+		const CVI_U32 src_fps = static_cast<CVI_U32>(
+			venc_src_fps(output_fps, cfg.width, cfg.height));
+		if (attr.stVencAttr.enType == PT_H264 &&
+		    attr.stRcAttr.enRcMode == VENC_RC_MODE_H264VBR) {
+			attr.stRcAttr.stH264Vbr.u32SrcFrameRate = src_fps;
+			attr.stRcAttr.stH264Vbr.fr32DstFrameRate = output_fps;
+			attr.stRcAttr.stH264Vbr.u32Gop = static_cast<CVI_U32>(gop);
+			attr.stRcAttr.stH264Vbr.u32MaxBitRate = bitrate_kbps;
+		} else if (attr.stVencAttr.enType == PT_H265 &&
+			   attr.stRcAttr.enRcMode == VENC_RC_MODE_H265VBR) {
+			attr.stRcAttr.stH265Vbr.u32SrcFrameRate = src_fps;
+			attr.stRcAttr.stH265Vbr.fr32DstFrameRate = output_fps;
+			attr.stRcAttr.stH265Vbr.u32Gop = static_cast<CVI_U32>(gop);
+			attr.stRcAttr.stH265Vbr.u32MaxBitRate = bitrate_kbps;
+		} else {
+			return -1;
+		}
+		ret = CVI_VENC_SetChnAttr(ch, &attr);
+		if (ret != CVI_SUCCESS) {
+			printf("CVI_VENC_SetChnAttr [%d] rc failed with %d\n", ch, ret);
+			return ret;
+		}
+		cfg.output_fps = output_fps;
+		cfg.gop = gop;
+		cfg.bitrate_kbps = bitrate_kbps;
+		printf("OneKVM: VENC ch %d fps %d gop %d bitrate %d kbps\n",
+			ch, output_fps, gop, bitrate_kbps);
 	}
-	ret = CVI_VENC_SetChnAttr(ch, &attr);
-	if (ret != CVI_SUCCESS) {
-		printf("CVI_VENC_SetChnAttr [%d] fps %d failed with %d\n",
-			ch, output_fps, ret);
-		return ret;
-	}
-	g_runtime.h26x_encoders[ch].cfg.output_fps = output_fps;
-	g_runtime.h26x_encoders[ch].cfg.gop = gop;
-	printf("OneKVM: VENC ch %d output fps %d gop %d\n", ch, output_fps, gop);
-	return 0;
+
+	if ((mask & kH26xRcQp) == 0)
+		return 0;
+	RateControl rc{};
+	rc.initial_qp = initial_qp;
+	rc.min_qp = min_qp;
+	rc.max_qp = max_qp;
+	return _set_venc_rc_param(ch, &cfg, &rc);
 }
 
 int set_h26x_output_fps(int ch, int output_fps, int gop)
@@ -893,7 +926,33 @@ int set_h26x_output_fps(int ch, int output_fps, int gop)
 		gop = output_fps;
 	H26xReader &reader = g_readers[ch];
 	reader.pending_gop.store(gop, std::memory_order_relaxed);
-	reader.pending_output_fps.store(output_fps, std::memory_order_release);
+	reader.pending_output_fps.store(output_fps, std::memory_order_relaxed);
+	reader.pending_rc_mask.fetch_or(kH26xRcFpsGop, std::memory_order_release);
+	reader.cv.notify_all();
+	return 0;
+}
+
+int set_h26x_rate_control(int ch, int output_fps, int gop, int bitrate_kbps,
+	int initial_qp, int min_qp, int max_qp)
+{
+	if (ch < 0 || ch >= MMF_VENC_MAX_CHN)
+		return -1;
+	if (output_fps <= 0)
+		return -1;
+	if (gop <= 0)
+		gop = output_fps;
+	H26xReader &reader = g_readers[ch];
+	reader.pending_gop.store(gop, std::memory_order_relaxed);
+	reader.pending_output_fps.store(output_fps, std::memory_order_relaxed);
+	if (bitrate_kbps > 0)
+		reader.pending_bitrate_kbps.store(bitrate_kbps, std::memory_order_relaxed);
+	reader.pending_initial_qp.store(initial_qp, std::memory_order_relaxed);
+	reader.pending_min_qp.store(min_qp, std::memory_order_relaxed);
+	reader.pending_max_qp.store(max_qp, std::memory_order_relaxed);
+	uint32_t mask = kH26xRcFpsGop | kH26xRcQp;
+	if (bitrate_kbps > 0)
+		mask |= kH26xRcBitrate;
+	reader.pending_rc_mask.fetch_or(mask, std::memory_order_release);
 	reader.cv.notify_all();
 	return 0;
 }
@@ -957,12 +1016,18 @@ void start_h26x_reader(int ch, bool request_idr)
 				idr_ioctl_sent = false;
 				refresh_bound_hw_latency(&g_runtime.h26x_encoders[ch]);
 			}
-			const int pending_fps = self.pending_output_fps.exchange(
+			const uint32_t rc_mask = self.pending_rc_mask.exchange(
 				0, std::memory_order_acq_rel);
-			if (pending_fps > 0) {
-				const int pending_gop = self.pending_gop.load(
-					std::memory_order_relaxed);
-				if (apply_h26x_output_fps(ch, pending_fps, pending_gop) == 0)
+			if (rc_mask != 0) {
+				if (apply_h26x_rate_control(
+					    ch,
+					    self.pending_output_fps.load(std::memory_order_relaxed),
+					    self.pending_gop.load(std::memory_order_relaxed),
+					    self.pending_bitrate_kbps.load(std::memory_order_relaxed),
+					    self.pending_initial_qp.load(std::memory_order_relaxed),
+					    self.pending_min_qp.load(std::memory_order_relaxed),
+					    self.pending_max_qp.load(std::memory_order_relaxed),
+					    rc_mask) == 0)
 					self.want_idr.store(true, std::memory_order_relaxed);
 			}
 			if (!self.want_idr.load(std::memory_order_relaxed))

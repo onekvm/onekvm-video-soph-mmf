@@ -60,6 +60,7 @@ VI `FrameRate` 列开机约 1 秒是 0，不能单靠这一列判无信号。判
 
 - 1080p 输入仍按源 60 送给 VENC。720p 高刷时 `input_fps`/`TarFr` 可到 120（`venc_src_fps` = max(60, dest)）。
 - 只改目标 FPS 时不要拆 VI/VENC 通道；由 reader 在 `GetStream` 前 `SetChnAttr`。
+- 只改质量预算 / 码率 / QP 同样不要拆通道：reader 在两次 `GetStream` 之间改 `u32MaxBitRate` 和 `SetRcParam`，并补一次 IDR。不要 `close_encoder`。
 - Core 绑定路径的 RTP 时戳用 `1/目标FPS`，不要用墙钟间隔。
 - 720p@120 已在 107 上验证：VI/VPSS FrameRate 119–120、LostFrame=0，HwEncTime ≈ 4.3 ms。HDMI 源必须真出 1280x720@120（CEA VIC 47）；Cube EDID 默认不含该模式。
 - 采集一律走 phy chn 1（sc_v1，最大 2880）。phy chn 0（sc_d，最大 1920）1:1 2560 会 tile，NV21 全 0。107 r50：1080p60 与 1440p30 都在 sc_v1，WebRTC 有画面；HDMI 1080→1440 同一 PID 不换通道。详见仓库 `docs/2k-30.md`。ION **64 MiB @ 0x85000000**，公共 VB UYVY×3；不要同时留两个 `vi_vpss1` 私有池，否则 WAVE4 第二块 recon 会 OOM。`kMaxViReceiver` 仍是 1920×1080。活着的受支持模式不要探 LT6911 I2C。
