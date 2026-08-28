@@ -29,6 +29,7 @@ CSI 桥是 **精确匹配**：宽度大于设定（GT）或小于设定（LS）�
 - 64 对齐只用于 VB stride，不要拿对齐后的值去配 CSIBDG。
 - `video.resolution=0`（自动）时，VI/VENC 跟当前 **支持的** HDMI 输入。480 对应 **640x480**，不是 854x480。
 - 目标分辨率只改 VPSS/VENC。VI 接收端：HDMI 变大立刻放大；HDMI 变小要等 CSI 有效尺寸跟上。HDMI 时序空白时不要缩小。
+- VI 已经停帧（`FrameRate=0`）时例外：HDMI I2C 连续给出另一个支持的模式，就跟过去重建。假 1440 把 CSIBDG 配大之后，源已经回到 1080、CSI 仍是 `0x0`，再等 CSI 会对死。
 - 不要只信 HDMI I2C，也不要只信 CSI 当前宽。只信 HDMI 会在 MIPI 仍是 1920 时把 VI 配成 800；只信 CSI 会在 800→1080 时把接收端留在 800。
 
 支持的 HDMI 输入见 [README](../README.md#resolution-handling)。超范围（1366x768、4K）不要按旧几何继续采，占位并报告实测尺寸。2560x1440@30 是支持的采集/编码档。CSI 已是合法模式时，忽略 I2C 垃圾 OOR 读数。

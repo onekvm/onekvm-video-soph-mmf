@@ -37,6 +37,10 @@ ONEKVM_VIDEO_INTERNAL inline constexpr int kRecoveryFailureThreshold = 3;
 ONEKVM_VIDEO_INTERNAL inline constexpr auto kRecoveryInterval = std::chrono::seconds(5);
 ONEKVM_VIDEO_INTERNAL inline constexpr auto kHDMIChangeIdleWindow = std::chrono::milliseconds(500);
 ONEKVM_VIDEO_INTERNAL inline constexpr auto kHDMIChangeProbeInterval = std::chrono::seconds(2);
+/* Dead VI after a false grow: probe HDMI more often so a later 1080 can
+   rebuild CSIBDG without waiting on the live 2s interval. */
+ONEKVM_VIDEO_INTERNAL inline constexpr auto kHDMIFollowProbeInterval =
+    std::chrono::milliseconds(500);
 /* HDMI 800→1080 changes CSI output before the video loop runs.  A dedicated
    watcher must see HDMI timing while the source is still 800, including when
    no WebRTC consumer is attached. */
@@ -79,6 +83,7 @@ struct ONEKVM_VIDEO_INTERNAL Source {
     onekvm::InputResolution pending_receiver{};
     unsigned hdmi_blanking_samples = 0;
     unsigned hdmi_oor_samples = 0;
+    unsigned hdmi_follow_samples = 0;
     int capture_width = 0;
     int capture_height = 0;
     std::atomic<uint64_t> cached_input_size{0};

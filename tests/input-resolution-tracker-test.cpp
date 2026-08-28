@@ -123,5 +123,36 @@ int main() {
             {1920, 1080}, {2560, 1440}, {2560, 1440}, {2560, 1440}))
         return 56;
 
+    /* Live 1440 must not shrink on HDMI-only 1080 (MIPI may still be 2560). */
+    if (choose_vi_receiver_size(
+            {0, 0}, {1920, 1080}, {2560, 1440}, true).width != 0)
+        return 57;
+    if (should_rebuild_vi_receiver(
+            {2560, 1440}, {1920, 1080}, {0, 0}, {1920, 1080}, true))
+        return 58;
+
+    /* Dead VI after a false 1440 grow: follow the later 1080 HDMI reading. */
+    if (choose_vi_receiver_size(
+            {0, 0}, {1920, 1080}, {2560, 1440}, false) !=
+        InputResolution{1920, 1080})
+        return 59;
+    if (!should_rebuild_vi_receiver(
+            {2560, 1440}, {1920, 1080}, {0, 0}, {1920, 1080}, false))
+        return 60;
+    if (next_hdmi_follow_samples(true, {2560, 1440}, {1920, 1080}, 2) != 0)
+        return 61;
+    if (next_hdmi_follow_samples(false, {2560, 1440}, {2560, 1440}, 2) != 0)
+        return 62;
+    if (next_hdmi_follow_samples(false, {2560, 1440}, {1920, 1080}, 0) != 1)
+        return 63;
+    if (next_hdmi_follow_samples(false, {2560, 1440}, {1920, 1080}, 2) != 3)
+        return 64;
+    if (hdmi_stalled_follow_ready({0, 0}, {1920, 1080}, 2))
+        return 65;
+    if (!hdmi_stalled_follow_ready({0, 0}, {1920, 1080}, 3))
+        return 66;
+    if (!hdmi_stalled_follow_ready({1920, 1080}, {1920, 1080}, 0))
+        return 67;
+
     return 0;
 }

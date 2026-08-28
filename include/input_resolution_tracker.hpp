@@ -151,11 +151,15 @@ constexpr InputResolution infer_hdmi_mode(InputResolution hdmi)
 /* CSIBDG must never be smaller than the MIPI frame about to arrive.
    Grow immediately when HDMI timing is already larger (800→1080).
    HDMI 0/blanking is a mode change, not a shrink: returning CSI 800
-   while current is 1920 would program CSIBDG to 800 just as 1080 starts. */
+   while current is 1920 would program CSIBDG to 800 just as 1080 starts.
+   If VI is already dead (no recent frames) and HDMI reports a different
+   supported mode, follow HDMI: waiting for CSI after a false grow never
+   unsticks a hung CSIBDG (1080 source, 1440 receiver). */
 constexpr InputResolution choose_vi_receiver_size(
     InputResolution csi,
     InputResolution hdmi,
-    InputResolution current)
+    InputResolution current,
+    bool frames_live = true)
 {
     const bool csi_ok = supported_input_resolution(csi);
     const bool hdmi_ok = supported_input_resolution(hdmi);
@@ -172,6 +176,8 @@ constexpr InputResolution choose_vi_receiver_size(
             return {};
         return csi;
     }
+    if (!frames_live && hdmi_ok && hdmi != current)
+        return hdmi;
     return {};
 }
 
@@ -198,13 +204,48 @@ constexpr bool should_rebuild_vi_receiver(
     InputResolution current,
     InputResolution receiver,
     InputResolution csi,
-    InputResolution hdmi = {})
+    InputResolution hdmi = {},
+    bool frames_live = true)
 {
     if (receiver.width == 0 || receiver == current)
         return false;
-    if (resolution_pixels(receiver) < resolution_pixels(current))
-        return csi == receiver && hdmi == receiver;
+    if (resolution_pixels(receiver) < resolution_pixels(current)) {
+        if (csi == receiver && hdmi == receiver)
+            return true;
+        return !frames_live && hdmi == receiver;
+    }
     return true;
+}
+
+/* Consecutive dead-VI probes with HDMI at a different supported size.
+   Grow on I2C stays immediate; this only gates shrink/switch without CSI. */
+constexpr unsigned kHDMIFollowDeadSamples = 3;
+
+constexpr unsigned next_hdmi_follow_samples(
+    bool frames_live,
+    InputResolution current,
+    InputResolution hdmi,
+    unsigned follow_samples)
+{
+    if (frames_live)
+        return 0;
+    if (!supported_input_resolution(hdmi) || hdmi == current)
+        return 0;
+    if (follow_samples >= kHDMIFollowDeadSamples)
+        return kHDMIFollowDeadSamples;
+    return follow_samples + 1;
+}
+
+constexpr bool hdmi_stalled_follow_ready(
+    InputResolution csi,
+    InputResolution receiver,
+    unsigned follow_samples)
+{
+    if (receiver.width == 0)
+        return false;
+    if (csi == receiver)
+        return true;
+    return follow_samples >= kHDMIFollowDeadSamples;
 }
 
 /* Interval is the only hard gate. 800→1080 keeps IntCnt ticking on CSI

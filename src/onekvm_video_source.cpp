@@ -334,6 +334,7 @@ int open_source(Source *source, const onekvm_video_source_config_v1 *config,
     source->reported_input = input;
     source->hdmi_blanking_samples = 0;
     source->hdmi_oor_samples = 0;
+    source->hdmi_follow_samples = 0;
     source->out_of_range.store(false, std::memory_order_relaxed);
     onekvm::InputResolution probed{};
     if (read_hdmi_input(&probed)) {
@@ -400,10 +401,13 @@ int rebuild_for_hdmi_timing(Source *source, bool force_probe, char *error,
         return 0;
 
     const auto now = std::chrono::steady_clock::now();
+    const auto probe_interval = recent_frames
+        ? kHDMIChangeProbeInterval
+        : kHDMIFollowProbeInterval;
     const bool interval_elapsed =
         force_probe ||
         source->last_hdmi_probe.time_since_epoch().count() == 0 ||
-        now - source->last_hdmi_probe >= kHDMIChangeProbeInterval;
+        now - source->last_hdmi_probe >= probe_interval;
     if (!onekvm::hdmi_resolution_probe_due(
             static_cast<unsigned>(std::max(0, source->failures)),
             recent_frames, interval_elapsed))
@@ -449,11 +453,21 @@ int rebuild_for_hdmi_timing(Source *source, bool force_probe, char *error,
     }
 
     onekvm::InputResolution receiver =
-        onekvm::choose_vi_receiver_size(csi, hdmi, current);
+        onekvm::choose_vi_receiver_size(csi, hdmi, current, recent_frames);
     if (onekvm::should_grow_to_max_vi_receiver(
             current, hdmi, source->hdmi_blanking_samples))
         receiver = onekvm::kMaxViReceiver;
-    if (!onekvm::should_rebuild_vi_receiver(current, receiver, csi, hdmi)) {
+    source->hdmi_follow_samples = onekvm::next_hdmi_follow_samples(
+        recent_frames, current, hdmi, source->hdmi_follow_samples);
+    if (!onekvm::should_rebuild_vi_receiver(
+            current, receiver, csi, hdmi, recent_frames)) {
+        if (kind == onekvm::HdmiInputClass::Supported)
+            source->out_of_range.store(false, std::memory_order_relaxed);
+        return 0;
+    }
+    if (onekvm::resolution_pixels(receiver) < onekvm::resolution_pixels(current) &&
+        !onekvm::hdmi_stalled_follow_ready(
+            csi, receiver, source->hdmi_follow_samples)) {
         if (kind == onekvm::HdmiInputClass::Supported)
             source->out_of_range.store(false, std::memory_order_relaxed);
         return 0;

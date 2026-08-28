@@ -434,6 +434,8 @@ int close_capture_channel(int ch) {
 	}
 
 	CVI_S32 s32Ret = CVI_SUCCESS;
+	/* Teardown needs the scaler enabled; DisableChn while idle leaves VI Stop* hanging. */
+	(void)resume_vpss_channel(ch);
 	s32Ret = SAMPLE_COMM_VI_UnBind_VPSS(0, 0, 0);
 	if (s32Ret != CVI_SUCCESS) {
 		SAMPLE_PRT("vi unbind vpss failed. s32Ret: 0x%x !\n", s32Ret);
