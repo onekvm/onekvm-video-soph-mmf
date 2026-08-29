@@ -804,11 +804,12 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
     }
     if (fill_canned_no_signal_packet(encoder, source, packet) != 0)
         return -1;
-    const int paced_fps = encoder->config.fps > 0 ? encoder->config.fps : 60;
-    const int pace_ms = std::max(16, 1000 / paced_fps);
+    /* A 1080p IDR is ~33 KiB. Repeating it at output FPS floods WebRTC
+       (~10 Mbps) and Chrome paints green. One still per second is enough
+       for late joiners; empty reads in between keep the last picture. */
     source_lock.unlock();
     lock.unlock();
-    std::this_thread::sleep_for(std::chrono::milliseconds(pace_ms));
+    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
     return 0;
 }
 
