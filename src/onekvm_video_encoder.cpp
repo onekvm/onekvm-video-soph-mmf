@@ -1,5 +1,7 @@
 #include "onekvm_video_backend_internal.hpp"
 
+extern "C" int no_signal_h264(int width, int height, const uint8_t **data, size_t *size);
+
 #pragma GCC visibility push(hidden)
 namespace onekvm::video_backend {
 
@@ -578,6 +580,36 @@ int32_t fill_bound_empty_packet(Encoder *encoder, onekvm_video_packet_v1 *packet
     return 0;
 }
 
+/* Bound VPSS→VENC cannot switch to SendFrame (vendor currBindMode / VPU
+   lock inversion). Repeat the packed H.264 still instead. H.265 has no
+   canned AU; keep returning empty so the browser holds the last picture. */
+int32_t fill_canned_no_signal_packet(Encoder *encoder, Source *source,
+                                     onekvm_video_packet_v1 *packet) {
+    encoder->placeholder_frames = true;
+    if (encoder->codec_type != 2) {
+        return fill_bound_empty_packet(encoder, packet);
+    }
+    int width = encoder->width;
+    int height = encoder->height;
+    if (width <= 0 || height <= 0) {
+        const auto output = source_output_size(source);
+        width = output.first;
+        height = output.second;
+    }
+    const uint8_t *data = nullptr;
+    size_t bytes = 0;
+    if (::no_signal_h264(width, height, &data, &bytes) != 0 ||
+        data == nullptr || bytes == 0) {
+        return fill_bound_empty_packet(encoder, packet);
+    }
+    packet->data = data;
+    packet->data_size = static_cast<uint64_t>(bytes);
+    packet->codec = public_codec(encoder->codec_type);
+    packet->key_frame = 1;
+    packet->pts_ns = monotonic_ns();
+    return 0;
+}
+
 int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
                             char *error, uint32_t error_capacity) {
     auto *encoder = static_cast<Encoder *>(opaque);
@@ -631,7 +663,7 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
     bool key_frame = false;
     const bool missing_signal =
         source->out_of_range.load(std::memory_order_relaxed) ||
-        cached_signal_present(source) == 0;
+        cached_signal_present(source) <= 0;
     /* Do not take_ready before the placeholder path. The reader queue holds
        one AU: popping it here then draining again in encode_bound_placeholder
        drops the still. Live HDMI still drains first so we can return it. */
@@ -699,7 +731,7 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
             }
             const bool still_missing =
                 source->out_of_range.load(std::memory_order_relaxed) ||
-                cached_signal_present(source) == 0;
+                cached_signal_present(source) <= 0;
             if (result > 0)
                 return fill_bound_live_packet(
                     encoder, source, packet, output_data, result, key_frame,
@@ -759,9 +791,9 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
        driver's currBindMode flag; SendFrame after that point can retain the
        global VPU lock while venc-handler waits for it, pinning every VPSS VB
        block and making StopRecvFrame hang in kthread_stop. Keep the producer
-       relationship intact and return an empty packet while HDMI is absent.
-       The bound worker resumes without a channel-mode transition when input
-       frames return. */
+       relationship intact and emit the packed H.264 still while HDMI is
+       absent. The bound worker resumes without a channel-mode transition
+       when input frames return. */
     source->failures++;
     const int rebuilt = maybe_rebuild_for_hdmi_change(
         source, error, error_capacity);
@@ -770,7 +802,14 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
         invalidate_stale_encoder(encoder);
         return -1;
     }
-    return fill_bound_empty_packet(encoder, packet);
+    if (fill_canned_no_signal_packet(encoder, source, packet) != 0)
+        return -1;
+    const int paced_fps = encoder->config.fps > 0 ? encoder->config.fps : 60;
+    const int pace_ms = std::max(16, 1000 / paced_fps);
+    source_lock.unlock();
+    lock.unlock();
+    std::this_thread::sleep_for(std::chrono::milliseconds(pace_ms));
+    return 0;
 }
 
 int32_t encoder_latency(void *opaque, onekvm_video_latency_v1 *latency) {
