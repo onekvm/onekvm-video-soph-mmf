@@ -494,7 +494,7 @@ bool placeholder_au_usable(const Encoder *encoder, const uint8_t *data,
     int parsed_h = 0;
     if (!annexb_h264_sps_size(data, static_cast<std::size_t>(size),
                               &parsed_w, &parsed_h))
-        return true;
+        return !key_frame && !encoder->placeholder_need_key;
     if (sps_width != nullptr)
         *sps_width = parsed_w;
     if (sps_height != nullptr)
@@ -692,7 +692,14 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
             encoder->prepared_size = 0;
             encoder->prepared_pts_ns = 0;
             encoder->request_keyframe = false;
-            mmf::h26x_reader_want_idr(encoder->channel);
+            if (encoder->placeholder_frames) {
+                encoder->placeholder_need_key = true;
+                encoder->placeholder_idr_tries = 0;
+                encoder->placeholder_logged = false;
+                mmf::h26x_reader_force_idr(encoder->channel);
+            } else {
+                mmf::h26x_reader_want_idr(encoder->channel);
+            }
         }
         if (encoder->prepared_size != 0) {
             result = static_cast<int>(encoder->prepared_size);
