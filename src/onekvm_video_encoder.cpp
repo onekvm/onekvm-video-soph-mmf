@@ -689,10 +689,10 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
             const bool still_missing =
                 source->out_of_range.load(std::memory_order_relaxed) ||
                 cached_signal_present(source) <= 0;
-            if (result > 0)
+            if (result > 0 && !still_missing)
                 return fill_bound_live_packet(
                     encoder, source, packet, output_data, result, key_frame,
-                    !still_missing);
+                    true);
             return fill_bound_empty_packet(encoder, packet);
         }
 
