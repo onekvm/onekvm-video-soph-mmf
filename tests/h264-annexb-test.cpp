@@ -64,5 +64,29 @@ int main()
 	     (kAnnexBParamVPS | kAnnexBParamSPS | kAnnexBParamPPS)) !=
 	    (kAnnexBParamVPS | kAnnexBParamSPS | kAnnexBParamPPS)) return 21;
 	if (!annexb_has_h265_irap(h265_augmented.data(), h265_augmented.size())) return 22;
+
+	const uint8_t sps_1080[] = {
+		0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0xc0, 0x28,
+		0xdc, 0x07, 0x80, 0x22, 0x7e, 0x58, 0x40, 0x00,
+		0x00, 0x03, 0x00, 0x40, 0x00, 0x00, 0x0c, 0x83,
+		0xc6, 0x0c, 0xe0,
+	};
+	int sps_w = 0;
+	int sps_h = 0;
+	if (!annexb_h264_sps_size(sps_1080, sizeof(sps_1080), &sps_w, &sps_h))
+		return 23;
+	if (sps_w != 1920 || sps_h != 1080) return 24;
+	if (!annexb_h264_geometry_matches(sps_w, sps_h, 1920, 1080)) return 25;
+	if (annexb_h264_geometry_matches(192, 64, 1920, 1080)) return 26;
+
+	const uint8_t sps_192x64[] = {
+		0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0x00, 0x1e,
+		0xf4, 0x18, 0x4c,
+	};
+	if (!annexb_h264_sps_size(sps_192x64, sizeof(sps_192x64), &sps_w, &sps_h))
+		return 27;
+	if (sps_w != 192 || sps_h != 64) return 28;
+	if (annexb_h264_sps_size(p_only, sizeof(p_only), &sps_w, &sps_h))
+		return 29;
 	return 0;
 }

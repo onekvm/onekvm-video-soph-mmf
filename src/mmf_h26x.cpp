@@ -31,6 +31,7 @@ struct H26xReader {
 	std::atomic<bool> stop{false};
 	std::atomic<bool> running{false};
 	std::atomic<bool> want_idr{false};
+	std::atomic<bool> force_idr{false};
 	std::atomic<int> pending_output_fps{0};
 	std::atomic<int> pending_gop{0};
 	std::atomic<int> pending_bitrate_kbps{0};
@@ -827,6 +828,16 @@ void h26x_reader_want_idr(int ch)
 	reader.cv.notify_all();
 }
 
+void h26x_reader_force_idr(int ch)
+{
+	if (ch < 0 || ch >= MMF_VENC_MAX_CHN)
+		return;
+	H26xReader &reader = g_readers[ch];
+	reader.want_idr.store(true, std::memory_order_relaxed);
+	reader.force_idr.store(true, std::memory_order_release);
+	reader.cv.notify_all();
+}
+
 int request_h26x_idr(int ch) {
 	if (ch < 0 || ch >= MMF_VENC_MAX_CHN || !g_runtime.h26x_encoders[ch].initialized)
 		return -1;
@@ -970,6 +981,7 @@ void start_h26x_reader(int ch, bool request_idr)
 	reader.stop.store(false, std::memory_order_relaxed);
 	reader.last_packet_ns.store(0, std::memory_order_relaxed);
 	reader.want_idr.store(true, std::memory_order_relaxed);
+	reader.force_idr.store(false, std::memory_order_relaxed);
 	{
 		std::lock_guard<std::mutex> lock(reader.mu);
 		reader.queue.clear();
@@ -992,6 +1004,10 @@ void start_h26x_reader(int ch, bool request_idr)
 				idr_ioctl_sent = true;
 		}
 		while (!self.stop.load(std::memory_order_relaxed)) {
+			if (self.force_idr.exchange(false, std::memory_order_acq_rel)) {
+				idr_ioctl_sent = false;
+				self.want_idr.store(true, std::memory_order_relaxed);
+			}
 			bool queue_overrun = false;
 			{
 				std::lock_guard<std::mutex> lock(self.mu);

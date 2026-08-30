@@ -1,4 +1,5 @@
 #include "onekvm_video_backend_internal.hpp"
+#include "h264_annexb.hpp"
 
 #pragma GCC visibility push(hidden)
 namespace onekvm::video_backend {
@@ -96,6 +97,8 @@ void close_encoder(Encoder *encoder) {
     encoder->source_bound = false;
     encoder->placeholder_frames = false;
     encoder->placeholder_need_key = false;
+    encoder->placeholder_idr_tries = 0;
+    encoder->placeholder_logged = false;
     encoder->packet_borrowed = false;
     encoder->pending_pts_ns = 0;
     encoder->prepared_size = 0;
@@ -116,6 +119,8 @@ void invalidate_stale_encoder(Encoder *encoder) {
     encoder->source_bound = false;
     encoder->placeholder_frames = false;
     encoder->placeholder_need_key = false;
+    encoder->placeholder_idr_tries = 0;
+    encoder->placeholder_logged = false;
     encoder->request_keyframe = true;
     encoder->frame_pending = false;
     encoder->packet_borrowed = false;
@@ -472,13 +477,45 @@ int32_t fill_bound_live_packet(Encoder *encoder, Source *source,
                                const uint8_t *output_data, int result,
                                bool key_frame, bool mark_hdmi);
 
+bool placeholder_au_usable(const Encoder *encoder, const uint8_t *data,
+                           int size, bool key_frame, int *sps_width,
+                           int *sps_height) {
+    if (sps_width != nullptr)
+        *sps_width = 0;
+    if (sps_height != nullptr)
+        *sps_height = 0;
+    if (encoder == nullptr || data == nullptr || size <= 0)
+        return false;
+    if (encoder->placeholder_need_key && !key_frame)
+        return false;
+    if (encoder->codec_type != 2)
+        return true;
+    int parsed_w = 0;
+    int parsed_h = 0;
+    if (!annexb_h264_sps_size(data, static_cast<std::size_t>(size),
+                              &parsed_w, &parsed_h))
+        return true;
+    if (sps_width != nullptr)
+        *sps_width = parsed_w;
+    if (sps_height != nullptr)
+        *sps_height = parsed_h;
+    const int want_w = encoder->width > 0
+        ? encoder->width : mmf::vpss_input_width();
+    const int want_h = encoder->height > 0
+        ? encoder->height : mmf::vpss_input_height();
+    return annexb_h264_geometry_matches(parsed_w, parsed_h, want_w, want_h);
+}
+
 int encode_bound_placeholder(Encoder *encoder, Source *source,
                              onekvm_video_packet_v1 *packet,
                              char *error, uint32_t error_capacity) {
     const bool entering = !encoder->placeholder_frames;
     encoder->placeholder_frames = true;
-    if (entering)
+    if (entering) {
         encoder->placeholder_need_key = true;
+        encoder->placeholder_idr_tries = 0;
+        encoder->placeholder_logged = false;
+    }
     if (encoder->channel < 0 || !encoder->initialized || !encoder->source_bound) {
         set_error(error, error_capacity, "placeholder requires a bound VENC channel");
         return -1;
@@ -509,29 +546,37 @@ int encode_bound_placeholder(Encoder *encoder, Source *source,
             return -1;
         }
     }
-    if (entering) {
+    /* StartRecvFrame already ran during the live-grace window. WAVE4 then
+       encodes the still as P/skip, and the reader coalesces RequestIDR while
+       last_packet_ns is still 0. Force the ioctl from the reader thread. */
+    if (encoder->placeholder_need_key &&
+        (entering || encoder->placeholder_idr_tries % 15u == 0)) {
         const int ch = encoder->channel;
-        (void)mmf::wait_ready_h26x_packet(ch, 80);
-        std::lock_guard<std::recursive_mutex> drop_lock(g_mmf_mutex);
-        if (encoder->output.size() < kVENCBufferSize)
-            encoder->output.resize(kVENCBufferSize);
-        bool unused_key = false;
-        while (mmf::take_ready_h26x_packet(
-                   ch, encoder->output.data(),
-                   static_cast<int>(encoder->output.size()),
-                   &unused_key) > 0) {
+        if (entering) {
+            (void)mmf::wait_ready_h26x_packet(ch, 80);
+            if (encoder->output.size() < kVENCBufferSize)
+                encoder->output.resize(kVENCBufferSize);
+            bool unused_key = false;
+            while (mmf::take_ready_h26x_packet(
+                       ch, encoder->output.data(),
+                       static_cast<int>(encoder->output.size()),
+                       &unused_key) > 0) {
+            }
         }
-        mmf::h26x_reader_want_idr(ch);
+        mmf::h26x_reader_force_idr(ch);
+        std::lock_guard<std::recursive_mutex> submit_lock(g_mmf_mutex);
         (void)mmf::submit_vpss_nv21(
             source->no_signal_frame.data(), width, height);
     }
+    if (encoder->placeholder_need_key)
+        encoder->placeholder_idr_tries++;
     const uint8_t *output_data = nullptr;
     uint64_t output_pts_ns = 0;
     bool key_frame = false;
     int result = drain_venc_packet(
         encoder, &output_data, &output_pts_ns, &key_frame);
     if (result == 0) {
-        (void)mmf::wait_ready_h26x_packet(encoder->channel, 40);
+        (void)mmf::wait_ready_h26x_packet(encoder->channel, 80);
         result = drain_venc_packet(
             encoder, &output_data, &output_pts_ns, &key_frame);
     }
@@ -542,8 +587,28 @@ int encode_bound_placeholder(Encoder *encoder, Source *source,
     }
     if (result == 0)
         return fill_bound_empty_packet(encoder, packet);
-    if (key_frame)
+    int sps_w = 0;
+    int sps_h = 0;
+    if (!placeholder_au_usable(
+            encoder, output_data, result, key_frame, &sps_w, &sps_h)) {
+        if (encoder->placeholder_idr_tries <= 2) {
+            std::fprintf(stderr,
+                         "OneKVM: drop placeholder AU %d bytes key=%d sps=%dx%d want=%dx%d\n",
+                         result, key_frame ? 1 : 0, sps_w, sps_h,
+                         encoder->width, encoder->height);
+        }
+        return fill_bound_empty_packet(encoder, packet);
+    }
+    if (key_frame) {
         encoder->placeholder_need_key = false;
+        encoder->placeholder_idr_tries = 0;
+    }
+    if (!encoder->placeholder_logged) {
+        std::fprintf(stderr,
+                     "OneKVM: placeholder AU %d bytes key=%d sps=%dx%d\n",
+                     result, key_frame ? 1 : 0, sps_w, sps_h);
+        encoder->placeholder_logged = true;
+    }
     return fill_bound_live_packet(
         encoder, source, packet, output_data, result, key_frame, false);
 }
@@ -746,6 +811,9 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
             return -1;
         }
         encoder->placeholder_frames = false;
+        encoder->placeholder_need_key = false;
+        encoder->placeholder_idr_tries = 0;
+        encoder->placeholder_logged = false;
         encoder->request_keyframe = true;
         {
             std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);

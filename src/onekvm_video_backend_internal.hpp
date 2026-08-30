@@ -104,6 +104,8 @@ struct ONEKVM_VIDEO_INTERNAL Encoder {
     bool source_bound = false;
     bool placeholder_frames = false;
     bool placeholder_need_key = false;
+    unsigned placeholder_idr_tries = 0;
+    bool placeholder_logged = false;
     bool request_keyframe = false;
     bool frame_pending = false;
     bool packet_borrowed = false;
