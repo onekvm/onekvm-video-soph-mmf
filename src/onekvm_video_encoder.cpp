@@ -508,19 +508,22 @@ int encode_bound_placeholder(Encoder *encoder, Source *source,
                       "submit no-signal frame to VPSS failed: %d", push);
             return -1;
         }
-        if (entering) {
-            if (encoder->output.size() < kVENCBufferSize)
-                encoder->output.resize(kVENCBufferSize);
-            bool unused_key = false;
-            while (mmf::take_ready_h26x_packet(
-                       encoder->channel, encoder->output.data(),
-                       static_cast<int>(encoder->output.size()),
-                       &unused_key) > 0) {
-            }
-            mmf::h26x_reader_want_idr(encoder->channel);
-            (void)mmf::submit_vpss_nv21(
-                source->no_signal_frame.data(), width, height);
+    }
+    if (entering) {
+        const int ch = encoder->channel;
+        (void)mmf::wait_ready_h26x_packet(ch, 80);
+        std::lock_guard<std::recursive_mutex> drop_lock(g_mmf_mutex);
+        if (encoder->output.size() < kVENCBufferSize)
+            encoder->output.resize(kVENCBufferSize);
+        bool unused_key = false;
+        while (mmf::take_ready_h26x_packet(
+                   ch, encoder->output.data(),
+                   static_cast<int>(encoder->output.size()),
+                   &unused_key) > 0) {
         }
+        mmf::h26x_reader_want_idr(ch);
+        (void)mmf::submit_vpss_nv21(
+            source->no_signal_frame.data(), width, height);
     }
     const uint8_t *output_data = nullptr;
     uint64_t output_pts_ns = 0;
@@ -538,8 +541,6 @@ int encode_bound_placeholder(Encoder *encoder, Source *source,
         return -1;
     }
     if (result == 0)
-        return fill_bound_empty_packet(encoder, packet);
-    if (encoder->placeholder_need_key && !key_frame)
         return fill_bound_empty_packet(encoder, packet);
     if (key_frame)
         encoder->placeholder_need_key = false;
