@@ -602,11 +602,8 @@ static void release_vpss_user_frames()
 			g_runtime.vpss_user_frame[i] = nullptr;
 		}
 	}
-	if (g_runtime.vpss_user_pool_id >= 0 &&
-	    (g_runtime.vpss_user_frame[0] != nullptr ||
-	     g_runtime.vpss_user_frame[1] != nullptr)) {
+	if (g_runtime.vpss_user_pool_id >= 0)
 		_destroy_vb_pool(static_cast<uint32_t>(g_runtime.vpss_user_pool_id));
-	}
 	g_runtime.vpss_user_pool_id = -1;
 	g_runtime.vpss_user_index = 0;
 }

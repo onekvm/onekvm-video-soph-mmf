@@ -501,6 +501,13 @@ int encode_bound_placeholder(Encoder *encoder, Source *source,
         }
         if (source->channel >= 0)
             (void)mmf::resume_vpss_channel(source->channel);
+        const int push = mmf::submit_vpss_nv21(
+            source->no_signal_frame.data(), width, height);
+        if (push != 0) {
+            set_error(error, error_capacity,
+                      "submit no-signal frame to VPSS failed: %d", push);
+            return -1;
+        }
         if (entering) {
             if (encoder->output.size() < kVENCBufferSize)
                 encoder->output.resize(kVENCBufferSize);
@@ -511,13 +518,8 @@ int encode_bound_placeholder(Encoder *encoder, Source *source,
                        &unused_key) > 0) {
             }
             mmf::h26x_reader_want_idr(encoder->channel);
-        }
-        const int push = mmf::submit_vpss_nv21(
-            source->no_signal_frame.data(), width, height);
-        if (push != 0) {
-            set_error(error, error_capacity,
-                      "submit no-signal frame to VPSS failed: %d", push);
-            return -1;
+            (void)mmf::submit_vpss_nv21(
+                source->no_signal_frame.data(), width, height);
         }
     }
     const uint8_t *output_data = nullptr;

@@ -99,7 +99,7 @@ struct RuntimeState {
 	int vi_chn_pool_id[MMF_VI_MAX_CHN];
 	SIZE_S vi_size;
 	VIDEO_FRAME_INFO_S *vpss_user_frame[2];
-	int vpss_user_pool_id;
+	int vpss_user_pool_id = -1;
 	int vpss_user_index;
 	VIDEO_FRAME_INFO_S vi_frame[MMF_VI_MAX_CHN];
 	CaptureMapping vi_mappings[MMF_VI_MAX_CHN][MMF_VI_MAP_CACHE_SIZE];
