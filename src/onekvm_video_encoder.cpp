@@ -804,12 +804,12 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
     }
     if (fill_canned_no_signal_packet(encoder, source, packet) != 0)
         return -1;
-    /* A 1080p IDR is ~33 KiB. Repeating it at output FPS floods WebRTC
-       (~10 Mbps) and Chrome paints green. One still per second is enough
-       for late joiners; empty reads in between keep the last picture. */
+    /* Core stamps bound AUs with 1/configured-FPS. 1 Hz stills look like
+       59 missing frames and Chrome never leaves HAVE_NOTHING. 5 Hz is
+       enough to start the decoder without the 10 Mbps green flood. */
     source_lock.unlock();
     lock.unlock();
-    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
     return 0;
 }
 
