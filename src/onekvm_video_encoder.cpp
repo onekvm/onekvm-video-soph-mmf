@@ -95,6 +95,7 @@ void close_encoder(Encoder *encoder) {
     encoder->frame_pending = false;
     encoder->source_bound = false;
     encoder->placeholder_frames = false;
+    encoder->placeholder_need_key = false;
     encoder->packet_borrowed = false;
     encoder->pending_pts_ns = 0;
     encoder->prepared_size = 0;
@@ -114,6 +115,7 @@ void invalidate_stale_encoder(Encoder *encoder) {
     encoder->height = 0;
     encoder->source_bound = false;
     encoder->placeholder_frames = false;
+    encoder->placeholder_need_key = false;
     encoder->request_keyframe = true;
     encoder->frame_pending = false;
     encoder->packet_borrowed = false;
@@ -475,6 +477,8 @@ int encode_bound_placeholder(Encoder *encoder, Source *source,
                              char *error, uint32_t error_capacity) {
     const bool entering = !encoder->placeholder_frames;
     encoder->placeholder_frames = true;
+    if (entering)
+        encoder->placeholder_need_key = true;
     if (encoder->channel < 0 || !encoder->initialized || !encoder->source_bound) {
         set_error(error, error_capacity, "placeholder requires a bound VENC channel");
         return -1;
@@ -497,8 +501,17 @@ int encode_bound_placeholder(Encoder *encoder, Source *source,
         }
         if (source->channel >= 0)
             (void)mmf::resume_vpss_channel(source->channel);
-        if (entering)
+        if (entering) {
+            if (encoder->output.size() < kVENCBufferSize)
+                encoder->output.resize(kVENCBufferSize);
+            bool unused_key = false;
+            while (mmf::take_ready_h26x_packet(
+                       encoder->channel, encoder->output.data(),
+                       static_cast<int>(encoder->output.size()),
+                       &unused_key) > 0) {
+            }
             mmf::h26x_reader_want_idr(encoder->channel);
+        }
         const int push = mmf::submit_vpss_nv21(
             source->no_signal_frame.data(), width, height);
         if (push != 0) {
@@ -524,6 +537,10 @@ int encode_bound_placeholder(Encoder *encoder, Source *source,
     }
     if (result == 0)
         return fill_bound_empty_packet(encoder, packet);
+    if (encoder->placeholder_need_key && !key_frame)
+        return fill_bound_empty_packet(encoder, packet);
+    if (key_frame)
+        encoder->placeholder_need_key = false;
     return fill_bound_live_packet(
         encoder, source, packet, output_data, result, key_frame, false);
 }

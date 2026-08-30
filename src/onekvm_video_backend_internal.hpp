@@ -103,6 +103,7 @@ struct ONEKVM_VIDEO_INTERNAL Encoder {
     bool initialized = false;
     bool source_bound = false;
     bool placeholder_frames = false;
+    bool placeholder_need_key = false;
     bool request_keyframe = false;
     bool frame_pending = false;
     bool packet_borrowed = false;
