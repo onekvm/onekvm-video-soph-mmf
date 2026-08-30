@@ -149,5 +149,10 @@ int set_h26x_rate_control(int ch, int output_fps, int gop, int bitrate_kbps,
 	int initial_qp, int min_qp, int max_qp);
 int bind_h26x_to_capture(int ch, int vpss_group, int vpss_channel);
 int unbind_h26x_from_capture(int ch);
+int vpss_input_width();
+int vpss_input_height();
+int capture_use_user_frames();
+int capture_use_vi_frames();
+int submit_vpss_nv21(const uint8_t *nv21, int width, int height);
 
 } // namespace onekvm::mmf

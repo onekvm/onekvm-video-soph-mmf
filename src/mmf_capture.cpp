@@ -1,9 +1,13 @@
 #include "mmf_internal.hpp"
 
+#include <cstddef>
 #include <cstdio>
 #include <stdio.h>
 
 namespace onekvm::mmf {
+
+static void release_vpss_user_frames();
+
 void set_capture_mirror(int channel, bool enabled)
 {
 	if (channel < 0 || channel >= MMF_VI_MAX_CHN)
@@ -235,6 +239,7 @@ int stop_capture_pipeline(void)
 	}
 
 	g_runtime.vi_is_inited = false;
+	release_vpss_user_frames();
 
 	return s32Ret;
 }
@@ -347,6 +352,7 @@ static int create_capture_channel(int ch, int width, int height, int format, int
 		SAMPLE_PRT("vi bind vpss failed. s32Ret: 0x%x !\n", s32Ret);
 		goto _need_detach_vb_pool;
 	}
+	g_runtime.vi_bound_to_vpss = true;
 
 	// VIDEO_FRAME_INFO_S frame;
 	// if ((s32Ret = CVI_VPSS_GetChnFrame(0, ch, &frame, 3000)) != CVI_SUCCESS) {
@@ -441,6 +447,7 @@ int close_capture_channel(int ch) {
 		SAMPLE_PRT("vi unbind vpss failed. s32Ret: 0x%x !\n", s32Ret);
 		// return -1; // continue to deinit vpss
 	}
+	g_runtime.vi_bound_to_vpss = false;
 
 	if (0 != disable_vpss_channel(0, ch)) {
 		SAMPLE_PRT("disable_vpss_channel failed. s32Ret: 0x%x !\n", s32Ret);
@@ -585,6 +592,137 @@ void release_capture_frame(int ch) {
 		SAMPLE_PRT("CVI_VI_ReleaseChnFrame NG\n");
 	}
 	frame->stVFrame.pu8VirAddr[0] = NULL;
+}
+
+static void release_vpss_user_frames()
+{
+	for (int i = 0; i < 2; ++i) {
+		if (g_runtime.vpss_user_frame[i] != nullptr) {
+			free_frame(g_runtime.vpss_user_frame[i]);
+			g_runtime.vpss_user_frame[i] = nullptr;
+		}
+	}
+	if (g_runtime.vpss_user_pool_id >= 0 &&
+	    (g_runtime.vpss_user_frame[0] != nullptr ||
+	     g_runtime.vpss_user_frame[1] != nullptr)) {
+		_destroy_vb_pool(static_cast<uint32_t>(g_runtime.vpss_user_pool_id));
+	}
+	g_runtime.vpss_user_pool_id = -1;
+	g_runtime.vpss_user_index = 0;
+}
+
+int vpss_input_width()
+{
+	return static_cast<int>(g_runtime.vi_size.u32Width);
+}
+
+int vpss_input_height()
+{
+	return static_cast<int>(g_runtime.vi_size.u32Height);
+}
+
+int capture_use_user_frames()
+{
+	if (!g_runtime.vi_bound_to_vpss)
+		return 0;
+	const CVI_S32 ret = SAMPLE_COMM_VI_UnBind_VPSS(0, 0, 0);
+	if (ret != CVI_SUCCESS) {
+		SAMPLE_PRT("vi unbind vpss for placeholder failed. s32Ret: 0x%x\n", ret);
+		return ret;
+	}
+	g_runtime.vi_bound_to_vpss = false;
+	std::fprintf(stderr, "OneKVM: VPSS input switched to user frames\n");
+	return 0;
+}
+
+int capture_use_vi_frames()
+{
+	if (g_runtime.vi_bound_to_vpss)
+		return 0;
+	const CVI_S32 ret = SAMPLE_COMM_VI_Bind_VPSS(0, 0, 0);
+	if (ret != CVI_SUCCESS) {
+		SAMPLE_PRT("vi bind vpss after placeholder failed. s32Ret: 0x%x\n", ret);
+		return ret;
+	}
+	g_runtime.vi_bound_to_vpss = true;
+	std::fprintf(stderr, "OneKVM: VPSS input switched to VI\n");
+	return 0;
+}
+
+static void nv21_to_uyvy(const uint8_t *nv21, int width, int height,
+			 uint8_t *uyvy, int stride)
+{
+	const uint8_t *luma = nv21;
+	const uint8_t *chroma = nv21 + width * height;
+	for (int y = 0; y < height; ++y) {
+		uint8_t *dst = uyvy + static_cast<size_t>(y) * stride;
+		const uint8_t *ys = luma + static_cast<size_t>(y) * width;
+		const uint8_t *cs = chroma + static_cast<size_t>(y / 2) * width;
+		for (int x = 0; x < width; x += 2) {
+			dst[0] = cs[x + 1];
+			dst[1] = ys[x];
+			dst[2] = cs[x];
+			dst[3] = ys[x + 1];
+			dst += 4;
+		}
+	}
+}
+
+static int ensure_vpss_user_frames()
+{
+	const int width = vpss_input_width();
+	const int height = vpss_input_height();
+	if (width <= 0 || height <= 0)
+		return -1;
+	if (g_runtime.vpss_user_frame[0] != nullptr &&
+	    static_cast<int>(g_runtime.vpss_user_frame[0]->stVFrame.u32Width) == width &&
+	    static_cast<int>(g_runtime.vpss_user_frame[0]->stVFrame.u32Height) == height)
+		return 0;
+
+	release_vpss_user_frames();
+	const uint32_t size = COMMON_GetPicBufferSize(
+		width, height, PIXEL_FORMAT_UYVY, DATA_BITWIDTH_8,
+		COMPRESS_MODE_NONE, DEFAULT_ALIGN);
+	const int pool = _create_vb_pool("vpss_user", size, 2);
+	if (pool < 0)
+		return -1;
+	g_runtime.vpss_user_pool_id = pool;
+	const SIZE_S st{static_cast<CVI_U32>(width), static_cast<CVI_U32>(height)};
+	for (int i = 0; i < 2; ++i) {
+		g_runtime.vpss_user_frame[i] = allocate_frame(pool, st, PIXEL_FORMAT_UYVY);
+		if (g_runtime.vpss_user_frame[i] == nullptr) {
+			release_vpss_user_frames();
+			return -1;
+		}
+	}
+	return 0;
+}
+
+int submit_vpss_nv21(const uint8_t *nv21, int width, int height)
+{
+	if (nv21 == nullptr || width <= 0 || height <= 0 || (width & 1) != 0)
+		return -1;
+	if (width != vpss_input_width() || height != vpss_input_height())
+		return -1;
+	if (ensure_vpss_user_frames() != 0)
+		return -1;
+
+	const int index = g_runtime.vpss_user_index & 1;
+	VIDEO_FRAME_INFO_S *frame = g_runtime.vpss_user_frame[index];
+	VIDEO_FRAME_S *vf = &frame->stVFrame;
+	nv21_to_uyvy(nv21, width, height, vf->pu8VirAddr[0],
+		     static_cast<int>(vf->u32Stride[0]));
+	const CVI_U32 bytes = frame_buffer_size(vf);
+	CVI_SYS_IonFlushCache(vf->u64PhyAddr[0], vf->pu8VirAddr[0], bytes);
+	vf->u32TimeRef += 2;
+	vf->u64PTS += 1;
+	const CVI_S32 ret = CVI_VPSS_SendFrame(0, frame, 1000);
+	if (ret != CVI_SUCCESS) {
+		SAMPLE_PRT("CVI_VPSS_SendFrame failed with %#x\n", ret);
+		return ret;
+	}
+	g_runtime.vpss_user_index = index ^ 1;
+	return 0;
 }
 
 } // namespace onekvm::mmf

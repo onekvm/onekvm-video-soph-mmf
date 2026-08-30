@@ -1,7 +1,5 @@
 #include "onekvm_video_backend_internal.hpp"
 
-extern "C" int no_signal_h264(int width, int height, const uint8_t **data, size_t *size);
-
 #pragma GCC visibility push(hidden)
 namespace onekvm::video_backend {
 
@@ -431,9 +429,8 @@ int bind_encoder_to_source_locked(Encoder *encoder, Source *source,
     const auto [width, height] = source_output_size(source);
     if (configure_encoder(encoder, width, height, error, error_capacity) != 0)
         return -1;
-    /* Core binds every iteration. Stay unbound while showing the no-signal
-       artwork or the next Bind would reattach VPSS and drop placeholder
-       submits on packet_pending. */
+    /* Core binds every iteration. Placeholder keeps VPSS→VENC bound and
+       only switches the VPSS input to user frames. */
     if (encoder->placeholder_frames && encoder->bound_source == source)
         return 0;
     if (encoder->source_bound && encoder->bound_source == source)
@@ -468,51 +465,47 @@ int32_t encoder_bind_source(void *encoder_opaque, void *source_opaque,
 }
 
 int32_t fill_bound_empty_packet(Encoder *encoder, onekvm_video_packet_v1 *packet);
+int32_t fill_bound_live_packet(Encoder *encoder, Source *source,
+                               onekvm_video_packet_v1 *packet,
+                               const uint8_t *output_data, int result,
+                               bool key_frame, bool mark_hdmi);
 
 int encode_bound_placeholder(Encoder *encoder, Source *source,
                              onekvm_video_packet_v1 *packet,
                              char *error, uint32_t error_capacity) {
     const bool entering = !encoder->placeholder_frames;
     encoder->placeholder_frames = true;
-    if (encoder->channel < 0 || !encoder->initialized) {
-        set_error(error, error_capacity, "placeholder requires an open VENC channel");
+    if (encoder->channel < 0 || !encoder->initialized || !encoder->source_bound) {
+        set_error(error, error_capacity, "placeholder requires a bound VENC channel");
         return -1;
     }
-    /* CloseFd/UnBind while the reader is in GetStream races EnterVcodecLock.
-       Join first, same order as close_encoder. Do not take g_mmf_mutex until
-       GetStream has returned. */
-    if (encoder->source_bound) {
-        mmf::stop_h26x_reader(encoder->channel);
-        std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
-        if (mmf::unbind_h26x_from_capture(encoder->channel) != 0) {
-            set_error(error, error_capacity,
-                      "unbind VPSS from VENC for placeholder failed");
-            return -1;
-        }
-        encoder->source_bound = false;
+    int width = mmf::vpss_input_width();
+    int height = mmf::vpss_input_height();
+    if (width <= 0 || height <= 0) {
+        width = encoder->width;
+        height = encoder->height;
     }
-    const auto [width, height] = source_output_size(source);
     if (ensure_no_signal_nv21(source, width, height, error, error_capacity) != 0)
         return -1;
     {
         std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
-        /* The vendor GetStream and SendFrame ioctls share EnterVcodecLock.
-           Submit the first still while the reader is stopped; starting the
-           reader first makes SendFrame intermittently return VENC_BUSY. */
-        if (entering)
-            (void)mmf::request_h26x_idr(encoder->channel);
-        const int push = mmf::submit_h26x_frame(
-            encoder->channel, source->no_signal_frame.data(),
-            width, height, kMMFNV21);
-        if (push != 0) {
-            mmf::start_h26x_reader(encoder->channel, false);
+        if (mmf::capture_use_user_frames() != 0) {
             set_error(error, error_capacity,
-                      "submit no-signal frame to VENC failed: %d", push);
+                      "unbind VI from VPSS for placeholder failed");
+            encoder->placeholder_frames = false;
             return -1;
         }
-        /* request_h26x_idr above already marked the reader as waiting for an
-           IDR.  Suppress a second ioctl while the submitted still encodes. */
-        mmf::start_h26x_reader(encoder->channel, false);
+        if (source->channel >= 0)
+            (void)mmf::resume_vpss_channel(source->channel);
+        if (entering)
+            mmf::h26x_reader_want_idr(encoder->channel);
+        const int push = mmf::submit_vpss_nv21(
+            source->no_signal_frame.data(), width, height);
+        if (push != 0) {
+            set_error(error, error_capacity,
+                      "submit no-signal frame to VPSS failed: %d", push);
+            return -1;
+        }
     }
     const uint8_t *output_data = nullptr;
     uint64_t output_pts_ns = 0;
@@ -531,14 +524,8 @@ int encode_bound_placeholder(Encoder *encoder, Source *source,
     }
     if (result == 0)
         return fill_bound_empty_packet(encoder, packet);
-    packet->data = output_data;
-    packet->data_size = static_cast<uint64_t>(result);
-    packet->codec = public_codec(encoder->codec_type);
-    packet->key_frame = key_frame ? 1 : 0;
-    packet->pts_ns = monotonic_ns();
-    encoder->last_encode_ns.store(mmf::h26x_last_encode_ns(encoder->channel),
-                                 std::memory_order_relaxed);
-    return 0;
+    return fill_bound_live_packet(
+        encoder, source, packet, output_data, result, key_frame, false);
 }
 
 int32_t fill_bound_live_packet(Encoder *encoder, Source *source,
@@ -576,36 +563,6 @@ int32_t fill_bound_empty_packet(Encoder *encoder, onekvm_video_packet_v1 *packet
     packet->data_size = 0;
     packet->codec = public_codec(encoder->codec_type);
     packet->key_frame = 0;
-    packet->pts_ns = monotonic_ns();
-    return 0;
-}
-
-/* Bound VPSS→VENC cannot switch to SendFrame (vendor currBindMode / VPU
-   lock inversion). Repeat the packed H.264 still instead. H.265 has no
-   canned AU; keep returning empty so the browser holds the last picture. */
-int32_t fill_canned_no_signal_packet(Encoder *encoder, Source *source,
-                                     onekvm_video_packet_v1 *packet) {
-    encoder->placeholder_frames = true;
-    if (encoder->codec_type != 2) {
-        return fill_bound_empty_packet(encoder, packet);
-    }
-    int width = encoder->width;
-    int height = encoder->height;
-    if (width <= 0 || height <= 0) {
-        const auto output = source_output_size(source);
-        width = output.first;
-        height = output.second;
-    }
-    const uint8_t *data = nullptr;
-    size_t bytes = 0;
-    if (::no_signal_h264(width, height, &data, &bytes) != 0 ||
-        data == nullptr || bytes == 0) {
-        return fill_bound_empty_packet(encoder, packet);
-    }
-    packet->data = data;
-    packet->data_size = static_cast<uint64_t>(bytes);
-    packet->codec = public_codec(encoder->codec_type);
-    packet->key_frame = 1;
     packet->pts_ns = monotonic_ns();
     return 0;
 }
@@ -770,6 +727,10 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
         }
         encoder->placeholder_frames = false;
         encoder->request_keyframe = true;
+        {
+            std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
+            (void)mmf::capture_use_vi_frames();
+        }
         if (bind_encoder_to_source_locked(
                 encoder, source, error, error_capacity) != 0)
             return -1;
@@ -785,32 +746,23 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
         return 0;
     }
 
-    /* Host mode changes often stop both VI and VENC. Keep probing/rebuilding
-       the source, but do not turn this already-started bound channel into a
-       userspace SendFrame channel. VPSS_UnBind does not clear the vendor
-       driver's currBindMode flag; SendFrame after that point can retain the
-       global VPU lock while venc-handler waits for it, pinning every VPSS VB
-       block and making StopRecvFrame hang in kthread_stop. Keep the producer
-       relationship intact and emit the packed H.264 still while HDMI is
-       absent. The bound worker resumes without a channel-mode transition
-       when input frames return. */
+    /* Host mode changes often stop both VI and VENC. Keep VPSS→VENC bound
+       and feed the no-signal still into VPSS from userspace (VI unbound).
+       Do not CVI_VENC_SendFrame: UnBind does not clear currBindMode and
+       deadlocks the VPU. WAVE4 then emits a normal IDR/P stream. */
     source->failures++;
     const int rebuilt = maybe_rebuild_for_hdmi_change(
         source, error, error_capacity);
     if (rebuilt != 0) {
         encoder->placeholder_frames = false;
+        {
+            std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
+            (void)mmf::capture_use_vi_frames();
+        }
         invalidate_stale_encoder(encoder);
         return -1;
     }
-    if (fill_canned_no_signal_packet(encoder, source, packet) != 0)
-        return -1;
-    /* Core stamps bound AUs with 1/configured-FPS. 1 Hz stills look like
-       59 missing frames and Chrome never leaves HAVE_NOTHING. 5 Hz is
-       enough to start the decoder without the 10 Mbps green flood. */
-    source_lock.unlock();
-    lock.unlock();
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    return 0;
+    return encode_bound_placeholder(encoder, source, packet, error, error_capacity);
 }
 
 int32_t encoder_latency(void *opaque, onekvm_video_latency_v1 *latency) {
