@@ -5,30 +5,52 @@ namespace onekvm::mmf {
 
 RuntimeState g_runtime{};
 CaptureOptions g_capture_options{};
+static int module_loaded(const char *module_name) {
+	FILE *fp = fopen("/proc/modules", "r");
+	if (fp == NULL)
+		return 0;
+
+	char buffer[256];
+	int found = 0;
+	while (fgets(buffer, sizeof(buffer), fp) != NULL) {
+		char mod_name[256];
+		if (sscanf(buffer, "%255s", mod_name) != 1)
+			continue;
+		if (strcmp(mod_name, module_name) == 0) {
+			found = 1;
+			break;
+		}
+	}
+	fclose(fp);
+	return found;
+}
+
 static int module_in_use(const char *module_name) {
-    FILE *fp;
-    char buffer[256];
+	FILE *fp = fopen("/proc/modules", "r");
+	if (fp == NULL)
+		return -1;
 
-    fp = fopen("/proc/modules", "r");
-    if (fp == NULL) {
-        perror("fopen");
-        return -1;
-    }
+	char buffer[256];
+	int usage_count = 0;
+	int found = 0;
+	while (fgets(buffer, sizeof(buffer), fp) != NULL) {
+		char mod_name[256];
+		if (sscanf(buffer, "%255s %*s %d", mod_name, &usage_count) != 2)
+			continue;
+		if (strcmp(mod_name, module_name) == 0) {
+			found = 1;
+			break;
+		}
+	}
+	fclose(fp);
+	if (!found)
+		return 0;
+	return usage_count > 0;
+}
 
-    while (fgets(buffer, sizeof(buffer), fp) != NULL) {
-        char mod_name[256];
-        int usage_count;
-
-        sscanf(buffer, "%255s %*s %d", mod_name, &usage_count);
-
-        if (strcmp(mod_name, module_name) == 0) {
-            fclose(fp);
-            return usage_count > 0;
-        }
-    }
-
-    fclose(fp);
-    return 0;
+static int soph_media_modules_ready(void) {
+	return module_loaded("soph_sys") && module_loaded("soph_base") &&
+	       module_loaded("soph_vi") && module_loaded("soph_vpss");
 }
 
 static int count_vendor_buffer_pools(void)
@@ -711,6 +733,11 @@ int initialize(void)
         // printf("OneKVM MMF already inited(cnt:%d)\n", g_runtime.reference_count);
         return 0;
     }
+
+	if (!soph_media_modules_ready()) {
+		printf("OneKVM MMF: soph_* modules not loaded yet\n");
+		return -1;
+	}
 
 	if (release_stale_vendor_system() != CVI_SUCCESS) {
 		printf("try release sys failed\n");
