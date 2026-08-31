@@ -48,6 +48,11 @@ ONEKVM_VIDEO_INTERNAL inline constexpr auto kHDMIChangeGrowProbeInterval =
     std::chrono::milliseconds(100);
 ONEKVM_VIDEO_INTERNAL inline constexpr auto kSignalProbeInterval = std::chrono::seconds(10);
 ONEKVM_VIDEO_INTERNAL inline constexpr auto kNoSignalProbeInterval = std::chrono::seconds(1);
+static_assert(onekvm::hdmi_watch_interval(1) == kHDMIChangeGrowProbeInterval);
+static_assert(onekvm::hdmi_watch_interval(0) ==
+    std::chrono::duration_cast<std::chrono::milliseconds>(kNoSignalProbeInterval));
+static_assert(onekvm::hdmi_watch_interval(-1) ==
+    std::chrono::duration_cast<std::chrono::milliseconds>(kNoSignalProbeInterval));
 ONEKVM_VIDEO_INTERNAL inline constexpr auto kRecentFrameSignalWindow = std::chrono::milliseconds(500);
 /* Inserting the canned no-signal IDR between live P-frames makes the
    picture jump.  Wait out a short GetStream stall first. */

@@ -19,6 +19,11 @@ int main() {
         tracker.current() != InputResolution{640, 480}) return 4;
     if (tracker.observe({640, 480}) != InputResolutionObservation::Unchanged) return 5;
 
+    using namespace std::chrono_literals;
+    if (hdmi_watch_interval(1) != 100ms) return 46;
+    if (hdmi_watch_interval(0) != 1s) return 47;
+    if (hdmi_watch_interval(-1) != 1s) return 48;
+
     if (hdmi_resolution_probe_due(0, false, false)) return 6;
     if (hdmi_resolution_probe_due(0, true, false)) return 7;
     if (!hdmi_resolution_probe_due(0, false, true)) return 8;

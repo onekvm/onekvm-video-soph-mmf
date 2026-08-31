@@ -44,7 +44,7 @@ CSI 桥是 **精确匹配**：宽度大于设定（GT）或小于设定（LS）�
 - 读 `/proc/cvitek/vi_dbg`（会 `msleep` 并卡住 CSI）
 - 对活着的 1080 探 LT6911 I2C（`80ee` 会打乱前端）
 
-HDMI 重建、I2C、`/proc/cvitek/vi` 归 **watcher**。活 1080 且 VI 在跑时 watcher 也不要碰 I2C。
+HDMI 重建、I2C、`/proc/cvitek/vi` 归 **watcher**。活 1080 且 VI 在跑时 watcher 也不要碰 I2C。无信号时 1 s 探一次热插拔，不要 10 Hz 刷 FPS/VI dump；有信号再回到 100 ms 跟 800→1080。
 
 开机 `open_source` 写一次 LT6911 `D283=0x11` 启动 HDMI 测量。`reboot -f` 只复位 SoC，不复位 LT6911；计数停在 0x0 时需要拔插 HDMI。
 

@@ -2,6 +2,7 @@
 #define ONEKVM_INPUT_RESOLUTION_TRACKER_HPP
 
 #include <array>
+#include <chrono>
 #include <cstdint>
 
 namespace onekvm {
@@ -258,6 +259,14 @@ constexpr bool hdmi_resolution_probe_due(
     (void)failures;
     (void)recent_frames;
     return interval_elapsed;
+}
+
+/* cached_signal: 1 = live frames, 0 = no HDMI, -1 = unknown.
+   Live keeps the 100 ms 800→1080 probe; idle only needs hotplug. */
+constexpr auto hdmi_watch_interval(int cached_signal)
+{
+    using namespace std::chrono_literals;
+    return cached_signal == 1 ? 100ms : 1000ms;
 }
 
 class InputResolutionTracker {

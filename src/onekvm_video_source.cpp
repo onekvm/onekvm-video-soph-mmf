@@ -501,9 +501,22 @@ int maybe_rebuild_for_hdmi_change_now(Source *source, char *error,
     return rebuild_for_hdmi_timing(source, true, error, error_capacity);
 }
 
+void hdmi_watch_sleep(Source *source, std::chrono::milliseconds total)
+{
+    auto remaining = total;
+    while (remaining > std::chrono::milliseconds::zero() &&
+           !source->hdmi_watch_stop.load(std::memory_order_relaxed)) {
+        const auto step = remaining < kHDMIChangeGrowProbeInterval
+            ? remaining : kHDMIChangeGrowProbeInterval;
+        std::this_thread::sleep_for(step);
+        remaining -= step;
+    }
+}
+
 void hdmi_watch_loop(Source *source) {
     while (!source->hdmi_watch_stop.load(std::memory_order_relaxed)) {
-        std::this_thread::sleep_for(kHDMIChangeGrowProbeInterval);
+        hdmi_watch_sleep(source, onekvm::hdmi_watch_interval(
+            source->cached_signal.load(std::memory_order_relaxed)));
         if (source->hdmi_watch_stop.load(std::memory_order_relaxed))
             break;
         char error[256];
