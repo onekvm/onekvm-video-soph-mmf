@@ -182,10 +182,17 @@ static CVI_S32 create_vpss_group(VPSS_GRP VpssGrp, CVI_U32 width, CVI_U32 height
 	   Forcing 1 makes CVI_VPSS_CreateGrp fail in single mode. */
 	stVpssGrpAttr.u8VpssDev                      = 0;
 
+	/* SIGKILL leaves grp started. DestroyGrp without StopGrp fails, and the
+	   next CreateGrp then attaches to a WAVE4/VPSS zombie (VI RecvPic runs,
+	   EncodedFrame stays 0). Always Stop then Destroy before creating. */
+	(void)CVI_VPSS_StopGrp(VpssGrp);
+	(void)CVI_VPSS_DestroyGrp(VpssGrp);
+
 	s32Ret = CVI_VPSS_CreateGrp(VpssGrp, &stVpssGrpAttr);
 	if (s32Ret != CVI_SUCCESS) {
 		SAMPLE_PRT("CVI_VPSS_CreateGrp(grp:%d) retry(%#x)!\n", VpssGrp, s32Ret);
-		CVI_VPSS_DestroyGrp(VpssGrp);
+		(void)CVI_VPSS_StopGrp(VpssGrp);
+		(void)CVI_VPSS_DestroyGrp(VpssGrp);
 
 		s32Ret = CVI_VPSS_CreateGrp(VpssGrp, &stVpssGrpAttr);
 		if (s32Ret != CVI_SUCCESS) {
@@ -218,6 +225,7 @@ int start_capture_pipeline(void)
 	s32Ret = create_vpss_group(0, g_runtime.vi_size.u32Width, g_runtime.vi_size.u32Height, PIXEL_FORMAT_UYVY);		// PIXEL_FORMAT_UYVY  PIXEL_FORMAT_NV21
 	if (s32Ret != CVI_SUCCESS) {
 		SAMPLE_PRT("create_vpss_group failed. s32Ret: 0x%x !\n", s32Ret);
+		return s32Ret;
 	}
 
 	g_runtime.vi_is_inited = true;
