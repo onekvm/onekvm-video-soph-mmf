@@ -46,7 +46,7 @@ CSI 桥是 **精确匹配**：宽度大于设定（GT）或小于设定（LS）�
 
 HDMI 重建、I2C、`/proc/cvitek/vi` 归 **watcher**。活 1080 且 VI 在跑时 watcher 也不要碰 I2C。无信号时 1 s 探一次热插拔，不要 10 Hz 刷 FPS/VI dump；有信号再回到 100 ms 跟 800→1080。
 
-开机 `open_source` 写一次 LT6911 `D283=0x11` 启动 HDMI 测量。VI/MIPI init 会复位 SoC CSI RX，所以 `open_source` 在 VI 起来之后必须再跑一遍与 `prepare-hdmi` 相同的 CSI TX 序列（`0x805a` `0x88→0x80`、`0x8010=0x00`、`D283=0x11`），并且不要在同一笔事务里关 `80ee`。这是 MMF 的职责：Core 重启不会重跑 `prepare-hdmi`。`reboot -f` 只复位 SoC，不复位 LT6911；CSI 复位脉冲就是为了这种情况，不必再拔插 HDMI。
+开机 `open_source` 写一次 LT6911 `D283=0x11` 启动 HDMI 测量。VI/MIPI init 会复位 SoC CSI RX。若 `prepare-hdmi` 已把 LT6911 TX 拉起来，IntCnt 会自己涨，这时不要再写 `0x805a`（Go 也不会写，再写会把已锁的 CSI 打掉）。只有 IntCnt 仍为 0 时，MMF 才补跑与 `prepare-hdmi` 相同的 CSI TX 序列（`0x805a` `0x88→0x80`、`0x8010=0x00`、`D283=0x11`，且不要在同一笔事务里关 `80ee`）。Core 重启不会重跑 `prepare-hdmi`，所以这是 MMF 的职责。`reboot -f` 只复位 SoC，不复位 LT6911。
 
 ## 无信号占位
 
