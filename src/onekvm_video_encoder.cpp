@@ -78,10 +78,10 @@ void close_encoder(Encoder *encoder) {
         mmf::release_h26x_packet(encoder->channel);
         encoder->packet_borrowed = false;
     }
-    if (live && encoder->source_bound && encoder->codec_type != 0) {
-        mmf::unbind_h26x_from_capture(encoder->channel);
-        encoder->source_bound = false;
-    }
+    /* Do not detach a live VPSS producer here. close_h26x_encoder() must wake
+       the parked scaler and perform StopRecvFrame before UnBind; detaching in
+       this wrapper leaves WAVE4 input-starved and can block StopRecvFrame until
+       the watchdog reboots the device. */
     if (live) {
         if (encoder->codec_type == 0) {
             mmf::close_jpeg_encoder(encoder->channel);
