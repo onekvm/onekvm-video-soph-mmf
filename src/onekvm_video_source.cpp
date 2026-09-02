@@ -28,28 +28,6 @@ std::pair<int, int> resolution_size(int resolution) {
     return {static_cast<int>(out.width), static_cast<int>(out.height)};
 }
 
-bool vi_receiver_live(void) {
-    FILE *file = std::fopen(kVideoStatusPath, "r");
-    if (file == nullptr)
-        return false;
-    char line[256];
-    bool in_chn_status = false;
-    bool live = false;
-    while (std::fgets(line, sizeof(line), file) != nullptr) {
-        if (parse_vi_chn_status_header(line)) {
-            in_chn_status = true;
-            continue;
-        }
-        ViChnStatus status{};
-        if (in_chn_status && parse_vi_chn_status(line, &status)) {
-            live = status.enabled && status.int_cnt > 0;
-            break;
-        }
-    }
-    std::fclose(file);
-    return live;
-}
-
 std::pair<int, int> source_output_size(const Source *source) {
     if (source == nullptr)
         return {1920, 1080};
@@ -299,8 +277,12 @@ int open_source(Source *source, const onekvm_video_source_config_v1 *config,
     }
     std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
     /* After reboot the LT6911 HDMI RX stays idle until D283 is written
-       once.  Repeating that from the watcher disrupts CSI. */
+       once.  Repeating that from the watcher disrupts CSI. Core restart
+       does not rerun prepare-hdmi, so arm CSI TX before VI init. */
     (void)lt6911_kick_hdmi();
+    if (lt6911_start_csi() != 0) {
+        std::fprintf(stderr, "OneKVM: LT6911 CSI arm before VI failed\n");
+    }
     const onekvm::InputResolution input = requested_input != nullptr &&
         onekvm::supported_input_resolution(*requested_input)
         ? *requested_input : initial_input_resolution();
@@ -344,16 +326,7 @@ int open_source(Source *source, const onekvm_video_source_config_v1 *config,
         set_error(error, error_capacity, "open MMF capture channel failed: %d", result);
         return -1;
     }
-    /* VI/MIPI init resets the SoC CSI RX. If prepare-hdmi already armed
-       the LT6911 TX, IntCnt climbs without another I2C write. Re-arming
-       0x805a after a live lock drops CSI (Go never did that). Only poke
-       the bridge when the receiver stayed dark. */
-    std::this_thread::sleep_for(std::chrono::milliseconds(400));
-    if (vi_receiver_live()) {
-        std::fprintf(stderr, "OneKVM: VI live after init, skip LT6911 CSI re-arm\n");
-    } else if (lt6911_start_csi() != 0) {
-        std::fprintf(stderr, "OneKVM: LT6911 CSI start after VI failed\n");
-    }
+
     source->channel = channel;
     source->initialized = true;
     source->capture_width = width;

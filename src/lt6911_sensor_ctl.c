@@ -442,23 +442,19 @@ error:
 int lt6911_start_csi(void)
 {
 	const VI_PIPE pipe = 0;
+	int cleanup;
 
 	configure_pinmux_once();
 	if (lt6911_i2c_init(pipe) != CVI_SUCCESS)
 		return CVI_FAILURE;
-	/* SAMPLE_PLAT_VI_INIT / StartMIPI resets the SoC CSI receiver.
-	   prepare-hdmi arms LT6911 CSI TX at boot; a Core restart does not
-	   rerun that unit.  Re-arm here after VI, matching
-	   prepare-onekvm-device-nanokvm-hdmi (0x805a/0x8010 + D283).
-	   0x805a 0x88→0x80 recovers a powered LT6911 after SoC-only reboot.
-	   Leave 0x80ee open: prepare-hdmi never writes 0xee=0, and closing
-	   the gate in the same transaction as 0x805a drops CSI. */
+	/* Same registers as prepare-onekvm-device-nanokvm-hdmi, called
+	   BEFORE SAMPLE_PLAT_VI_INIT so CSI TX is already 0x80 when the
+	   SoC RX starts. Do not write 0x805a=0x88 after StartViChn: that
+	   zeros CSIBDG width and hangs IntCnt. Close 80ee only after the
+	   805a/8010/D283 sequence has settled, matching kick_hdmi. */
 	pthread_mutex_lock(&g_i2c_lock);
 	if (lt6911_i2c_write(pipe, 0x80ee, 0x01) != CVI_SUCCESS)
 		goto error;
-	if (lt6911_i2c_write(pipe, 0x805a, 0x88) != CVI_SUCCESS)
-		goto error;
-	usleep(1000);
 	if (lt6911_i2c_write(pipe, 0x805a, 0x80) != CVI_SUCCESS)
 		goto error;
 	if (lt6911_i2c_write(pipe, 0x8010, 0x00) != CVI_SUCCESS)
@@ -466,8 +462,12 @@ int lt6911_start_csi(void)
 	usleep(100000);
 	if (lt6911_i2c_write(pipe, 0xd283, 0x11) != CVI_SUCCESS)
 		goto error;
+	usleep(50000);
+	cleanup = lt6911_i2c_write(pipe, 0x80ee, 0x00);
 	pthread_mutex_unlock(&g_i2c_lock);
-	fprintf(stderr, "OneKVM: LT6911 CSI started after VI init\n");
+	if (cleanup != CVI_SUCCESS)
+		return CVI_FAILURE;
+	fprintf(stderr, "OneKVM: LT6911 CSI armed before VI init\n");
 	return CVI_SUCCESS;
 error:
 	(void)lt6911_i2c_write(pipe, 0x80ee, 0x00);
