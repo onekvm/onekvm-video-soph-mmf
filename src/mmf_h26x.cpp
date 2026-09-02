@@ -1185,14 +1185,29 @@ bool wait_ready_h26x_packet(int ch, int timeout_ms)
 	if (ch < 0 || ch >= MMF_VENC_MAX_CHN || timeout_ms < 0)
 		return false;
 	H26xReader &reader = g_readers[ch];
-	std::unique_lock<std::mutex> lock(reader.mu);
-	if (!reader.queue.empty())
-		return true;
-	reader.cv.wait_for(lock, std::chrono::milliseconds(timeout_ms), [&] {
-		return !reader.queue.empty() ||
-			reader.stop.load(std::memory_order_relaxed);
-	});
-	return !reader.queue.empty();
+	const auto deadline = std::chrono::steady_clock::now() +
+		std::chrono::milliseconds(timeout_ms);
+	for (;;) {
+		{
+			std::lock_guard<std::mutex> lock(reader.mu);
+			if (!reader.queue.empty())
+				return true;
+			if (reader.stop.load(std::memory_order_relaxed))
+				return false;
+		}
+		const auto now = std::chrono::steady_clock::now();
+		if (now >= deadline)
+			return false;
+		/* std::condition_variable::wait_for returns immediately on the
+		 * target musl/riscv64 runtime.  A one-millisecond sleep keeps this
+		 * bounded wait interruptible without busy-polling between 60 fps
+		 * access units. */
+		auto pause = deadline - now;
+		const auto poll = std::chrono::milliseconds(1);
+		if (pause > poll)
+			pause = poll;
+		std::this_thread::sleep_for(pause);
+	}
 }
 
 uint64_t h26x_last_encode_ns(int ch)
