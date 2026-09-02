@@ -275,8 +275,14 @@ int close_h26x_encoder(int ch) {
 		s32Ret = CVI_VENC_StopRecvFrame(ch);
 		if (s32Ret != CVI_SUCCESS)
 			printf("CVI_VENC_StopRecvPic failed with %d\n", s32Ret);
-		else
+		else {
 			info->receiver_started = 0;
+			/* Stop returns after the WAVE4 consumer has exited.  Quiesce its
+			 * VPSS producer before UnBind so no final frame can be queued to the
+			 * dead worker and poison the next process' VENC channel. */
+			if (info->bound_to_capture)
+				(void)pause_vpss_channel(info->capture_channel);
+		}
 	}
 	if (info->bound_to_capture)
 		unbind_h26x_from_capture(ch);
