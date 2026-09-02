@@ -897,7 +897,7 @@ int32_t encoder_unbind_source(void *opaque, char *error, uint32_t error_capacity
        across reconnects.  The scaler is enough to stop idle work.  Actually
        unbinding the producer here leaves WAVE4 input-starved; its later final
        StopRecvFrame can then block forever in the vendor VPU lock.  Final
-       Stop/Unbind/Destroy ordering belongs to close_h26x_encoder(). */
+       Unbind/Stop/Destroy ordering belongs to close_h26x_encoder(). */
     const bool live = encoder->initialized && encoder->source_bound &&
         encoder->mmf_generation == g_mmf_generation.load(std::memory_order_acquire);
     std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);

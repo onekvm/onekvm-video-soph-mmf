@@ -264,11 +264,15 @@ int close_h26x_encoder(int ch) {
 
 	H26xEncoderState *info = &g_runtime.h26x_encoders[ch];
 	/* An idle client parks the scaler but deliberately leaves VPSS connected
-	 * to the WAVE4 worker.  Wake that producer before StopRecvFrame: stopping
-	 * an already-unbound, input-starved worker can sleep forever inside the
-	 * vendor VPU lock and survive systemd's SIGKILL as stale driver state. */
-	if (info->bound_to_capture)
+	 * to the WAVE4 worker.  Feed one final frame before detaching the producer:
+	 * stopping an input-starved worker can sleep forever in the vendor VPU lock,
+	 * while stopping it before UnBind lets VPSS enqueue after the worker exited
+	 * and poisons the next process' VENC channel. */
+	if (info->bound_to_capture) {
 		(void)resume_vpss_channel(info->capture_channel);
+		std::this_thread::sleep_for(std::chrono::milliseconds(20));
+		unbind_h26x_from_capture(ch);
+	}
 
 	CVI_S32 s32Ret = CVI_SUCCESS;
 	if (info->receiver_started) {
@@ -278,9 +282,6 @@ int close_h26x_encoder(int ch) {
 		else
 			info->receiver_started = 0;
 	}
-	if (info->bound_to_capture)
-		unbind_h26x_from_capture(ch);
-
 	s32Ret = CVI_VENC_ResetChn(ch);
 	if (s32Ret != CVI_SUCCESS) {
 		printf("CVI_VENC_ResetChn vechn[%d] failed with %#x!\n", ch, s32Ret);
