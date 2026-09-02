@@ -1,5 +1,6 @@
 #include "mmf_internal.hpp"
 
+#include <chrono>
 #include <cstddef>
 #include <cstdio>
 #include <stdio.h>
@@ -688,9 +689,22 @@ static int ensure_vpss_user_frames()
 	const uint32_t size = COMMON_GetPicBufferSize(
 		width, height, PIXEL_FORMAT_UYVY, DATA_BITWIDTH_8,
 		COMPRESS_MODE_NONE, DEFAULT_ALIGN);
-	const int pool = _create_vb_pool("vpss_user", size, 2);
-	if (pool < 0)
+	static auto last_pool_fail = std::chrono::steady_clock::time_point{};
+	static bool logged_pool_fail = false;
+	const auto now = std::chrono::steady_clock::now();
+	if (last_pool_fail.time_since_epoch().count() != 0 &&
+	    now - last_pool_fail < std::chrono::seconds(2))
 		return -1;
+	const int pool = _create_vb_pool("vpss_user", size, 2);
+	if (pool < 0) {
+		last_pool_fail = now;
+		if (!logged_pool_fail) {
+			SAMPLE_PRT("vpss_user VB pool %u bytes failed; backing off\n", size);
+			logged_pool_fail = true;
+		}
+		return -1;
+	}
+	logged_pool_fail = false;
 	g_runtime.vpss_user_pool_id = pool;
 	const SIZE_S st{static_cast<CVI_U32>(width), static_cast<CVI_U32>(height)};
 	for (int i = 0; i < 2; ++i) {

@@ -322,6 +322,12 @@ int open_source(Source *source, const onekvm_video_source_config_v1 *config,
         set_error(error, error_capacity, "open MMF capture channel failed: %d", result);
         return -1;
     }
+    /* VI/MIPI init resets the CSI receiver. Go attached once after boot,
+       when prepare-hdmi had already started the bridge. Rust restarts
+       onekvm.service without that unit, so CSI must be armed here. */
+    if (lt6911_start_csi() != 0) {
+        std::fprintf(stderr, "OneKVM: LT6911 CSI start after VI failed\n");
+    }
     source->channel = channel;
     source->initialized = true;
     source->capture_width = width;

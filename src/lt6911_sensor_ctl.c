@@ -439,6 +439,41 @@ error:
 	return CVI_FAILURE;
 }
 
+int lt6911_start_csi(void)
+{
+	const VI_PIPE pipe = 0;
+	int cleanup;
+
+	configure_pinmux_once();
+	if (lt6911_i2c_init(pipe) != CVI_SUCCESS)
+		return CVI_FAILURE;
+	/* SAMPLE_PLAT_VI_INIT / StartMIPI resets the SoC CSI receiver.
+	   prepare-hdmi starts the bridge at boot; a Core restart does not
+	   rerun that unit.  Re-enable LT6911 CSI after VI is up, matching
+	   prepare-onekvm-device-nanokvm-hdmi (0x805a/0x8010 + D283). */
+	pthread_mutex_lock(&g_i2c_lock);
+	if (lt6911_i2c_write(pipe, 0x80ee, 0x01) != CVI_SUCCESS)
+		goto error;
+	if (lt6911_i2c_write(pipe, 0x805a, 0x80) != CVI_SUCCESS)
+		goto error;
+	if (lt6911_i2c_write(pipe, 0x8010, 0x00) != CVI_SUCCESS)
+		goto error;
+	usleep(100000);
+	if (lt6911_i2c_write(pipe, 0xd283, 0x11) != CVI_SUCCESS)
+		goto error;
+	usleep(50000);
+	cleanup = lt6911_i2c_write(pipe, 0x80ee, 0x00);
+	pthread_mutex_unlock(&g_i2c_lock);
+	if (cleanup != CVI_SUCCESS)
+		return CVI_FAILURE;
+	fprintf(stderr, "OneKVM: LT6911 CSI started after VI init\n");
+	return CVI_SUCCESS;
+error:
+	(void)lt6911_i2c_write(pipe, 0x80ee, 0x00);
+	pthread_mutex_unlock(&g_i2c_lock);
+	return CVI_FAILURE;
+}
+
 int lt6911_probe(VI_PIPE pipe)
 {
 	int id_high;
