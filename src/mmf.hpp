@@ -152,6 +152,7 @@ int set_h26x_output_fps(int ch, int output_fps, int gop);
 int set_h26x_rate_control(int ch, int output_fps, int gop, int bitrate_kbps,
 	int initial_qp, int min_qp, int max_qp);
 int bind_h26x_to_capture(int ch, int vpss_group, int vpss_channel);
+int park_h26x_capture(int ch);
 int unbind_h26x_from_capture(int ch);
 int vpss_input_width();
 int vpss_input_height();

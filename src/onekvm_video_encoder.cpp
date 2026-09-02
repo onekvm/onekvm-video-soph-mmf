@@ -893,20 +893,16 @@ int32_t encoder_unbind_source(void *opaque, char *error, uint32_t error_capacity
         mmf::park_unbound_vpss_channels();
         return 0;
     }
-    /* Keep the configured channel and its receive worker across reconnects.
-       This CVITEK driver cannot reliably restart a stopped VENC worker:
-       StartRecvFrame may succeed without recreating it, after which VPSS
-       fills the input waitq forever.  mmf::unbind_h26x_from_capture disconnects only
-       the producer; close_encoder performs the worker's single Stop when the
-       encoder is reset or finally released. Join our GetStream reader before
-       CloseFd so the two never share EnterVcodecLock. */
+    /* Keep the configured channel, VPSS binding, receive worker, and reader
+       across reconnects.  The scaler is enough to stop idle work.  Actually
+       unbinding the producer here leaves WAVE4 input-starved; its later final
+       StopRecvFrame can then block forever in the vendor VPU lock.  Final
+       Stop/Unbind/Destroy ordering belongs to close_h26x_encoder(). */
     const bool live = encoder->initialized && encoder->source_bound &&
         encoder->mmf_generation == g_mmf_generation.load(std::memory_order_acquire);
-    if (live && encoder->codec_type != 0 && encoder->channel >= 0)
-        mmf::stop_h26x_reader(encoder->channel);
     std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
-    if (live && mmf::unbind_h26x_from_capture(encoder->channel) != 0) {
-        set_error(error, error_capacity, "unbind VPSS from VENC failed");
+    if (live && mmf::park_h26x_capture(encoder->channel) != 0) {
+        set_error(error, error_capacity, "park VPSS/VENC capture failed");
         return -1;
     }
     encoder->source_bound = false;

@@ -14,7 +14,7 @@ HDMI 源
 
 - **绑定路径**：Core 调 `BindVideoSource` + `ReadEncodedVideo`（`encoder_read_packet`）。不要在这条路上调 `source_read`。
 - **延迟**：绑定路径没有 `acquire_capture_frame`。VENC pack `u64PTS` 是编码完成时刻，不能当采集起点。采集缓存 = 一场输入周期（`1/input_fps`）+ `/proc/cvitek/vpss` 的 `CostTime`；编码缓存 = `/proc/cvitek/venc` 的 `HwEncTime`。reader 最多 2Hz 读这两份 proc（不要读 `vi`/`vi_dbg`）。status/SSE 只读缓存。
-- **无消费者**：Core `videoLoop` 停在 `waitForConsumer`，不会替 MMF 探 HDMI。分辨率跟随必须在 source 自己的 **HDMI watcher** 里跑。空闲时 `CVI_VPSS_DisableChn` 停掉 scaler（`CVI_VIP_SCL`）；VI 仍跑，用来判断有没有 HDMI。绑定 VENC 或 `GetChnFrame` 时再 `EnableChn`。Enable 失败则保持关闭并让 Core 重试，不要拆 VI。
+- **无消费者**：Core `videoLoop` 停在 `waitForConsumer`，不会替 MMF 探 HDMI。分辨率跟随必须在 source 自己的 **HDMI watcher** 里跑。空闲时只用 `CVI_VPSS_DisableChn` 停掉 scaler（`CVI_VIP_SCL`），保留 VPSS→VENC 和 WAVE4 worker；实际解绑会让无输入的 worker 在最终 `StopRecvFrame` 时卡进厂商锁。VI 仍跑，用来判断有没有 HDMI。重新绑定 VENC 或 `GetChnFrame` 时再 `EnableChn`。最终释放先恢复 scaler、StopRecvFrame，再 Unbind/Destroy。Enable 失败则保持关闭并让 Core 重试，不要拆 VI。
 - **VENC reader**：独立线程 `GetStream`。用户态有界队列最多保留 16 个 AU，只用于吸收同步 CryptoDMA/网络发送的短暂调度停顿；队满时不能等待消费者，否则 50 ms 的停顿就会把背压传回 VPSS 并触发 `VENC waitq is full`。reader 必须立即丢弃陈旧链、在两次 `GetStream` 之间请求一次新 IDR，并继续排空硬件流。`SetChnAttr`（含改 FPS）、`RequestIDR`、`close_encoder` 也只能在这个线程、两次 `GetStream` 之间做。HTTP 或 `g_mmf_mutex` 上对活通道调这些会和 `GetStream` 抢 `EnterVcodecLock`。VPSS/VENC 延迟 proc 只在等下一包或队满时读，不要挡 `GetStream`。
 - **参数集**：CVITEK 会把 H.264 PPS（H.265 还包括 VPS/SPS/PPS）拆成 IDR 前的独立 AU。reader 等待 IDR 时仍须缓存这些参数集，并在关键 AU 缺项时按 VPS/SPS/PPS 顺序补齐；直接丢掉所有非 IDR 会让浏览器收到 RTP 但无法初始化解码器。
 - **绑定 VPSS→VENC** 时 `bIsoSendFrmEn` 必须关掉。绑定路径从不 `SendFrame`，打开隔离后编码计数涨、`GetStream` 队列为空。

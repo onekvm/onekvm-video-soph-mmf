@@ -259,20 +259,27 @@ int close_h26x_encoder(int ch) {
 	if (!g_runtime.h26x_encoders[ch].initialized) {
 		return 0;
 	}
-	if (g_runtime.h26x_encoders[ch].bound_to_capture)
-		unbind_h26x_from_capture(ch);
-
 	if (g_runtime.h26x_encoders[ch].stream_held)
 		release_h26x_packet(ch);
 
+	H26xEncoderState *info = &g_runtime.h26x_encoders[ch];
+	/* An idle client parks the scaler but deliberately leaves VPSS connected
+	 * to the WAVE4 worker.  Wake that producer before StopRecvFrame: stopping
+	 * an already-unbound, input-starved worker can sleep forever inside the
+	 * vendor VPU lock and survive systemd's SIGKILL as stale driver state. */
+	if (info->bound_to_capture)
+		(void)resume_vpss_channel(info->capture_channel);
+
 	CVI_S32 s32Ret = CVI_SUCCESS;
-	if (g_runtime.h26x_encoders[ch].receiver_started) {
+	if (info->receiver_started) {
 		s32Ret = CVI_VENC_StopRecvFrame(ch);
 		if (s32Ret != CVI_SUCCESS)
 			printf("CVI_VENC_StopRecvPic failed with %d\n", s32Ret);
 		else
-			g_runtime.h26x_encoders[ch].receiver_started = 0;
+			info->receiver_started = 0;
 	}
+	if (info->bound_to_capture)
+		unbind_h26x_from_capture(ch);
 
 	s32Ret = CVI_VENC_ResetChn(ch);
 	if (s32Ret != CVI_SUCCESS) {
@@ -809,6 +816,30 @@ int unbind_h26x_from_capture(int ch) {
 		ret = depth_ret;
 	park_unbound_vpss_channels();
 	return ret;
+}
+
+int park_h26x_capture(int ch) {
+	if (ch < 0 || ch >= MMF_VENC_MAX_CHN ||
+		!g_runtime.h26x_encoders[ch].initialized)
+		return -1;
+	H26xEncoderState *info = &g_runtime.h26x_encoders[ch];
+	if (!info->bound_to_capture) {
+		park_unbound_vpss_channels();
+		return 0;
+	}
+	if (info->stream_held && release_h26x_packet(ch) != 0)
+		return -1;
+	const int ret = pause_vpss_channel(info->capture_channel);
+	if (ret != 0)
+		return ret;
+	H26xReader &reader = g_readers[ch];
+	{
+		std::lock_guard<std::mutex> lock(reader.mu);
+		reader.queue.clear();
+	}
+	reader.want_idr.store(true, std::memory_order_relaxed);
+	reader.cv.notify_all();
+	return 0;
 }
 
 void h26x_reader_want_idr(int ch)
