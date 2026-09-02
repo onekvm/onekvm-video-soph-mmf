@@ -263,6 +263,7 @@ int close_h26x_encoder(int ch) {
 		release_h26x_packet(ch);
 
 	H26xEncoderState *info = &g_runtime.h26x_encoders[ch];
+	const bool was_bound_to_capture = info->bound_to_capture;
 	/* An idle client parks the scaler but deliberately leaves VPSS connected
 	 * to the WAVE4 worker.  Wake that producer before StopRecvFrame: stopping
 	 * an already-unbound, input-starved worker can sleep forever inside the
@@ -286,6 +287,16 @@ int close_h26x_encoder(int ch) {
 	}
 	if (info->bound_to_capture)
 		unbind_h26x_from_capture(ch);
+	/* In the vendor driver the first Stop above only changes the channel state
+	 * while the SYS binding is still enabled.  UnBind flips enable_bind_mode,
+	 * and a second Stop is what wakes and joins the bind kthread and clears
+	 * currBindMode.  Without it, the stale worker survives DestroyChn and the
+	 * next process gets a VENC channel that accepts frames but encodes none. */
+	if (was_bound_to_capture) {
+		s32Ret = CVI_VENC_StopRecvFrame(ch);
+		if (s32Ret != CVI_SUCCESS)
+			printf("CVI_VENC final bound-worker stop failed with %d\n", s32Ret);
+	}
 
 	s32Ret = CVI_VENC_ResetChn(ch);
 	if (s32Ret != CVI_SUCCESS) {
