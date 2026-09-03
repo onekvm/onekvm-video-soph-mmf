@@ -175,6 +175,55 @@ static int stale_buffer_pools_all_free(void)
 	return pool_count > 0 && all_free ? 1 : 0;
 }
 
+static bool foreign_vendor_device_owner_exists(void)
+{
+	DIR *proc = opendir("/proc");
+	if (proc == NULL)
+		return true;
+
+	const pid_t self = getpid();
+	bool found = false;
+	struct dirent *process_entry;
+	while (!found && (process_entry = readdir(proc)) != NULL) {
+		char *end = NULL;
+		const long pid = strtol(process_entry->d_name, &end, 10);
+		if (end == process_entry->d_name || *end != '\0' || pid <= 0 ||
+		    pid == self)
+			continue;
+
+		char fd_dir_path[64];
+		snprintf(fd_dir_path, sizeof(fd_dir_path), "/proc/%ld/fd", pid);
+		DIR *fd_dir = opendir(fd_dir_path);
+		if (fd_dir == NULL)
+			continue;
+		struct dirent *fd_entry;
+		while ((fd_entry = readdir(fd_dir)) != NULL) {
+			if (fd_entry->d_name[0] == '.')
+				continue;
+			char fd_path[PATH_MAX];
+			char target[PATH_MAX];
+			snprintf(fd_path, sizeof(fd_path), "%s/%s", fd_dir_path,
+				 fd_entry->d_name);
+			const ssize_t length = readlink(fd_path, target,
+						       sizeof(target) - 1);
+			if (length < 0)
+				continue;
+			target[length] = '\0';
+			if (strncmp(target, "/dev/cvi", 8) == 0 ||
+			    strcmp(target, "/dev/ion") == 0) {
+				fprintf(stderr,
+					"OneKVM: vendor multimedia device still owned by pid %ld (%s)\n",
+					pid, target);
+				found = true;
+				break;
+			}
+		}
+		closedir(fd_dir);
+	}
+	closedir(proc);
+	return found;
+}
+
 static bool vendor_encoder_channel_exists(int channel)
 {
 	FILE *fp = fopen("/proc/cvitek/venc", "r");
@@ -231,22 +280,100 @@ static int reclaim_stale_vendor_encoders(void)
 	return 0;
 }
 
+static int reclaim_stale_vendor_vpss(void)
+{
+	for (int group = 0; group < VPSS_MAX_GRP_NUM; ++group) {
+		VPSS_GRP_ATTR_S attributes{};
+		if (CVI_VPSS_GetGrpAttr(group, &attributes) != CVI_SUCCESS)
+			continue;
+		for (int channel = 0; channel < VPSS_MAX_CHN_NUM; ++channel)
+			(void)CVI_VPSS_DisableChn(group, channel);
+		(void)CVI_VPSS_StopGrp(group);
+		if (CVI_VPSS_DestroyGrp(group) != CVI_SUCCESS) {
+			fprintf(stderr,
+				"OneKVM: destroy stale VPSS group %d failed\n",
+				group);
+			return -1;
+		}
+		fprintf(stderr, "OneKVM: reclaimed stale VPSS group %d\n", group);
+	}
+	return 0;
+}
+
+static int release_stale_buffer_blocks(void)
+{
+	FILE *fp = fopen("/proc/cvitek/vb", "r");
+	if (fp == NULL)
+		return -1;
+
+	char line[256];
+	uint64_t physical_address = 0;
+	int block_size = 0;
+	int block_count = 0;
+	int free_count = 0;
+	int result = 0;
+	while (fgets(line, sizeof(line), fp) != NULL) {
+		if (strstr(line, "PhysAddr  :")) {
+			(void)sscanf(line, "%*s  : %" SCNx64, &physical_address);
+		} else if (strstr(line, "BlkSz     :")) {
+			(void)sscanf(line, "%*s     : %d", &block_size);
+		} else if (strstr(line, "BlkCnt    :")) {
+			(void)sscanf(line, "%*s    : %d", &block_count);
+		} else if (strstr(line, "Free      :")) {
+			(void)sscanf(line, "%*s      : %d", &free_count);
+			if (free_count == block_count)
+				continue;
+			for (int index = 0; index < block_count; ++index) {
+				const uint64_t address = physical_address +
+					(uint64_t)index * (uint64_t)block_size;
+				const VB_BLK block = CVI_VB_PhysAddr2Handle(address);
+				if (block == VB_INVALID_HANDLE)
+					continue;
+				CVI_U32 users = 0;
+				if (CVI_VB_InquireUserCnt(block, &users) != CVI_SUCCESS)
+					continue;
+				while (users-- > 0) {
+					if (CVI_VB_ReleaseBlock(block) != CVI_SUCCESS) {
+						fprintf(stderr,
+							"OneKVM: release stale VB block at %#" PRIx64 " failed\n",
+							address);
+						result = -1;
+						break;
+					}
+				}
+			}
+		}
+	}
+	fclose(fp);
+	return result;
+}
+
 static int reclaim_stale_buffer_pools(void)
 {
 	int pool_count = count_vendor_buffer_pools();
 	if (pool_count == 0)
 		return 0;
 
-	/* Only drain leaked kernel init references after every pool reports all
-	 * blocks free; a genuinely active owner must never be torn down here. */
-	if (stale_buffer_pools_all_free() != 1) {
+	/* Systemd does not overlap OneKVM processes, but refuse destructive stale
+	 * cleanup if any other process still owns a vendor multimedia device. */
+	if (foreign_vendor_device_owner_exists()) {
 		fprintf(stderr,
-			"OneKVM: refusing to reclaim %d busy stale VB pools\n",
+			"OneKVM: refusing to reclaim %d VB pools with a live owner\n",
 			pool_count);
 		return -1;
 	}
 	if (reclaim_stale_vendor_encoders() != 0)
 		return -1;
+	if (reclaim_stale_vendor_vpss() != 0)
+		return -1;
+	if (release_stale_buffer_blocks() != 0)
+		return -1;
+	if (stale_buffer_pools_all_free() != 1) {
+		fprintf(stderr,
+			"OneKVM: refusing to drop references for %d busy VB pools\n",
+			pool_count);
+		return -1;
+	}
 
 	const CVI_S32 fd = get_base_fd();
 	if (fd < 0) {
