@@ -260,11 +260,11 @@ static int reclaim_stale_vendor_encoders(void)
 			return -1;
 		}
 
-		/* libvenc only sends these ioctls through process-local channel FDs.
+		/* libvenc only sends this ioctl through a process-local channel FD.
 		 * After SIGKILL a replacement process therefore has to open the
-		 * channel device itself before it can release the kernel resources. */
-		(void)ioctl(fd, CVI_VC_VENC_STOP_RECV_FRAME);
-		(void)ioctl(fd, CVI_VC_VENC_RESET_CHN);
+		 * channel device itself before it can release the kernel resources.
+		 * Do not send STOP/RESET first: a stale bound worker can block those
+		 * ioctls forever while waiting for a producer that no longer exists. */
 		const int result = ioctl(fd, CVI_VC_VENC_DESTROY_CHN);
 		const int saved_errno = errno;
 		close(fd);
