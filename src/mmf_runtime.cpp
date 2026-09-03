@@ -175,6 +175,62 @@ static int stale_buffer_pools_all_free(void)
 	return pool_count > 0 && all_free ? 1 : 0;
 }
 
+static bool vendor_encoder_channel_exists(int channel)
+{
+	FILE *fp = fopen("/proc/cvitek/venc", "r");
+	if (fp == NULL)
+		return false;
+
+	char line[256];
+	bool found = false;
+	while (fgets(line, sizeof(line), fp) != NULL) {
+		int id = -1;
+		if (sscanf(line, "ID: %d", &id) == 1 && id == channel) {
+			found = true;
+			break;
+		}
+	}
+	fclose(fp);
+	return found;
+}
+
+static int reclaim_stale_vendor_encoders(void)
+{
+	for (int channel = 0; channel < VENC_MAX_CHN_NUM; ++channel) {
+		if (!vendor_encoder_channel_exists(channel))
+			continue;
+
+		char path[64];
+		snprintf(path, sizeof(path), "/dev/%s%d",
+			 CVI_VC_DRV_ENCODER_DEV_NAME, channel);
+		const int fd = open(path, O_RDWR | O_DSYNC | O_CLOEXEC);
+		if (fd < 0) {
+			fprintf(stderr,
+				"OneKVM: open stale VENC channel %d failed: %s\n",
+				channel, strerror(errno));
+			return -1;
+		}
+
+		/* libvenc only sends these ioctls through process-local channel FDs.
+		 * After SIGKILL a replacement process therefore has to open the
+		 * channel device itself before it can release the kernel resources. */
+		(void)ioctl(fd, CVI_VC_VENC_STOP_RECV_FRAME);
+		(void)ioctl(fd, CVI_VC_VENC_RESET_CHN);
+		const int result = ioctl(fd, CVI_VC_VENC_DESTROY_CHN);
+		const int saved_errno = errno;
+		close(fd);
+		if (result != CVI_SUCCESS) {
+			fprintf(stderr,
+				"OneKVM: destroy stale VENC channel %d failed: %s\n",
+				channel, strerror(saved_errno));
+			return -1;
+		}
+		fprintf(stderr, "OneKVM: reclaimed stale VENC channel %d\n",
+			channel);
+	}
+	return 0;
+}
+
 static int reclaim_stale_buffer_pools(void)
 {
 	int pool_count = count_vendor_buffer_pools();
@@ -189,6 +245,8 @@ static int reclaim_stale_buffer_pools(void)
 			pool_count);
 		return -1;
 	}
+	if (reclaim_stale_vendor_encoders() != 0)
+		return -1;
 
 	const CVI_S32 fd = get_base_fd();
 	if (fd < 0) {
@@ -395,16 +453,6 @@ int reset_capture_channels(void)
 		return s32Ret;
 	}
 	return s32Ret;
-}
-
-int reset_vendor_encoders(void)
-{
-	for (int ch = 0; ch < VENC_MAX_CHN_NUM; ch ++) {
-		CVI_VENC_StopRecvFrame(ch);
-		CVI_VENC_ResetChn(ch);
-		CVI_VENC_DestroyChn(ch);
-	}
-	return 0;
 }
 
 static void shutdown_vendor_system(void)
@@ -791,13 +839,6 @@ int initialize(void)
 		return -1;
 	} else {
 		printf("try release vio ok\n");
-	}
-
-	if (reset_vendor_encoders() != CVI_SUCCESS) {
-		printf("try release venc failed\n");
-		return -1;
-	} else {
-		printf("try release venc ok\n");
 	}
 
     return 0;

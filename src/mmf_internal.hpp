@@ -13,6 +13,8 @@
 #include <inttypes.h>
 
 #include <fcntl.h>		/* low-level i/o */
+#include <sys/ioctl.h>
+#include <linux/cvi_vc_drv_ioctl.h>
 #include "cvi_buffer.h"
 #include "cvi_ae_comm.h"
 #include "cvi_awb_comm.h"
