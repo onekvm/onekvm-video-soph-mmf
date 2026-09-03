@@ -1,6 +1,15 @@
 #include "mmf_internal.hpp"
 #include "input_resolution_tracker.hpp"
 
+extern "C" {
+/* libsys keeps CVI_VB_Exit behind a process-local `vb_inited` guard.  A new
+ * process therefore cannot drop the kernel reference leaked by a SIGKILL via
+ * the public function.  These two exported vendor functions issue the same
+ * VB_IOCTL_EXIT without relying on that stale userspace flag. */
+CVI_S32 get_base_fd(CVI_VOID);
+CVI_S32 vb_ioctl_exit(CVI_S32 fd);
+}
+
 namespace onekvm::mmf {
 
 RuntimeState g_runtime{};
@@ -137,55 +146,76 @@ static SAMPLE_VI_CONFIG_S g_stViConfig;
 static SAMPLE_INI_CFG_S g_stIniCfg;
 CVI_S32 destroy_vpss_group(VPSS_GRP VpssGrp);
 
-static int release_stale_buffer_blocks(void) {
-	#define MAX_LINE_LENGTH 256
-    FILE *fp;
-    char line[MAX_LINE_LENGTH];
-	int pool_id = 0;
-	uint64_t phy_addr = 0;
-	int blk_cnt = 0;
-	int blk_size = 0;
-	int free_cnt = 0;
+static int stale_buffer_pools_all_free(void)
+{
+	FILE *fp = fopen("/proc/cvitek/vb", "r");
+	if (fp == NULL)
+		return -1;
 
-    fp = fopen("/proc/cvitek/vb", "r");
-    if (fp == NULL) {
-        fprintf(stderr, "Error opening file\n");
-        return 1;
-    }
-
-    while (fgets(line, MAX_LINE_LENGTH, fp) != NULL) {
-
-        if (strstr(line, "PoolId    :")) {
-            sscanf(line, "%*s    : %d", &pool_id);
-        } else if (strstr(line, "PhysAddr  :")) {
-            sscanf(line, "%*s  : %lx", &phy_addr);
-        } else if (strstr(line, "BlkSz     :")) {
-            sscanf(line, "%*s     : %d", &blk_size);
-        } else if (strstr(line, "BlkCnt    : ")) {
-            sscanf(line, "%*s    : %d", &blk_cnt);
-        } else if (strstr(line, "Free      :")) {
-            sscanf(line, "%*s      : %d", &free_cnt);
-
-			CVI_SYS_Exit();
-			CVI_VB_Exit();
-
-			if (free_cnt != blk_cnt) {
-				printf("relese PoolId: %d, PhysAddr: 0x%lx, BlkSize: %d, BlkCnt: %d Free: %d\n",
-					pool_id, phy_addr, blk_size, blk_cnt, free_cnt);
-				for (int i = 0; i < blk_cnt; i ++) {
-					uint64_t try_release_phy_addr = phy_addr + i * blk_size;
-					printf("try release poolid:%d phy:%#lx\r\n", pool_id, try_release_phy_addr);
-					VB_BLK blk = CVI_VB_PhysAddr2Handle(try_release_phy_addr);
-					if (0 != CVI_VB_ReleaseBlock(blk)) {
-						printf("release poolid:%d phy:%#lx failed!\r\n", pool_id, try_release_phy_addr);
-					}
-				}
+	char line[256];
+	int block_count = -1;
+	int pool_count = 0;
+	bool all_free = true;
+	while (fgets(line, sizeof(line), fp) != NULL) {
+		if (strstr(line, "BlkCnt    :")) {
+			if (sscanf(line, "%*s    : %d", &block_count) != 1)
+				block_count = -1;
+		} else if (strstr(line, "Free      :")) {
+			int free_count = -1;
+			if (sscanf(line, "%*s      : %d", &free_count) == 1 &&
+			    block_count >= 0) {
+				++pool_count;
+				if (free_count != block_count)
+					all_free = false;
 			}
-        }
-    }
+			block_count = -1;
+		}
+	}
+	fclose(fp);
+	return pool_count > 0 && all_free ? 1 : 0;
+}
 
-    fclose(fp);
+static int reclaim_stale_buffer_pools(void)
+{
+	int pool_count = count_vendor_buffer_pools();
+	if (pool_count == 0)
+		return 0;
 
+	/* Only drain leaked kernel init references after every pool reports all
+	 * blocks free; a genuinely active owner must never be torn down here. */
+	if (stale_buffer_pools_all_free() != 1) {
+		fprintf(stderr,
+			"OneKVM: refusing to reclaim %d busy stale VB pools\n",
+			pool_count);
+		return -1;
+	}
+
+	const CVI_S32 fd = get_base_fd();
+	if (fd < 0) {
+		fprintf(stderr, "OneKVM: open base device for stale VB reclaim failed\n");
+		return -1;
+	}
+	int exits = 0;
+	while (pool_count > 0 && exits < VB_MAX_COMM_POOLS) {
+		const CVI_S32 result = vb_ioctl_exit(fd);
+		if (result != CVI_SUCCESS) {
+			fprintf(stderr,
+				"OneKVM: stale VB exit %d failed with %#x\n",
+				exits + 1, result);
+			return -1;
+		}
+		++exits;
+		pool_count = count_vendor_buffer_pools();
+	}
+	if (pool_count != 0) {
+		fprintf(stderr,
+			"OneKVM: %d stale VB pools remain after %d exits\n",
+			pool_count, exits);
+		return -1;
+	}
+	fprintf(stderr,
+		"OneKVM: reclaimed stale VB pools through MMF (%d exits)\n",
+		exits);
 	return 0;
 }
 
@@ -668,8 +698,9 @@ static CVI_S32 initialize_runtime(void)
 	/************************************************
 	 * step3:  Init modules
 	 ************************************************/
-	if (0 != release_stale_buffer_blocks()) {
-		SAMPLE_PRT("free leak vb memory error\n");
+	if (reclaim_stale_buffer_pools() != 0) {
+		SAMPLE_PRT("reclaim stale VB pools failed\n");
+		return CVI_FAILURE;
 	}
 
 	/* Common VB must cover 1080p VPSS output and the current HDMI frame.
