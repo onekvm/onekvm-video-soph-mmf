@@ -1,6 +1,7 @@
 #include <onekvm/crypto_backend_v1.h>
 
 #include <array>
+#include <atomic>
 #include <cerrno>
 #include <cstdint>
 #include <cstdio>
@@ -73,6 +74,11 @@ struct Session {
     uint32_t auth_tag_size = kAuthTagSize;
 };
 
+/* cvitek-spacc wait_event timeout is 1 s. If the CryptoDMA IRQ never
+   completes, every SRTP batch stalls the video loop at 1 FPS. After the
+   first ETIMEDOUT, skip further ioctls so Core can stay on software AES. */
+std::atomic<bool> g_offload_unusable{false};
+
 void set_error(char *error, uint32_t capacity, const char *operation, int code) {
     if (error == nullptr || capacity == 0) return;
     const int positive = code < 0 ? -code : code;
@@ -82,6 +88,21 @@ void set_error(char *error, uint32_t capacity, const char *operation, int code) 
 
 int32_t fail_errno(char *error, uint32_t capacity, const char *operation) {
     const int code = errno == 0 ? EIO : errno;
+    set_error(error, capacity, operation, code);
+    return -code;
+}
+
+int32_t reject_unusable(char *error, uint32_t capacity, const char *operation) {
+    if (!g_offload_unusable.load(std::memory_order_acquire))
+        return 0;
+    set_error(error, capacity, operation, ETIMEDOUT);
+    return -ETIMEDOUT;
+}
+
+int32_t fail_encrypt_ioctl(char *error, uint32_t capacity, const char *operation) {
+    const int code = errno == 0 ? EIO : errno;
+    if (code == ETIMEDOUT)
+        g_offload_unusable.store(true, std::memory_order_release);
     set_error(error, capacity, operation, code);
     return -code;
 }
@@ -129,6 +150,9 @@ int32_t session_create(const uint8_t *key, uint32_t key_size,
                        uint32_t auth_tag_size, void **result,
                        char *error, uint32_t error_capacity) {
     if (result != nullptr) *result = nullptr;
+    if (const int32_t skipped = reject_unusable(
+            error, error_capacity, "AES-GCM offload"))
+        return skipped;
     if (result == nullptr || key == nullptr ||
         (key_size != 16 && key_size != 32) || auth_tag_size != kAuthTagSize) {
         set_error(error, error_capacity, "invalid AES-GCM session", EINVAL);
@@ -165,11 +189,14 @@ int32_t session_create(const uint8_t *key, uint32_t key_size,
 int32_t session_seal(void *opaque, onekvm_crypto_request_v1 *request,
                      char *error, uint32_t error_capacity) {
     auto *session = static_cast<Session *>(opaque);
+    if (const int32_t skipped = reject_unusable(
+            error, error_capacity, "AES-GCM offload"))
+        return skipped;
     const int32_t valid = validate_request(session, request, error, error_capacity);
     if (valid != 0) return valid;
     KernelEncryptRequest kernel = kernel_request(*request);
     if (::ioctl(session->fd, kEncrypt, &kernel) != 0)
-        return fail_errno(error, error_capacity, "AES-GCM offload");
+        return fail_encrypt_ioctl(error, error_capacity, "AES-GCM offload");
     request->output_size = request->src_size + session->auth_tag_size;
     return 0;
 }
@@ -183,6 +210,9 @@ int32_t session_seal_batch(void *opaque, onekvm_crypto_request_v1 *requests,
         return -EINVAL;
     }
     *completed = 0;
+    if (const int32_t skipped = reject_unusable(
+            error, error_capacity, "AES-GCM batch offload"))
+        return skipped;
     /* The kernel consumes the array synchronously. A fixed stack buffer avoids
        a heap allocation on every SRTP batch and cannot throw across the C ABI. */
     std::array<KernelEncryptRequest, kMaxBatch> kernel{};
@@ -197,7 +227,7 @@ int32_t session_seal_batch(void *opaque, onekvm_crypto_request_v1 *requests,
     batch.requests_ptr = reinterpret_cast<uint64_t>(kernel.data());
     if (::ioctl(session->fd, kEncryptBatch, &batch) != 0) {
         *completed = batch.completed;
-        return fail_errno(error, error_capacity, "AES-GCM batch offload");
+        return fail_encrypt_ioctl(error, error_capacity, "AES-GCM batch offload");
     }
     *completed = batch.completed;
     for (uint32_t index = 0; index < batch.completed && index < count; ++index)

@@ -3,13 +3,18 @@
 #include "hw_latency_parser.hpp"
 
 #include <atomic>
+#include <cerrno>
 #include <chrono>
+#include <climits>
 #include <condition_variable>
 #include <cstring>
 #include <deque>
+#include <linux/futex.h>
 #include <mutex>
 #include <poll.h>
+#include <sys/syscall.h>
 #include <thread>
+#include <unistd.h>
 #include <vector>
 
 namespace onekvm::mmf {
@@ -19,6 +24,8 @@ namespace onekvm::mmf {
  * VENC produces, so this capacity does not add steady-state prefetch latency;
  * it only preserves the P-frame chain across short 50-200 ms stalls. */
 constexpr std::size_t kReaderQueueMax = 16;
+constexpr std::size_t kReaderPacketCapacity = 1024 * 1024;
+constexpr std::size_t kReaderSpareMax = 2;
 constexpr int64_t kVencPollWatchdogUs = 40 * 1000;
 
 struct H26xQueuedPacket {
@@ -40,13 +47,43 @@ struct H26xReader {
 	std::atomic<int> pending_max_qp{0};
 	std::atomic<uint32_t> pending_rc_mask{0};
 	std::atomic<uint64_t> last_packet_ns{0};
+	std::atomic<int> read_error{0};
+	std::atomic<bool> discard{false};
+	alignas(uint32_t) uint32_t wait_sequence = 0;
 	std::mutex mu;
 	std::mutex join_mu;
 	std::condition_variable cv;
 	std::deque<H26xQueuedPacket> queue;
+	std::vector<std::vector<uint8_t>> spare;
 };
 
+static void recycle_reader_buffer(H26xReader &reader, std::vector<uint8_t> &&buf)
+{
+	buf.clear();
+	if (buf.capacity() == 0)
+		return;
+	if (reader.spare.size() >= kReaderSpareMax)
+		return;
+	reader.spare.push_back(std::move(buf));
+}
+
+static void clear_reader_queue(H26xReader &reader)
+{
+	while (!reader.queue.empty()) {
+		recycle_reader_buffer(reader, std::move(reader.queue.front().data));
+		reader.queue.pop_front();
+	}
+}
+
 static H26xReader g_readers[MMF_VENC_MAX_CHN];
+
+static void notify_h26x_reader(H26xReader &reader)
+{
+	__atomic_add_fetch(&reader.wait_sequence, 1, __ATOMIC_RELEASE);
+	(void)syscall(SYS_futex, &reader.wait_sequence, FUTEX_WAKE_PRIVATE,
+		INT_MAX, nullptr, nullptr, 0);
+	reader.cv.notify_all();
+}
 
 static uint64_t reader_now_ns()
 {
@@ -65,11 +102,9 @@ static int _validate_venc_cfg(int ch, const H26xEncoderConfig *cfg)
 	 * invalid encoder configuration and continue with the next channel. */
 	if (g_runtime.h26x_encoders[ch].initialized)
 		return -EBUSY;
-	/* SG2002's vendor VENC driver exposes several channel IDs, but running two
-	 * H.26x channels concurrently (in particular H.264 plus H.265) deadlocks
-	 * inside the kernel driver. JPEG uses its separate path and remains safe to
-	 * run alongside one H.26x channel. Fail a second H.26x encoder instead of
-	 * allowing a device-wide media lockup. */
+	/* Keep the current protective single-H.26x policy. Prior dual-channel
+	 * experiments hit vendor-driver lockups; other codec/channel combinations
+	 * have not been validated. JPEG uses its separate path alongside H.26x. */
 	if (g_runtime.h26x_encoder_active)
 		return -ENOSPC;
 	if (cfg->codec != H26xCodec::H265 && cfg->codec != H26xCodec::H264) {
@@ -255,24 +290,29 @@ int open_h26x_encoder(int ch, const H26xEncoderConfig &config,
 int close_h26x_encoder(int ch) {
 	if (ch < 0 || ch >= MMF_VENC_MAX_CHN)
 		return -1;
-	stop_h26x_reader(ch);
 	if (!g_runtime.h26x_encoders[ch].initialized) {
+		stop_h26x_reader(ch);
 		return 0;
 	}
-	if (g_runtime.h26x_encoders[ch].stream_held)
-		release_h26x_packet(ch);
-
 	H26xEncoderState *info = &g_runtime.h26x_encoders[ch];
 	const bool was_bound_to_capture = info->bound_to_capture;
-	/* An idle client parks the scaler but deliberately leaves VPSS connected
-	 * to the WAVE4 worker.  Wake that producer before StopRecvFrame: stopping
-	 * an already-unbound, input-starved worker can sleep forever inside the
-	 * vendor VPU lock and survive systemd's SIGKILL as stale driver state. */
-	if (info->bound_to_capture)
-		(void)resume_vpss_channel(info->capture_channel);
+	/* Wake the producer before joining the sole GetStream owner. The vendor
+	 * call may still be inside EnterVcodecLock after its bounded fd poll, and
+	 * the next bound frame is what lets that call complete and observe stop. */
+	if (info->bound_to_capture && resume_vpss_channel(info->capture_channel) != 0)
+		return -1;
+	stop_h26x_reader(ch);
+	if (info->stream_held)
+		release_h26x_packet(ch);
+
+	/* Keep the producer live for the first StopRecvFrame below. Stopping an
+	 * input-starved worker can sleep forever inside the vendor VPU lock and
+	 * survive systemd's SIGKILL as stale driver state. */
 
 	CVI_S32 s32Ret = CVI_SUCCESS;
 	if (info->receiver_started) {
+		std::fprintf(stderr,
+			"OneKVM: closing VENC channel %d stage=reader-stop-receiver\n", ch);
 		s32Ret = CVI_VENC_StopRecvFrame(ch);
 		if (s32Ret != CVI_SUCCESS)
 			printf("CVI_VENC_StopRecvPic failed with %d\n", s32Ret);
@@ -293,11 +333,15 @@ int close_h26x_encoder(int ch) {
 	 * currBindMode.  Without it, the stale worker survives DestroyChn and the
 	 * next process gets a VENC channel that accepts frames but encodes none. */
 	if (was_bound_to_capture) {
+		std::fprintf(stderr,
+			"OneKVM: closing VENC channel %d stage=final-bound-worker-stop\n", ch);
 		s32Ret = CVI_VENC_StopRecvFrame(ch);
 		if (s32Ret != CVI_SUCCESS)
 			printf("CVI_VENC final bound-worker stop failed with %d\n", s32Ret);
 	}
 
+	std::fprintf(stderr,
+		"OneKVM: closing VENC channel %d stage=reset-destroy\n", ch);
 	s32Ret = CVI_VENC_ResetChn(ch);
 	if (s32Ret != CVI_SUCCESS) {
 		printf("CVI_VENC_ResetChn vechn[%d] failed with %#x!\n", ch, s32Ret);
@@ -636,6 +680,42 @@ int read_h26x_packet(int ch, uint8_t *dst, int capacity) {
 	return copy_h26x_packet(ch, dst, capacity, 80 * 1000);
 }
 
+int read_manual_h26x_frame(int ch, uint8_t *dst, int capacity, int timeout_ms)
+{
+	if (ch < 0 || ch >= MMF_VENC_MAX_CHN || !dst || capacity <= 0 ||
+	    timeout_ms <= 0 || timeout_ms > 1000)
+		return -EINVAL;
+	auto &info = g_runtime.h26x_encoders[ch];
+	if (!info.initialized || info.bound_to_capture || !info.packet_pending)
+		return -EINVAL;
+	const auto deadline = std::chrono::steady_clock::now() +
+		std::chrono::milliseconds(timeout_ms);
+	int total = 0;
+	while (total < capacity) {
+		const auto remaining = std::chrono::duration_cast<std::chrono::microseconds>(
+			deadline - std::chrono::steady_clock::now()).count();
+		if (remaining <= 0)
+			return -ETIMEDOUT;
+		const int got = copy_h26x_packet(ch, dst + total, capacity - total,
+			static_cast<int>(std::min<int64_t>(remaining, 80000)));
+		if (got < 0)
+			return got;
+		if (got == 0)
+			continue;
+		const bool picture = annexb_has_vcl(dst + total, got,
+			info.codec == H26xCodec::H265);
+		if (release_h26x_packet(ch) != 0)
+			return -EIO;
+		total += got;
+		if (picture)
+			return total;
+		// GetStream can return standalone SPS/PPS before the one submitted
+		// picture. Keep draining that picture, without submitting another one.
+		info.packet_pending = 1;
+	}
+	return -2;
+}
+
 static int copy_and_release_h26x_packet(int ch, uint8_t *dst, int capacity,
 	int first_wait_timeout_us) {
 	int result = copy_h26x_packet(
@@ -744,19 +824,20 @@ int bind_h26x_to_capture(int ch, int vpss_group, int vpss_channel) {
 		(void)pause_vpss_channel(vpss_channel);
 		return ret;
 	}
-	const CVI_U32 old_depth = attr.u32Depth;
-	/* A bound output is consumed by VENC and does not need a userspace dequeue
-	 * queue. Depth zero removes one full-frame hold and lowers capture latency. */
-	attr.u32Depth = 0;
-	ret = CVI_VPSS_SetChnAttr(vpss_group, vpss_channel, &attr);
-	if (ret != CVI_SUCCESS) {
-		(void)pause_vpss_channel(vpss_channel);
-		return ret;
+	/* Keep one userspace dequeue slot while bound so source_snapshot can borrow
+	 * the current VPSS output without changing channel attributes in the hot
+	 * H.26x path. The private three-block pool already accounts for producer,
+	 * bound VENC, and one short-lived userspace borrower. */
+	if (attr.u32Depth != MMF_VPSS_LOW_LATENCY_DEPTH) {
+		attr.u32Depth = MMF_VPSS_LOW_LATENCY_DEPTH;
+		ret = CVI_VPSS_SetChnAttr(vpss_group, vpss_channel, &attr);
+		if (ret != CVI_SUCCESS) {
+			(void)pause_vpss_channel(vpss_channel);
+			return ret;
+		}
 	}
 	ret = SAMPLE_COMM_VPSS_Bind_VENC(vpss_group, vpss_channel, ch);
 	if (ret != CVI_SUCCESS) {
-		attr.u32Depth = old_depth;
-		CVI_VPSS_SetChnAttr(vpss_group, vpss_channel, &attr);
 		printf("VPSS(%d,%d) bind VENC(%d) failed with %#x\n",
 			vpss_group, vpss_channel, ch, ret);
 		(void)pause_vpss_channel(vpss_channel);
@@ -766,8 +847,6 @@ int bind_h26x_to_capture(int ch, int vpss_group, int vpss_channel) {
 		ret = CVI_VENC_StartRecvFrame(ch, &recv_param);
 		if (ret != CVI_SUCCESS) {
 			SAMPLE_COMM_VPSS_UnBind_VENC(vpss_group, vpss_channel, ch);
-			attr.u32Depth = old_depth;
-			CVI_VPSS_SetChnAttr(vpss_group, vpss_channel, &attr);
 			CVI_VENC_ResetChn(ch);
 			(void)pause_vpss_channel(vpss_channel);
 			return ret;
@@ -819,18 +898,6 @@ int unbind_h26x_from_capture(int ch) {
 	info->capture_group = 0;
 	info->capture_channel = 0;
 
-	/* Restore the userspace dequeue depth while the still-running VENC worker
-	 * waits idle without a producer. */
-	VPSS_CHN_ATTR_S attr;
-	CVI_S32 depth_ret = CVI_VPSS_GetChnAttr(
-		vpss_group, vpss_channel, &attr);
-	if (depth_ret == CVI_SUCCESS) {
-		attr.u32Depth = MMF_VPSS_LOW_LATENCY_DEPTH;
-		depth_ret = CVI_VPSS_SetChnAttr(
-			vpss_group, vpss_channel, &attr);
-	}
-	if (ret == CVI_SUCCESS && depth_ret != CVI_SUCCESS)
-		ret = depth_ret;
 	park_unbound_vpss_channels();
 	return ret;
 }
@@ -846,16 +913,19 @@ int park_h26x_capture(int ch) {
 	}
 	if (info->stream_held && release_h26x_packet(ch) != 0)
 		return -1;
+	H26xReader &reader = g_readers[ch];
+	reader.discard.store(true, std::memory_order_release);
 	const int ret = pause_vpss_channel(info->capture_channel);
 	if (ret != 0)
 		return ret;
-	H26xReader &reader = g_readers[ch];
+	/* Keep the sole GetStream owner alive across idle. A vendor GetStream can
+	 * remain inside EnterVcodecLock despite a zero timeout, so joining it from a
+	 * snapshot or disconnect path can block the MMF control plane. */
 	{
 		std::lock_guard<std::mutex> lock(reader.mu);
-		reader.queue.clear();
+		clear_reader_queue(reader);
 	}
-	reader.want_idr.store(true, std::memory_order_relaxed);
-	reader.cv.notify_all();
+	notify_h26x_reader(reader);
 	return 0;
 }
 
@@ -864,16 +934,10 @@ void h26x_reader_want_idr(int ch)
 	if (ch < 0 || ch >= MMF_VENC_MAX_CHN)
 		return;
 	H26xReader &reader = g_readers[ch];
+	/* Request an IDR without discarding the P-frame chain. Dropping every
+	   non-key AU here turns a PLI/keyframe hint into ~1 FPS (GOP cadence). */
 	reader.want_idr.store(true, std::memory_order_relaxed);
-	std::lock_guard<std::mutex> lock(reader.mu);
-	auto it = reader.queue.begin();
-	while (it != reader.queue.end()) {
-		if (it->key_frame)
-			++it;
-		else
-			it = reader.queue.erase(it);
-	}
-	reader.cv.notify_all();
+	notify_h26x_reader(reader);
 }
 
 void h26x_reader_force_idr(int ch)
@@ -883,7 +947,7 @@ void h26x_reader_force_idr(int ch)
 	H26xReader &reader = g_readers[ch];
 	reader.want_idr.store(true, std::memory_order_relaxed);
 	reader.force_idr.store(true, std::memory_order_release);
-	reader.cv.notify_all();
+	notify_h26x_reader(reader);
 }
 
 int request_h26x_idr(int ch) {
@@ -987,7 +1051,7 @@ int set_h26x_output_fps(int ch, int output_fps, int gop)
 	reader.pending_gop.store(gop, std::memory_order_relaxed);
 	reader.pending_output_fps.store(output_fps, std::memory_order_relaxed);
 	reader.pending_rc_mask.fetch_or(kH26xRcFpsGop, std::memory_order_release);
-	reader.cv.notify_all();
+	notify_h26x_reader(reader);
 	return 0;
 }
 
@@ -1012,7 +1076,7 @@ int set_h26x_rate_control(int ch, int output_fps, int gop, int bitrate_kbps,
 	if (bitrate_kbps > 0)
 		mask |= kH26xRcBitrate;
 	reader.pending_rc_mask.fetch_or(mask, std::memory_order_release);
-	reader.cv.notify_all();
+	notify_h26x_reader(reader);
 	return 0;
 }
 
@@ -1022,22 +1086,41 @@ void start_h26x_reader(int ch, bool request_idr)
 		return;
 	H26xReader &reader = g_readers[ch];
 	std::lock_guard<std::mutex> join_lock(reader.join_mu);
-	if (reader.running.load(std::memory_order_acquire))
+	if (reader.running.load(std::memory_order_acquire)) {
+		{
+			std::lock_guard<std::mutex> lock(reader.mu);
+			/* A discard reader deliberately does not publish queued AUs, so its
+			 * last_packet_ns describes the pre-idle stream.  Treat reconnect as a
+			 * fresh admission: encoder_read_bound() will then use bound_since_ns
+			 * and wait for the forced recovery IDR instead of mistaking the stale
+			 * timestamp for a dead live input and switching to the placeholder. */
+			reader.last_packet_ns.store(0, std::memory_order_relaxed);
+			reader.read_error.store(0, std::memory_order_release);
+			if (request_idr) {
+				reader.want_idr.store(true, std::memory_order_relaxed);
+				reader.force_idr.store(true, std::memory_order_release);
+			}
+			reader.discard.store(false, std::memory_order_release);
+		}
+		notify_h26x_reader(reader);
 		return;
+	}
 	if (reader.thread.joinable())
 		reader.thread.join();
 	reader.stop.store(false, std::memory_order_relaxed);
 	reader.last_packet_ns.store(0, std::memory_order_relaxed);
+	reader.read_error.store(0, std::memory_order_relaxed);
 	reader.want_idr.store(true, std::memory_order_relaxed);
 	reader.force_idr.store(false, std::memory_order_relaxed);
+	reader.discard.store(false, std::memory_order_relaxed);
 	{
 		std::lock_guard<std::mutex> lock(reader.mu);
-		reader.queue.clear();
+		clear_reader_queue(reader);
 	}
 	reader.running.store(true, std::memory_order_release);
 	reader.thread = std::thread([ch, request_idr]() {
 		H26xReader &self = g_readers[ch];
-		std::vector<uint8_t> scratch(1024 * 1024);
+		std::vector<uint8_t> scratch(kReaderPacketCapacity);
 		AnnexBParameterSets parameter_sets;
 		bool idr_ioctl_sent = !request_idr;
 		if (request_idr) {
@@ -1052,6 +1135,17 @@ void start_h26x_reader(int ch, bool request_idr)
 				idr_ioctl_sent = true;
 		}
 		while (!self.stop.load(std::memory_order_relaxed)) {
+			if (self.discard.load(std::memory_order_acquire)) {
+				const int discarded = read_latest_h26x_packet(
+					ch, scratch.data(), static_cast<int>(scratch.size()));
+				if (discarded <= 0) {
+					std::unique_lock<std::mutex> lock(self.mu);
+					self.cv.wait_for(lock, std::chrono::milliseconds(5), [&] {
+						return self.stop.load(std::memory_order_relaxed);
+					});
+				}
+				continue;
+			}
 			if (self.force_idr.exchange(false, std::memory_order_acq_rel)) {
 				idr_ioctl_sent = false;
 				self.want_idr.store(true, std::memory_order_relaxed);
@@ -1068,7 +1162,7 @@ void start_h26x_reader(int ch, bool request_idr)
 				 * "VENC waitq is full".  Drop the stale userspace chain immediately,
 				 * drain through a fresh IDR, and resume with decodable output. */
 				if (self.queue.size() >= kReaderQueueMax) {
-					self.queue.clear();
+					clear_reader_queue(self);
 					self.want_idr.store(true, std::memory_order_relaxed);
 					queue_overrun = true;
 				}
@@ -1111,6 +1205,8 @@ void start_h26x_reader(int ch, bool request_idr)
 				});
 				continue;
 			}
+			if (self.discard.load(std::memory_order_acquire))
+				continue;
 			const bool h265 =
 				g_runtime.h26x_encoders[ch].codec == H26xCodec::H265;
 			parameter_sets.update(
@@ -1120,31 +1216,31 @@ void start_h26x_reader(int ch, bool request_idr)
 					scratch.data(), static_cast<std::size_t>(got))
 				: annexb_has_idr(
 					scratch.data(), static_cast<std::size_t>(got));
-			if (self.want_idr.load(std::memory_order_relaxed) && !key)
-				continue;
 			if (self.last_packet_ns.load(std::memory_order_relaxed) == 0)
 				printf("OneKVM: VENC reader got first %d-byte AU on ch %d\n",
 					got, ch);
+			H26xQueuedPacket packet;
+			packet.key_frame = key;
+			if (key && parameter_sets.needs_parameter_prefix(
+					scratch.data(), static_cast<std::size_t>(got), h265)) {
+				packet.data = parameter_sets.augment_keyframe(
+					scratch.data(), static_cast<std::size_t>(got), h265);
+			} else {
+				packet.data.assign(scratch.data(), scratch.data() + got);
+			}
 			bool overflow = false;
 			{
 				std::lock_guard<std::mutex> lock(self.mu);
 				if (self.queue.size() >= kReaderQueueMax) {
 					overflow = true;
+					recycle_reader_buffer(self, std::move(packet.data));
 				} else {
-					H26xQueuedPacket packet;
-					if (key) {
-						packet.data = parameter_sets.augment_keyframe(
-							scratch.data(), static_cast<std::size_t>(got), h265);
-					} else {
-						packet.data.assign(scratch.begin(), scratch.begin() + got);
-					}
-					packet.key_frame = key;
 					self.queue.push_back(std::move(packet));
 					if (key)
 						self.want_idr.store(false, std::memory_order_relaxed);
 					self.last_packet_ns.store(reader_now_ns(),
 						std::memory_order_relaxed);
-					self.cv.notify_all();
+					notify_h26x_reader(self);
 				}
 			}
 			if (overflow) {
@@ -1166,15 +1262,105 @@ void stop_h26x_reader(int ch)
 		return;
 	H26xReader &reader = g_readers[ch];
 	reader.stop.store(true, std::memory_order_relaxed);
-	reader.cv.notify_all();
+	notify_h26x_reader(reader);
 	std::lock_guard<std::mutex> join_lock(reader.join_mu);
 	if (!reader.thread.joinable())
 		return;
 	if (reader.thread.get_id() == std::this_thread::get_id()) {
-		reader.thread.detach();
+		/* Reader teardown is an MMF control-plane operation.  Do not detach and
+		 * leak a worker if a future caller violates that ownership rule; a later
+		 * external stop can still join this completed thread. */
+		std::fprintf(stderr,
+			"OneKVM: refusing to detach VENC reader %d from itself\n", ch);
 		return;
 	}
 	reader.thread.join();
+}
+
+int begin_idle_h26x_drain(int capture_channel, int *encoder_channel)
+{
+	if (encoder_channel == nullptr || capture_channel < 0 ||
+		capture_channel >= MMF_VI_MAX_CHN)
+		return -1;
+	*encoder_channel = -1;
+	int match = -1;
+	for (int ch = 0; ch < MMF_VENC_MAX_CHN; ++ch) {
+		const H26xEncoderState &info = g_runtime.h26x_encoders[ch];
+		if (!info.initialized || !info.bound_to_capture ||
+			info.capture_channel != capture_channel)
+			continue;
+		if (match >= 0)
+			return -1;
+		match = ch;
+	}
+	if (match < 0)
+		return 0;
+	H26xReader &reader = g_readers[match];
+	if (!reader.running.load(std::memory_order_acquire)) {
+		reader.read_error.store(0, std::memory_order_release);
+		start_h26x_reader(match, false);
+		if (!reader.running.load(std::memory_order_acquire))
+			return -1;
+	}
+	reader.discard.store(true, std::memory_order_release);
+	notify_h26x_reader(reader);
+	*encoder_channel = match;
+	return 0;
+}
+
+int finish_idle_h26x_drain(int ch)
+{
+	if (ch < 0 || ch >= MMF_VENC_MAX_CHN ||
+		!g_runtime.h26x_encoders[ch].initialized)
+		return -1;
+	H26xEncoderState &info = g_runtime.h26x_encoders[ch];
+	if (!info.bound_to_capture)
+		return -1;
+	H26xReader &reader = g_readers[ch];
+	if (pause_vpss_channel(info.capture_channel) != 0) {
+		/* The temporary reader must remain the drain owner while the producer is
+		 * still live. Arm reconnect recovery because start() will see it running. */
+		h26x_reader_force_idr(ch);
+		return -1;
+	}
+	{
+		std::lock_guard<std::mutex> lock(reader.mu);
+		clear_reader_queue(reader);
+	}
+	if (reader.read_error.load(std::memory_order_acquire) != 0) {
+		/* The source is paused, so a failed vendor dequeue cannot grow further. */
+		reader.want_idr.store(true, std::memory_order_relaxed);
+		return -1;
+	}
+	/* Do not join here. A final WAVE4 input may remain after VPSS DisableChn,
+	 * and vendor GetStream can then hold the reader inside the codec lock even
+	 * though its fd poll was bounded. Keeping the sole reader alive drains that
+	 * late access unit without a second GetStream caller or blocking snapshot. */
+	notify_h26x_reader(reader);
+	return 0;
+}
+
+int take_ready_h26x_into(int ch, std::vector<uint8_t> *dst, bool *key_frame)
+{
+	if (ch < 0 || ch >= MMF_VENC_MAX_CHN)
+		return -1;
+	H26xReader &reader = g_readers[ch];
+	std::lock_guard<std::mutex> lock(reader.mu);
+	if (reader.queue.empty())
+		return 0;
+	H26xQueuedPacket packet = std::move(reader.queue.front());
+	reader.queue.pop_front();
+	const int size = static_cast<int>(packet.data.size());
+	if (key_frame != nullptr)
+		*key_frame = packet.key_frame;
+	if (dst != nullptr) {
+		recycle_reader_buffer(reader, std::move(*dst));
+		*dst = std::move(packet.data);
+	} else {
+		recycle_reader_buffer(reader, std::move(packet.data));
+	}
+	notify_h26x_reader(reader);
+	return size;
 }
 
 int take_ready_h26x_packet(int ch, uint8_t *dst, int capacity, bool *key_frame)
@@ -1192,8 +1378,9 @@ int take_ready_h26x_packet(int ch, uint8_t *dst, int capacity, bool *key_frame)
 	const int size = static_cast<int>(front.data.size());
 	if (key_frame != nullptr)
 		*key_frame = front.key_frame;
+	recycle_reader_buffer(reader, std::move(front.data));
 	reader.queue.pop_front();
-	reader.cv.notify_all();
+	notify_h26x_reader(reader);
 	return size;
 }
 
@@ -1215,10 +1402,10 @@ bool wait_ready_h26x_packet(int ch, int timeout_ms)
 		const auto now = std::chrono::steady_clock::now();
 		if (now >= deadline)
 			return false;
-		/* std::condition_variable::wait_for returns immediately on the
-		 * target musl/riscv64 runtime.  A one-millisecond sleep keeps this
-		 * bounded wait interruptible without busy-polling between 60 fps
-		 * access units. */
+		/* std::condition_variable::wait_for returns immediately on this
+		   musl/riscv64 runtime. FUTEX_WAIT_PRIVATE also missed wakes and
+		   let the 16-slot reader overflow (VENC 60, Core 1 FPS). Sleep 1 ms
+		   so the wait stays interruptible without a busy poll. */
 		auto pause = deadline - now;
 		const auto poll = std::chrono::milliseconds(1);
 		if (pause > poll)

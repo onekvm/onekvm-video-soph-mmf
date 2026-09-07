@@ -1,5 +1,6 @@
 #include "onekvm_video_backend_internal.hpp"
 #include "h264_annexb.hpp"
+#include "mmf_internal.hpp"
 
 #pragma GCC visibility push(hidden)
 namespace onekvm::video_backend {
@@ -23,6 +24,35 @@ uint32_t public_codec(int type) {
     if (type == 1) return ONEKVM_VIDEO_CODEC_H265;
     return ONEKVM_VIDEO_CODEC_H264;
 }
+
+namespace {
+std::atomic<uint64_t> g_next_allocation_id{1};
+Encoder *g_encoder_owners[kLastVENCChannel + 1]{};
+uint64_t g_encoder_owner_generations[kLastVENCChannel + 1]{};
+
+uint64_t next_allocation_id() {
+    uint64_t id = g_next_allocation_id.load(std::memory_order_relaxed);
+    while (id != UINT64_MAX) {
+        if (g_next_allocation_id.compare_exchange_weak(
+                id, id + 1, std::memory_order_relaxed,
+                std::memory_order_relaxed))
+            return id;
+    }
+    return 0;
+}
+
+void fill_allocation(const Encoder *encoder,
+                     onekvm_video_encoder_allocation_v1 *allocation) {
+    allocation->allocation_id = encoder->allocation_id;
+    allocation->codec = public_codec(encoder->codec_type);
+    allocation->input_mode = encoder->allocation_input_mode;
+    allocation->purpose = encoder->allocation_purpose;
+    allocation->width = encoder->allocation_width;
+    allocation->height = encoder->allocation_height;
+    allocation->pixel_format = encoder->allocation_pixel_format;
+    allocation->flags = 0;
+}
+} // namespace
 
 int jpeg_quality(double quality) {
     if (quality <= 0) return 80;
@@ -63,14 +93,6 @@ void close_encoder(Encoder *encoder) {
     if (!encoder->initialized) {
         return;
     }
-    /* Join the VENC reader before taking g_mmf_mutex or DestroyChn.
-       GetStream holds EnterVcodecLock; detaching then destroying deadlocks.
-       Skip stale handles: the channel number may already belong to a
-       newer encoder after an MMF generation bump. */
-    if (encoder->codec_type != 0 && encoder->channel >= 0 &&
-        encoder->mmf_generation ==
-            g_mmf_generation.load(std::memory_order_acquire))
-        mmf::stop_h26x_reader(encoder->channel);
     std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
     const bool live = encoder->mmf_generation ==
         g_mmf_generation.load(std::memory_order_acquire);
@@ -78,16 +100,21 @@ void close_encoder(Encoder *encoder) {
         mmf::release_h26x_packet(encoder->channel);
         encoder->packet_borrowed = false;
     }
-    /* Do not detach a live VPSS producer here. close_h26x_encoder() must wake
-       the parked scaler and perform StopRecvFrame before UnBind; detaching in
-       this wrapper leaves WAVE4 input-starved and can block StopRecvFrame until
-       the watchdog reboots the device. */
+    /* Do not detach a live VPSS producer here. close_h26x_encoder() owns the
+       complete teardown: it joins the reader, wakes the parked scaler, then
+       performs the two StopRecvFrame calls around UnBind. Splitting that
+       sequence across this wrapper can strand the vendor bind worker. */
     if (live) {
         if (encoder->codec_type == 0) {
             mmf::close_jpeg_encoder(encoder->channel);
         } else {
             mmf::close_h26x_encoder(encoder->channel);
         }
+    }
+    if (encoder->channel >= 0 && encoder->channel <= kLastVENCChannel &&
+        g_encoder_owners[encoder->channel] == encoder) {
+        g_encoder_owners[encoder->channel] = nullptr;
+        g_encoder_owner_generations[encoder->channel] = 0;
     }
     encoder->initialized = false;
     encoder->channel = -1;
@@ -112,6 +139,14 @@ void invalidate_stale_encoder(Encoder *encoder) {
     if (!encoder->initialized || encoder->mmf_generation ==
         g_mmf_generation.load(std::memory_order_acquire))
         return;
+    {
+        std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
+        if (encoder->channel >= 0 && encoder->channel <= kLastVENCChannel &&
+            g_encoder_owners[encoder->channel] == encoder) {
+            g_encoder_owners[encoder->channel] = nullptr;
+            g_encoder_owner_generations[encoder->channel] = 0;
+        }
+    }
     encoder->initialized = false;
     encoder->channel = -1;
     encoder->width = 0;
@@ -166,7 +201,7 @@ int configure_encoder(Encoder *encoder, int width, int height,
         encoder->output.resize(output_size);
     } catch (const std::bad_alloc &) {
         set_error(error, error_capacity, "allocate encoder output: out of memory");
-        return -1;
+        return ONEKVM_VIDEO_RESOURCE_NO_MEMORY;
     }
     int fps = normalized_output_fps(encoder->config.fps, width, height);
     // The capture/VPSS path can continue delivering frames at the HDMI input
@@ -185,6 +220,18 @@ int configure_encoder(Encoder *encoder, int width, int height,
         std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
         if (encoder->codec_type == 0) {
             channel = kJPEGChannel;
+            const uint64_t generation =
+                g_mmf_generation.load(std::memory_order_acquire);
+            if (g_encoder_owner_generations[channel] != generation) {
+                g_encoder_owners[channel] = nullptr;
+                g_encoder_owner_generations[channel] = 0;
+            }
+            if (g_encoder_owners[channel] != nullptr &&
+                g_encoder_owners[channel] != encoder) {
+                set_error(error, error_capacity,
+                          "MMF JPEG encoder is already allocated");
+                return ONEKVM_VIDEO_RESOURCE_BUSY;
+            }
             result = mmf::open_jpeg_encoder(channel, width, height, kMMFNV21,
                                       jpeg_quality(encoder->config.quality_factor));
         } else {
@@ -221,13 +268,18 @@ int configure_encoder(Encoder *encoder, int width, int height,
             if (result == -EBUSY || result == -ENOSPC) {
                 set_error(error, error_capacity,
                           "no free MMF H.26x encoder channel");
-                return -1;
+                return ONEKVM_VIDEO_RESOURCE_BUSY;
             }
+        }
+        if (result == 0) {
+            g_encoder_owners[channel] = encoder;
+            g_encoder_owner_generations[channel] =
+                g_mmf_generation.load(std::memory_order_acquire);
         }
     }
     if (result != 0) {
         set_error(error, error_capacity, "initialize MMF encoder failed: %d", result);
-        return -1;
+        return ONEKVM_VIDEO_RESOURCE_INTERNAL;
     }
     encoder->channel = channel;
     encoder->width = width;
@@ -292,6 +344,11 @@ int32_t encoder_reset(void *opaque, const onekvm_video_encoder_config_v1 *config
     std::lock_guard<std::mutex> lock(encoder->mutex);
     const auto next = normalized_encoder_config(config);
     const int next_codec = codec_type(config->codec);
+    if (encoder->managed_allocation && next_codec != encoder->codec_type) {
+        set_error(error, error_capacity,
+                  "managed encoder codec cannot change after allocation");
+        return ONEKVM_VIDEO_RESOURCE_INVALID;
+    }
     /* Cube cannot close/recreate a live VENC channel from this thread:
        GetStream holds EnterVcodecLock on the reader. FPS/GOP/bitrate/QP
        are posted for that thread. Bound codec changes still fail. */
@@ -357,6 +414,8 @@ int drain_venc_packet(Encoder *encoder, const uint8_t **output_data,
        and release the driver stream before crossing the ABI.  This is only a
        copy of the compressed bitstream (not the multi-megabyte raw frame), and
        performs no allocation in the steady state. */
+    if (encoder->output.size() < kVENCBufferSize)
+        encoder->output.resize(kVENCBufferSize);
     const int result = mmf::take_ready_h26x_packet(
         encoder->channel, encoder->output.data(),
         static_cast<int>(encoder->output.size()), key_frame);
@@ -434,8 +493,18 @@ int bind_encoder_to_source_locked(Encoder *encoder, Source *source,
         return -1;
     }
     const auto [width, height] = source_output_size(source);
-    if (configure_encoder(encoder, width, height, error, error_capacity) != 0)
-        return -1;
+    if (encoder->managed_allocation &&
+        (encoder->allocation_input_mode != ONEKVM_VIDEO_ENCODER_INPUT_BOUND ||
+         width != encoder->allocation_width ||
+         height != encoder->allocation_height)) {
+        set_error(error, error_capacity,
+                  "source does not match managed bound encoder allocation");
+        return ONEKVM_VIDEO_RESOURCE_INVALID;
+    }
+    const int configure_result = configure_encoder(
+        encoder, width, height, error, error_capacity);
+    if (configure_result != 0)
+        return configure_result;
     /* Core binds every iteration. Placeholder keeps VPSS→VENC bound and
        only switches the VPSS input to user frames. */
     if (encoder->placeholder_frames && encoder->bound_source == source)
@@ -557,10 +626,7 @@ int encode_bound_placeholder(Encoder *encoder, Source *source,
             if (encoder->output.size() < kVENCBufferSize)
                 encoder->output.resize(kVENCBufferSize);
             bool unused_key = false;
-            while (mmf::take_ready_h26x_packet(
-                       ch, encoder->output.data(),
-                       static_cast<int>(encoder->output.size()),
-                       &unused_key) > 0) {
+            while (mmf::take_ready_h26x_into(ch, nullptr, &unused_key) > 0) {
             }
         }
         mmf::h26x_reader_force_idr(ch);
@@ -710,9 +776,11 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
         }
     }
     bool key_frame = false;
+    /* Never fopen /proc/cvitek/vi on the bound packet path. That dump stalls
+       the video thread (~1 s) and collapses Core to 1 FPS while VENC stays 60. */
     const bool missing_signal =
         source->out_of_range.load(std::memory_order_relaxed) ||
-        cached_signal_present(source) <= 0;
+        source->cached_signal.load(std::memory_order_relaxed) == 0;
     /* Do not take_ready before the placeholder path. The reader queue holds
        one AU: popping it here then draining again in encode_bound_placeholder
        drops the still. Live HDMI still drains first so we can return it. */
@@ -724,7 +792,10 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
             set_error(error, error_capacity, "read bound MMF frame failed: %d", result);
             return -1;
         }
-        if (result > 0 && !missing_signal)
+        /* A drained AU is live video. Do not throw it away because the HDMI
+           watcher has not yet published cached_signal, and do not read
+           /proc/cvitek/vi on this path. */
+        if (result > 0)
             return fill_bound_live_packet(
                 encoder, source, packet, output_data, result, key_frame, true);
 
@@ -778,10 +849,7 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
                 set_error(error, error_capacity, "read bound MMF frame failed: %d", result);
                 return -1;
             }
-            const bool still_missing =
-                source->out_of_range.load(std::memory_order_relaxed) ||
-                cached_signal_present(source) <= 0;
-            if (result > 0 && !still_missing)
+            if (result > 0)
                 return fill_bound_live_packet(
                     encoder, source, packet, output_data, result, key_frame,
                     true);
@@ -893,11 +961,11 @@ int32_t encoder_unbind_source(void *opaque, char *error, uint32_t error_capacity
         mmf::park_unbound_vpss_channels();
         return 0;
     }
-    /* Keep the configured channel, VPSS binding, receive worker, and reader
-       across reconnects.  The scaler is enough to stop idle work.  Actually
-       unbinding the producer here leaves WAVE4 input-starved; its later final
-       StopRecvFrame can then block forever in the vendor VPU lock.  Final
-       Stop/Unbind/Destroy ordering belongs to close_h26x_encoder(). */
+    /* Keep the configured channel, VPSS binding, and vendor receive worker
+       across reconnects, but let MMF stop/join its userspace reader while
+       parked. Actually unbinding the producer here leaves WAVE4 input-starved;
+       its later final StopRecvFrame can then block forever in the vendor VPU
+       lock. Final Stop/Unbind/Destroy ordering belongs to close_h26x_encoder(). */
     const bool live = encoder->initialized && encoder->source_bound &&
         encoder->mmf_generation == g_mmf_generation.load(std::memory_order_acquire);
     std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
@@ -931,10 +999,19 @@ int32_t encoder_encode(void *opaque, const onekvm_video_frame_v1 *frame,
         return -1;
     }
     std::lock_guard<std::mutex> lock(encoder->mutex);
-    if (configure_encoder(encoder, frame->width, frame->height,
-                          error, error_capacity) != 0) {
-        return -1;
+    if (encoder->managed_allocation &&
+        (encoder->allocation_input_mode != ONEKVM_VIDEO_ENCODER_INPUT_MANUAL ||
+         frame->width != encoder->allocation_width ||
+         frame->height != encoder->allocation_height ||
+         frame->pixel_format != encoder->allocation_pixel_format)) {
+        set_error(error, error_capacity,
+                  "frame does not match managed manual encoder allocation");
+        return ONEKVM_VIDEO_RESOURCE_INVALID;
     }
+    const int configure_result = configure_encoder(
+        encoder, frame->width, frame->height, error, error_capacity);
+    if (configure_result != 0)
+        return configure_result;
 
     int result = 0;
     uint64_t output_pts_ns = frame->pts_ns;
@@ -967,6 +1044,32 @@ int32_t encoder_encode(void *opaque, const onekvm_video_frame_v1 *frame,
                 if (encode_ns < 1000000000ull)
                     encoder->last_encode_ns.store(encode_ns, std::memory_order_relaxed);
             }
+        } else if (encoder->managed_allocation &&
+                   encoder->allocation_input_mode == ONEKVM_VIDEO_ENCODER_INPUT_MANUAL &&
+                   encoder->allocation_purpose == ONEKVM_VIDEO_ENCODER_PURPOSE_BACKGROUND) {
+            // A recording frame must have a matching completed access unit.
+            // The realtime compatibility path below intentionally pipelines
+            // frames, which would otherwise lose the final recording frame.
+            if (encoder->request_keyframe) {
+                if (mmf::request_h26x_idr(encoder->channel) != 0) {
+                    set_error(error, error_capacity, "request recording IDR failed");
+                    return -1;
+                }
+                encoder->request_keyframe = false;
+            }
+            result = mmf::submit_h26x_frame(encoder->channel,
+                const_cast<uint8_t *>(frame->data), frame->width, frame->height,
+                kMMFNV21);
+            if (result == 0) {
+                result = mmf::read_manual_h26x_frame(encoder->channel,
+                    encoder->output.data(), static_cast<int>(encoder->output.size()), 1000);
+            }
+            if (result <= 0) {
+                set_error(error, error_capacity, "complete recording frame failed: %d", result);
+                recover_encoder_after_stream_error(encoder);
+                return -1;
+            }
+            output_data = encoder->output.data();
         } else {
             /* The previous borrowed access unit is valid until this call. A
                v1 caller that does not use encoder_release_packet therefore
@@ -1129,6 +1232,124 @@ void encoder_release_packet(void *opaque) {
        the decoder reference chain. */
 }
 
+int32_t encoder_resources(onekvm_video_encoder_resources_v1 *resources,
+                          char *error, uint32_t error_capacity) {
+    if (resources == nullptr || resources->struct_size < sizeof(*resources)) {
+        set_error(error, error_capacity, "invalid encoder resources output");
+        return ONEKVM_VIDEO_RESOURCE_INVALID;
+    }
+    std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
+    resources->policy_h26x_capacity = 1;
+    resources->policy_jpeg_capacity = 1;
+    resources->active_h26x = 0;
+    for (int channel = kFirstVENCChannel; channel <= kLastVENCChannel; ++channel) {
+        if (mmf::g_runtime.h26x_encoders[channel].initialized)
+            ++resources->active_h26x;
+    }
+    resources->active_jpeg = mmf::g_runtime.jpeg_initialized ? 1u : 0u;
+    resources->hardware_channel_capacity = kLastVENCChannel + 1;
+    resources->input_mode_mask = ONEKVM_VIDEO_ENCODER_INPUT_MASK_MANUAL |
+        ONEKVM_VIDEO_ENCODER_INPUT_MASK_BOUND;
+    resources->purpose_mask = ONEKVM_VIDEO_ENCODER_PURPOSE_MASK_REALTIME |
+        ONEKVM_VIDEO_ENCODER_PURPOSE_MASK_BACKGROUND;
+    resources->flags = 0;
+    if (mmf::g_runtime.reference_count == 0) {
+        set_error(error, error_capacity, "MMF runtime is not initialized");
+        return ONEKVM_VIDEO_RESOURCE_UNINITIALIZED;
+    }
+    return ONEKVM_VIDEO_RESOURCE_OK;
+}
+
+int32_t encoder_allocate(
+    const onekvm_video_encoder_allocation_request_v1 *request,
+    void **result, onekvm_video_encoder_allocation_v1 *allocation,
+    char *error, uint32_t error_capacity) {
+    if (result == nullptr)
+        return ONEKVM_VIDEO_RESOURCE_INVALID;
+    *result = nullptr;
+    if (request == nullptr || request->struct_size < sizeof(*request) ||
+        request->config.struct_size < sizeof(request->config) ||
+        allocation == nullptr || allocation->struct_size < sizeof(*allocation) ||
+        request->flags != 0 || request->width <= 0 || request->height <= 0 ||
+        (request->width & 1) != 0 || (request->height & 1) != 0 ||
+        request->pixel_format != ONEKVM_VIDEO_PIXEL_NV21 ||
+        (request->input_mode != ONEKVM_VIDEO_ENCODER_INPUT_MANUAL &&
+         request->input_mode != ONEKVM_VIDEO_ENCODER_INPUT_BOUND) ||
+        (request->purpose != ONEKVM_VIDEO_ENCODER_PURPOSE_REALTIME &&
+         request->purpose != ONEKVM_VIDEO_ENCODER_PURPOSE_BACKGROUND) ||
+        !valid_encoder_config(&request->config)) {
+        set_error(error, error_capacity, "invalid encoder allocation request");
+        return ONEKVM_VIDEO_RESOURCE_INVALID;
+    }
+    const int type = codec_type(request->config.codec);
+    if (type == 0 && request->input_mode == ONEKVM_VIDEO_ENCODER_INPUT_BOUND) {
+        set_error(error, error_capacity, "bound JPEG allocation is unsupported");
+        return ONEKVM_VIDEO_RESOURCE_UNSUPPORTED;
+    }
+
+    std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
+    if (mmf::g_runtime.reference_count == 0) {
+        set_error(error, error_capacity, "MMF runtime is not initialized");
+        return ONEKVM_VIDEO_RESOURCE_UNINITIALIZED;
+    }
+    if ((type == 0 && mmf::g_runtime.jpeg_initialized) ||
+        (type != 0 && mmf::g_runtime.h26x_encoder_active)) {
+        set_error(error, error_capacity, "requested encoder resource is busy");
+        return ONEKVM_VIDEO_RESOURCE_BUSY;
+    }
+
+    void *opaque = nullptr;
+    int result_code = encoder_create(
+        &request->config, &opaque, error, error_capacity);
+    if (result_code != 0)
+        return result_code == -1 ? ONEKVM_VIDEO_RESOURCE_NO_MEMORY : result_code;
+    auto *encoder = static_cast<Encoder *>(opaque);
+    encoder->managed_allocation = true;
+    encoder->allocation_id = next_allocation_id();
+    if (encoder->allocation_id == 0) {
+        set_error(error, error_capacity, "encoder allocation IDs are exhausted");
+        encoder_destroy(encoder);
+        return ONEKVM_VIDEO_RESOURCE_INTERNAL;
+    }
+    encoder->allocation_input_mode = request->input_mode;
+    encoder->allocation_purpose = request->purpose;
+    encoder->allocation_pixel_format = request->pixel_format;
+    encoder->allocation_width = request->width;
+    encoder->allocation_height = request->height;
+    result_code = configure_encoder(
+        encoder, request->width, request->height, error, error_capacity);
+    if (result_code != 0) {
+        encoder_destroy(encoder);
+        return result_code;
+    }
+    fill_allocation(encoder, allocation);
+    *result = encoder;
+    return ONEKVM_VIDEO_RESOURCE_OK;
+}
+
+int32_t encoder_allocation(void *opaque,
+                           onekvm_video_encoder_allocation_v1 *allocation,
+                           char *error, uint32_t error_capacity) {
+    auto *encoder = static_cast<Encoder *>(opaque);
+    if (encoder == nullptr || allocation == nullptr ||
+        allocation->struct_size < sizeof(*allocation)) {
+        set_error(error, error_capacity, "invalid encoder allocation query");
+        return ONEKVM_VIDEO_RESOURCE_INVALID;
+    }
+    std::lock_guard<std::mutex> lock(encoder->mutex);
+    if (!encoder->managed_allocation) {
+        set_error(error, error_capacity, "encoder was not explicitly allocated");
+        return ONEKVM_VIDEO_RESOURCE_UNSUPPORTED;
+    }
+    if (!encoder->initialized || encoder->mmf_generation !=
+        g_mmf_generation.load(std::memory_order_acquire)) {
+        set_error(error, error_capacity, "encoder allocation is no longer initialized");
+        return ONEKVM_VIDEO_RESOURCE_UNINITIALIZED;
+    }
+    fill_allocation(encoder, allocation);
+    return ONEKVM_VIDEO_RESOURCE_OK;
+}
+
 void encoder_destroy(void *opaque) {
     auto *encoder = static_cast<Encoder *>(opaque);
     if (encoder == nullptr) return;
@@ -1140,6 +1361,7 @@ void encoder_destroy(void *opaque) {
 }
 
 const onekvm_video_format_v1 kFormats[] = {
+    {sizeof(onekvm_video_format_v1), 2880, 1620, 30, ONEKVM_VIDEO_PIXEL_NV21},
     {sizeof(onekvm_video_format_v1), 2560, 1440, 30, ONEKVM_VIDEO_PIXEL_NV21},
     {sizeof(onekvm_video_format_v1), 1920, 1080, 60, ONEKVM_VIDEO_PIXEL_NV21},
     {sizeof(onekvm_video_format_v1), 1280, 720, 60, ONEKVM_VIDEO_PIXEL_NV21},
@@ -1157,7 +1379,9 @@ const onekvm_video_backend_v1 kBackend = {
         ONEKVM_VIDEO_FEATURE_PREPARE_ENCODE |
         ONEKVM_VIDEO_FEATURE_BOUND_ENCODER |
         ONEKVM_VIDEO_FEATURE_LATENCY |
-        ONEKVM_VIDEO_FEATURE_EDID,
+        ONEKVM_VIDEO_FEATURE_EDID |
+        ONEKVM_VIDEO_FEATURE_ENCODER_ALLOCATION |
+        ONEKVM_VIDEO_FEATURE_SOURCE_SNAPSHOT,
     kFormats,
     static_cast<uint32_t>(sizeof(kFormats) / sizeof(kFormats[0])),
     source_create,
@@ -1185,6 +1409,10 @@ const onekvm_video_backend_v1 kBackend = {
     edid_capabilities,
     edid_get,
     edid_set,
+    encoder_resources,
+    encoder_allocate,
+    encoder_allocation,
+    source_snapshot,
 };
 
 

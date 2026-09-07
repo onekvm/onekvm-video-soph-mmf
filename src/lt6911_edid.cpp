@@ -5,6 +5,7 @@
 
 #include <fcntl.h>
 #include <linux/i2c-dev.h>
+#include <linux/gpio.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
 
@@ -12,6 +13,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <mutex>
 #include <string>
 #include <sys/stat.h>
 #include <vector>
@@ -33,6 +35,8 @@ constexpr const char *kHardwarePath = "/run/onekvm/hardware.json";
 
 int g_fd = -1;
 uint8_t g_bank = 0xff;
+int g_hdmi_gpio_fd = -1;
+std::mutex g_hdmi_gpio_mutex;
 
 int write_raw(const uint8_t *data, size_t len)
 {
@@ -260,14 +264,66 @@ Lt6911Chip detect_chip()
     return Lt6911Chip::UXC;
 }
 
-int gpio_write(const char *path, const char *value)
+bool pcie_variant()
 {
-    int fd = open(path, O_WRONLY | O_CLOEXEC);
-    if (fd < 0)
+    const char *path = std::getenv("ONEKVM_MACHINE_HARDWARE_PATH");
+    if (path == nullptr || path[0] == '\0')
+        path = kHardwarePath;
+    std::ifstream in(path);
+    const std::string json((std::istreambuf_iterator<char>(in)),
+                           std::istreambuf_iterator<char>());
+    return parse_nanokvm_board(json.c_str()) == NanoKVMBoard::PCIe;
+}
+
+int ensure_hdmi_gpio()
+{
+    if (g_hdmi_gpio_fd >= 0)
+        return 0;
+    if (!pcie_variant()) {
+        errno = ENODEV;
         return -1;
-    const int ok = write(fd, value, std::strlen(value)) > 0 ? 0 : -1;
-    close(fd);
-    return ok;
+    }
+    const int chip = open("/dev/gpiochip1", O_RDONLY | O_CLOEXEC);
+    if (chip < 0)
+        return -1;
+    gpio_v2_line_request request{};
+    request.offsets[0] = 3;
+    request.num_lines = 1;
+    std::strncpy(request.consumer, "onekvm-mmf-hdmi", sizeof(request.consumer) - 1);
+    request.config.flags = GPIO_V2_LINE_FLAG_OUTPUT;
+    request.config.num_attrs = 1;
+    request.config.attrs[0].attr.id = GPIO_V2_LINE_ATTR_ID_OUTPUT_VALUES;
+    request.config.attrs[0].attr.values = 1;
+    request.config.attrs[0].mask = 1;
+    if (ioctl(chip, GPIO_V2_GET_LINE_IOCTL, &request) != 0) {
+        close(chip);
+        return -1;
+    }
+    close(chip);
+    g_hdmi_gpio_fd = request.fd;
+    return 0;
+}
+
+int set_hdmi_gpio(bool high)
+{
+    if (ensure_hdmi_gpio() != 0)
+        return -1;
+    gpio_v2_line_values values{};
+    values.mask = 1;
+    values.bits = high ? 1 : 0;
+    return ioctl(g_hdmi_gpio_fd, GPIO_V2_LINE_SET_VALUES_IOCTL, &values);
+}
+
+int pcie_hdmi_reset_us(useconds_t low_us, useconds_t settle_us)
+{
+    std::lock_guard<std::mutex> lock(g_hdmi_gpio_mutex);
+    if (set_hdmi_gpio(false) != 0)
+        return -1;
+    usleep(low_us);
+    if (set_hdmi_gpio(true) != 0)
+        return -1;
+    usleep(settle_us);
+    return 0;
 }
 
 } // namespace
@@ -350,15 +406,18 @@ int lt6911_edid_write(const uint8_t *data, size_t size)
 
 int pcie_hdmi_reset()
 {
-    (void)gpio_write("/sys/class/gpio/export", "451");
-    (void)gpio_write("/sys/class/gpio/gpio451/direction", "out");
-    if (gpio_write("/sys/class/gpio/gpio451/value", "0") != 0)
-        return -1;
-    usleep(100000);
-    if (gpio_write("/sys/class/gpio/gpio451/value", "1") != 0)
-        return -1;
-    usleep(100000);
-    return 0;
+    return pcie_hdmi_reset_us(100000, 100000);
+}
+
+int pcie_hdmi_startup_reset()
+{
+    if (!pcie_variant())
+        return 0;
+    if (pcie_hdmi_reset_us(10000, 10000) == 0)
+        return 0;
+    /* Kernel hog `nanokvm-hdmi-enable` already owns gpiochip1 offset 3.
+       Userspace GET_LINE then returns EBUSY; the line is already driven high. */
+    return errno == EBUSY ? 0 : -1;
 }
 
 int persist_active_edid(const uint8_t *data, size_t size)
@@ -386,10 +445,12 @@ int restore_active_edid_if_needed()
     const EdidBoardInfo info = probe_edid_board();
     if (info.board != NanoKVMBoard::PCIe || !info.writable)
         return 0;
-    (void)pcie_hdmi_reset();
+    if (pcie_hdmi_reset() != 0)
+        return -1;
     const int result = lt6911_edid_write(data.data(), data.size());
-    (void)pcie_hdmi_reset();
-    return result;
+    if (result != 0)
+        return result;
+    return pcie_hdmi_reset();
 }
 
 } // namespace onekvm::video_backend
