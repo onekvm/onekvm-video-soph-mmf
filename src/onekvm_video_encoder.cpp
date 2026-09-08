@@ -524,6 +524,11 @@ int bind_encoder_to_source_locked(Encoder *encoder, Source *source,
     encoder->prepared_size = 0;
     encoder->prepared_pts_ns = 0;
     encoder->bound_since_ns = monotonic_ns();
+    /* cached_signal starts at -1. The 1080p watcher probes LT6911 at 1 Hz
+       whenever it is not 1; that 80ee access stalls CSI during the first-AU
+       wait. Assume live until VENC actually goes stale. */
+    if (source->cached_signal.load(std::memory_order_relaxed) < 1)
+        source->cached_signal.store(1, std::memory_order_relaxed);
     return 0;
 }
 
@@ -584,6 +589,9 @@ int encode_bound_placeholder(Encoder *encoder, Source *source,
         encoder->placeholder_need_key = true;
         encoder->placeholder_idr_tries = 0;
         encoder->placeholder_logged = false;
+        /* 1080p watcher skips LT6911 while cached_signal==1. Mark missing
+           so it can rearm CSI after a real HDMI loss. */
+        source->cached_signal.store(0, std::memory_order_relaxed);
     }
     if (encoder->channel < 0 || !encoder->initialized || !encoder->source_bound) {
         set_error(error, error_capacity, "placeholder requires a bound VENC channel");
@@ -599,6 +607,13 @@ int encode_bound_placeholder(Encoder *encoder, Source *source,
         return -1;
     {
         std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
+        if (mmf::h26x_bound_to_vi(encoder->channel) &&
+            mmf::rebind_h26x_to_vpss(encoder->channel) != 0) {
+            set_error(error, error_capacity,
+                      "rebind VENC to VPSS for placeholder failed");
+            encoder->placeholder_frames = false;
+            return -1;
+        }
         if (mmf::capture_use_user_frames() != 0) {
             set_error(error, error_capacity,
                       "unbind VI from VPSS for placeholder failed");
@@ -778,7 +793,7 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
     bool key_frame = false;
     /* Never fopen /proc/cvitek/vi on the bound packet path. That dump stalls
        the video thread (~1 s) and collapses Core to 1 FPS while VENC stays 60. */
-    const bool missing_signal =
+    bool missing_signal =
         source->out_of_range.load(std::memory_order_relaxed) ||
         source->cached_signal.load(std::memory_order_relaxed) == 0;
     /* Do not take_ready before the placeholder path. The reader queue holds
@@ -804,10 +819,17 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
         /* last_live==0 means the reader has not delivered a unit yet, not that
            HDMI is gone. A recent live AU also suppresses the artwork: the VI
            FrameRate field stays 0 for the first second, and inserting a canned
-           IDR between live P frames breaks the decoder. */
+           IDR between live P frames breaks the decoder. Exclusive VI needs a
+           longer first-AU window: 1.5 s plus a VI-fps rebuild probes 80ee and
+           freezes CSI. */
         const uint64_t live_ns = static_cast<uint64_t>(
             std::chrono::duration_cast<std::chrono::nanoseconds>(
                 kVencLiveRecentWindow).count());
+        const uint64_t first_au_ns = mmf::h26x_bound_to_vi(encoder->channel)
+            ? static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    kVencFirstAuWindow).count())
+            : live_ns;
         /* cached_signal starts at unknown/no-signal and the HDMI watcher may
            not publish its first sample before Core opens WebRTC.  Do not tear
            down a newly bound producer merely because the VENC worker has not
@@ -818,7 +840,7 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
            VB pool. */
         const bool awaiting_first_au = last_live == 0 &&
             encoder->bound_since_ns != 0 && now >= encoder->bound_since_ns &&
-            now - encoder->bound_since_ns <= live_ns;
+            now - encoder->bound_since_ns <= first_au_ns;
         const bool live_recent = last_live != 0 &&
             now >= last_live && now - last_live <= live_ns;
         const bool venc_stale = last_live != 0 &&
@@ -854,6 +876,28 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
                     encoder, source, packet, output_data, result, key_frame,
                     true);
             return fill_bound_empty_packet(encoder, packet);
+        }
+
+        /* Still no AU, past the first-AU window. Do not maybe_rebuild: that
+           path reads VI FrameRate (0 with exclusive VENC as the only dest)
+           and probes LT6911, which is what stalled CSI on 107. Exclusive VI
+           also must not fall through to placeholder: unbinding the only dest
+           freezes CSI. Keep waiting and ask for an IDR. */
+        if (last_live == 0) {
+            if (mmf::h26x_bound_to_vi(encoder->channel)) {
+                mmf::h26x_reader_force_idr(encoder->channel);
+                const int codec = encoder->codec_type;
+                source_lock.unlock();
+                lock.unlock();
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                packet->data = nullptr;
+                packet->data_size = 0;
+                packet->codec = public_codec(codec);
+                packet->key_frame = 0;
+                packet->pts_ns = monotonic_ns();
+                return 0;
+            }
+            missing_signal = true;
         }
 
         if (!missing_signal && !venc_stale) {
@@ -893,6 +937,7 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
         {
             std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
             (void)mmf::capture_use_vi_frames();
+            (void)mmf::bind_h26x_to_capture(encoder->channel, 0, source->channel);
         }
         if (bind_encoder_to_source_locked(
                 encoder, source, error, error_capacity) != 0)

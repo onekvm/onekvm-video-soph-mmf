@@ -532,12 +532,16 @@ static void refresh_bound_hw_latency(H26xEncoderState *info)
 	}
 
 	/* Capture stops at VPSS output. VENC waitq/HwEncTime are encode. */
-	const uint32_t capture_us = bound_capture_us(
-		vpss_us, info->cfg.input_fps,
-		vi_common_pool_blocks(
-			static_cast<int>(g_runtime.vi_size.u32Width),
-			static_cast<int>(g_runtime.vi_size.u32Height)),
-		1);
+	uint32_t capture_us = 0;
+	if (info->bound_to_vi)
+		capture_us = bound_frame_period_us(info->cfg.input_fps);
+	else
+		capture_us = bound_capture_us(
+			vpss_us, info->cfg.input_fps,
+			vi_common_pool_blocks(
+				static_cast<int>(g_runtime.vi_size.u32Width),
+				static_cast<int>(g_runtime.vi_size.u32Height)),
+			1);
 	if (capture_us > 0 && capture_us < 1000000u)
 		__atomic_store_n(&info->last_capture_ns,
 			static_cast<uint64_t>(capture_us) * 1000ull, __ATOMIC_RELAXED);
@@ -793,16 +797,66 @@ int release_h26x_packet(int ch) {
 	return s32Ret;
 }
 
+static bool venc_matches_vi(const H26xEncoderConfig &cfg)
+{
+	(void)cfg;
+	/* SG2002 HDMI is VI online → VPSS. Unbinding VI-VPSS so VENC can
+	   take exclusive UYVY stops Preraw: IntCnt stays 0, venc-handler
+	   idles, EncodedFrame=0. Dual-bind VI→VPSS+VENC runs for a while
+	   then starves the 3-block UYVY pool. 1:1 still uses VPSS as the
+	   online sink / UYVY→NV21 CSC. */
+	return false;
+}
+
+static CVI_S32 bind_vi_venc(int venc_ch)
+{
+	MMF_CHN_S src{};
+	MMF_CHN_S dst{};
+	src.enModId = CVI_ID_VI;
+	src.s32DevId = 0;
+	src.s32ChnId = 0;
+	dst.enModId = CVI_ID_VENC;
+	dst.s32DevId = 0;
+	dst.s32ChnId = venc_ch;
+	return CVI_SYS_Bind(&src, &dst);
+}
+
+static CVI_S32 unbind_vi_venc(int venc_ch)
+{
+	MMF_CHN_S src{};
+	MMF_CHN_S dst{};
+	src.enModId = CVI_ID_VI;
+	src.s32DevId = 0;
+	src.s32ChnId = 0;
+	dst.enModId = CVI_ID_VENC;
+	dst.s32DevId = 0;
+	dst.s32ChnId = venc_ch;
+	return CVI_SYS_UnBind(&src, &dst);
+}
+
+static int detach_vi_from_vpss()
+{
+	if (!g_runtime.vi_bound_to_vpss)
+		return 0;
+	const CVI_S32 ret = SAMPLE_COMM_VI_UnBind_VPSS(0, 0, 0);
+	if (ret != CVI_SUCCESS)
+		return ret;
+	g_runtime.vi_bound_to_vpss = false;
+	return 0;
+}
+
 int bind_h26x_to_capture(int ch, int vpss_group, int vpss_channel) {
 	if (ch < 0 || ch >= MMF_VENC_MAX_CHN || vpss_group < 0 ||
 		vpss_channel < 0 || vpss_channel >= MMF_VI_MAX_CHN ||
 		!g_runtime.h26x_encoders[ch].initialized || !capture_channel_open(vpss_channel))
 		return -1;
 	H26xEncoderState *info = &g_runtime.h26x_encoders[ch];
+	const bool want_vi = venc_matches_vi(info->cfg);
 	if (info->bound_to_capture) {
-		if (info->capture_group == vpss_group &&
+		if (want_vi == info->bound_to_vi &&
+			info->capture_group == vpss_group &&
 			info->capture_channel == vpss_channel) {
-			if (resume_vpss_channel(vpss_channel) != 0)
+			if (!want_vi && resume_vpss_channel(vpss_channel) != 0)
 				return -1;
 			start_h26x_reader(ch);
 			return 0;
@@ -810,12 +864,6 @@ int bind_h26x_to_capture(int ch, int vpss_group, int vpss_channel) {
 		if (unbind_h26x_from_capture(ch) != 0)
 			return -1;
 	}
-	/* The first start must happen after the pipeline is bound.  Once started,
-	 * keep the vendor worker alive across client disconnects: this driver
-	 * cannot safely stop and restart a VENC worker, but it can wait idle while
-	 * its VPSS producer is temporarily unbound. */
-	if (resume_vpss_channel(vpss_channel) != 0)
-		return -1;
 	CVI_S32 ret = CVI_SUCCESS;
 	const bool start_worker = !info->receiver_started;
 	if (info->fd >= 0) {
@@ -824,42 +872,81 @@ int bind_h26x_to_capture(int ch, int vpss_group, int vpss_channel) {
 	}
 	VENC_RECV_PIC_PARAM_S recv_param;
 	recv_param.s32RecvPicNum = -1;
-	VPSS_CHN_ATTR_S attr;
-	ret = CVI_VPSS_GetChnAttr(vpss_group, vpss_channel, &attr);
-	if (ret != CVI_SUCCESS) {
-		(void)pause_vpss_channel(vpss_channel);
-		return ret;
+	bool bound_vi = false;
+	if (want_vi) {
+		/* VI common pool is 3 UYVY blocks. Fan-out to VPSS+VENC
+		   exhausts it; VENC waitq drops and GetStream gaps trip the
+		   1.5 s stale window. Give VENC exclusive VI. Do not resume
+		   VPSS first: that steals the only UYVY blocks. StartRecvFrame
+		   must run AFTER SYS bind or enable_bind_mode is still false
+		   and the bind kthread never starts. */
+		if (detach_vi_from_vpss() != 0) {
+			fprintf(stderr, "OneKVM: detach VI from VPSS failed, using VPSS\n");
+		} else {
+			ret = bind_vi_venc(ch);
+			if (ret == CVI_SUCCESS) {
+				bound_vi = true;
+				fprintf(stderr,
+					"OneKVM: VENC(%d) exclusive VI 1:1 %dx%d\n",
+					ch, info->cfg.width, info->cfg.height);
+			} else {
+				fprintf(stderr,
+					"OneKVM: VI->VENC bind %#x, using VPSS\n", ret);
+				(void)capture_use_vi_frames();
+			}
+		}
 	}
-	/* Keep one userspace dequeue slot while bound so source_snapshot can borrow
-	 * the current VPSS output without changing channel attributes in the hot
-	 * H.26x path. The private three-block pool already accounts for producer,
-	 * bound VENC, and one short-lived userspace borrower. */
-	if (attr.u32Depth != MMF_VPSS_LOW_LATENCY_DEPTH) {
-		attr.u32Depth = MMF_VPSS_LOW_LATENCY_DEPTH;
-		ret = CVI_VPSS_SetChnAttr(vpss_group, vpss_channel, &attr);
+	if (!bound_vi) {
+		if (resume_vpss_channel(vpss_channel) != 0)
+			return -1;
+		VPSS_CHN_ATTR_S attr;
+		ret = CVI_VPSS_GetChnAttr(vpss_group, vpss_channel, &attr);
 		if (ret != CVI_SUCCESS) {
 			(void)pause_vpss_channel(vpss_channel);
 			return ret;
 		}
-	}
-	ret = SAMPLE_COMM_VPSS_Bind_VENC(vpss_group, vpss_channel, ch);
-	if (ret != CVI_SUCCESS) {
-		printf("VPSS(%d,%d) bind VENC(%d) failed with %#x\n",
-			vpss_group, vpss_channel, ch, ret);
-		(void)pause_vpss_channel(vpss_channel);
-		return ret;
+		/* Keep one userspace dequeue slot while bound so source_snapshot
+		 * can borrow the current VPSS output without changing channel
+		 * attributes in the hot H.26x path. The private three-block pool
+		 * already accounts for producer, bound VENC, and one short-lived
+		 * userspace borrower. */
+		if (attr.u32Depth != MMF_VPSS_LOW_LATENCY_DEPTH) {
+			attr.u32Depth = MMF_VPSS_LOW_LATENCY_DEPTH;
+			ret = CVI_VPSS_SetChnAttr(vpss_group, vpss_channel, &attr);
+			if (ret != CVI_SUCCESS) {
+				(void)pause_vpss_channel(vpss_channel);
+				return ret;
+			}
+		}
+		if (!g_runtime.vi_bound_to_vpss &&
+		    capture_use_vi_frames() != 0) {
+			(void)pause_vpss_channel(vpss_channel);
+			return -1;
+		}
+		ret = SAMPLE_COMM_VPSS_Bind_VENC(vpss_group, vpss_channel, ch);
+		if (ret != CVI_SUCCESS) {
+			printf("VPSS(%d,%d) bind VENC(%d) failed with %#x\n",
+				vpss_group, vpss_channel, ch, ret);
+			(void)pause_vpss_channel(vpss_channel);
+			return ret;
+		}
 	}
 	if (start_worker) {
 		ret = CVI_VENC_StartRecvFrame(ch, &recv_param);
 		if (ret != CVI_SUCCESS) {
-			SAMPLE_COMM_VPSS_UnBind_VENC(vpss_group, vpss_channel, ch);
+			if (bound_vi)
+				(void)unbind_vi_venc(ch);
+			else
+				SAMPLE_COMM_VPSS_UnBind_VENC(vpss_group, vpss_channel, ch);
 			CVI_VENC_ResetChn(ch);
-			(void)pause_vpss_channel(vpss_channel);
+			if (!bound_vi)
+				(void)pause_vpss_channel(vpss_channel);
 			return ret;
 		}
 		info->receiver_started = 1;
 	}
 	info->bound_to_capture = 1;
+	info->bound_to_vi = bound_vi;
 	info->capture_group = (uint8_t)vpss_group;
 	info->capture_channel = (uint8_t)vpss_channel;
 	info->packet_pending = 1;
@@ -868,8 +955,46 @@ int bind_h26x_to_capture(int ch, int vpss_group, int vpss_channel) {
 	 * the vendor recovery path discards it and the replacement carries SPS but
 	 * no PPS.  Existing workers still need an explicit IDR when they are rebound
 	 * after an idle or placeholder interval. */
-	start_h26x_reader(ch, !start_worker);
+	/* VPSS NV21: StartRecvFrame's first AU is already IDR+SPS/PPS.
+	   Exclusive UYVY: WAVE4's first pack is a 32-byte non-key leftover
+	   (seen on 107); the reader waits forever for a natural IDR. */
+	start_h26x_reader(ch, bound_vi || !start_worker);
 	return 0;
+}
+
+int rebind_h26x_to_vpss(int ch)
+{
+	if (ch < 0 || ch >= MMF_VENC_MAX_CHN ||
+		!g_runtime.h26x_encoders[ch].initialized)
+		return -1;
+	H26xEncoderState *info = &g_runtime.h26x_encoders[ch];
+	if (!info->bound_to_capture || !info->bound_to_vi)
+		return 0;
+	if (info->stream_held && release_h26x_packet(ch) != 0)
+		return -1;
+	CVI_S32 ret = unbind_vi_venc(ch);
+	if (ret != CVI_SUCCESS) {
+		printf("VI unbind VENC(%d) failed with %#x\n", ch, ret);
+		return ret;
+	}
+	info->bound_to_vi = false;
+	ret = SAMPLE_COMM_VPSS_Bind_VENC(
+		info->capture_group, info->capture_channel, ch);
+	if (ret != CVI_SUCCESS) {
+		printf("VPSS(%d,%d) bind VENC(%d) after VI failed with %#x\n",
+			info->capture_group, info->capture_channel, ch, ret);
+		info->bound_to_capture = 0;
+		return ret;
+	}
+	fprintf(stderr, "OneKVM: VENC(%d) rebound to VPSS for placeholder\n", ch);
+	return 0;
+}
+
+bool h26x_bound_to_vi(int ch)
+{
+	if (ch < 0 || ch >= MMF_VENC_MAX_CHN)
+		return false;
+	return g_runtime.h26x_encoders[ch].bound_to_vi;
 }
 
 int unbind_h26x_from_capture(int ch) {
@@ -892,14 +1017,18 @@ int unbind_h26x_from_capture(int ch) {
 		CVI_VENC_CloseFd(ch);
 		info->fd = -1;
 	}
-	CVI_S32 ret = SAMPLE_COMM_VPSS_UnBind_VENC(
-		vpss_group, vpss_channel, ch);
+	CVI_S32 ret = info->bound_to_vi
+		? unbind_vi_venc(ch)
+		: SAMPLE_COMM_VPSS_UnBind_VENC(vpss_group, vpss_channel, ch);
 	if (ret != CVI_SUCCESS) {
-		printf("VPSS(%d,%d) unbind VENC(%d) failed with %#x\n",
-			vpss_group, vpss_channel, ch, ret);
+		printf("%s unbind VENC(%d) failed with %#x\n",
+			info->bound_to_vi ? "VI" : "VPSS", ch, ret);
 		return ret;
 	}
+	if (info->bound_to_vi)
+		(void)capture_use_vi_frames();
 	info->bound_to_capture = 0;
+	info->bound_to_vi = false;
 	info->packet_pending = 0;
 	info->capture_group = 0;
 	info->capture_channel = 0;

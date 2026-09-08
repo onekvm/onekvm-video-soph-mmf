@@ -48,16 +48,24 @@ ONEKVM_VIDEO_INTERNAL inline constexpr auto kHDMIChangeGrowProbeInterval =
     std::chrono::milliseconds(100);
 ONEKVM_VIDEO_INTERNAL inline constexpr auto kSignalProbeInterval = std::chrono::seconds(10);
 ONEKVM_VIDEO_INTERNAL inline constexpr auto kNoSignalProbeInterval = std::chrono::seconds(1);
-static_assert(onekvm::hdmi_watch_interval(1) == kHDMIChangeGrowProbeInterval);
-static_assert(onekvm::hdmi_watch_interval(0) ==
+static_assert(onekvm::hdmi_watch_interval(1, {800, 600}) ==
+    kHDMIChangeGrowProbeInterval);
+static_assert(onekvm::hdmi_watch_interval(1, {1920, 1080}) ==
     std::chrono::duration_cast<std::chrono::milliseconds>(kNoSignalProbeInterval));
-static_assert(onekvm::hdmi_watch_interval(-1) ==
+static_assert(onekvm::hdmi_watch_interval(0, {}) ==
+    std::chrono::duration_cast<std::chrono::milliseconds>(kNoSignalProbeInterval));
+static_assert(onekvm::hdmi_watch_interval(-1, {}) ==
     std::chrono::duration_cast<std::chrono::milliseconds>(kNoSignalProbeInterval));
 ONEKVM_VIDEO_INTERNAL inline constexpr auto kRecentFrameSignalWindow = std::chrono::milliseconds(500);
 /* Inserting the canned no-signal IDR between live P-frames makes the
    picture jump.  Wait out a short GetStream stall first. */
 ONEKVM_VIDEO_INTERNAL inline constexpr auto kVencLiveRecentWindow =
     std::chrono::milliseconds(1500);
+/* Exclusive VI→VENC has no VPSS RecvCnt, and VI FrameRate stays 0 for about
+   a second after bind. 1.5 s is too short: the packet path then treats
+   "no AU yet" as no HDMI, probes LT6911 80ee, and stalls CSI. */
+ONEKVM_VIDEO_INTERNAL inline constexpr auto kVencFirstAuWindow =
+    std::chrono::milliseconds(5000);
 ONEKVM_VIDEO_INTERNAL inline constexpr auto kInitialResolutionSampleDelay = std::chrono::milliseconds(20);
 /* Prefer /proc/cvitek/vi. Reading vi_dbg holds the VI debug handler and
    can stall CSI (VIFPS drops to 0 while SOF/FE counters freeze). */
@@ -89,6 +97,7 @@ struct ONEKVM_VIDEO_INTERNAL Source {
     unsigned hdmi_blanking_samples = 0;
     unsigned hdmi_oor_samples = 0;
     unsigned hdmi_follow_samples = 0;
+    unsigned hdmi_rearm_samples = 0;
     int capture_width = 0;
     int capture_height = 0;
     std::atomic<uint64_t> cached_input_size{0};
@@ -123,6 +132,13 @@ struct ONEKVM_VIDEO_INTERNAL Encoder {
     Source *bound_source = nullptr;
     std::atomic<uint64_t> last_capture_ns{0};
     std::atomic<uint64_t> last_encode_ns{0};
+    bool managed_allocation = false;
+    uint64_t allocation_id = 0;
+    uint32_t allocation_input_mode = 0;
+    uint32_t allocation_purpose = 0;
+    uint32_t allocation_pixel_format = ONEKVM_VIDEO_PIXEL_UNKNOWN;
+    int allocation_width = 0;
+    int allocation_height = 0;
 };
 
 extern ONEKVM_VIDEO_INTERNAL std::recursive_mutex g_mmf_mutex;
@@ -162,6 +178,11 @@ ONEKVM_VIDEO_INTERNAL int32_t source_input_format(
     void *source, onekvm_video_format_v1 *format);
 ONEKVM_VIDEO_INTERNAL int32_t source_latency(
     void *source, onekvm_video_latency_v1 *latency);
+ONEKVM_VIDEO_INTERNAL int32_t source_snapshot(
+    void *source, const onekvm_video_snapshot_request_v1 *request,
+    uint8_t *data, uint64_t capacity,
+    onekvm_video_snapshot_result_v1 *result,
+    char *error, uint32_t error_capacity);
 ONEKVM_VIDEO_INTERNAL void source_destroy(void *source);
 
 ONEKVM_VIDEO_INTERNAL int32_t encoder_create(
@@ -191,6 +212,16 @@ ONEKVM_VIDEO_INTERNAL int32_t encoder_unbind_source(
     void *encoder, char *error, uint32_t error_capacity);
 ONEKVM_VIDEO_INTERNAL int32_t encoder_latency(
     void *encoder, onekvm_video_latency_v1 *latency);
+ONEKVM_VIDEO_INTERNAL int32_t encoder_resources(
+    onekvm_video_encoder_resources_v1 *resources,
+    char *error, uint32_t error_capacity);
+ONEKVM_VIDEO_INTERNAL int32_t encoder_allocate(
+    const onekvm_video_encoder_allocation_request_v1 *request,
+    void **encoder, onekvm_video_encoder_allocation_v1 *allocation,
+    char *error, uint32_t error_capacity);
+ONEKVM_VIDEO_INTERNAL int32_t encoder_allocation(
+    void *encoder, onekvm_video_encoder_allocation_v1 *allocation,
+    char *error, uint32_t error_capacity);
 ONEKVM_VIDEO_INTERNAL int32_t edid_capabilities(onekvm_video_edid_caps_v1 *caps);
 ONEKVM_VIDEO_INTERNAL int32_t edid_get(
     onekvm_video_edid_blob_v1 *edid, char *error, uint32_t error_capacity);
