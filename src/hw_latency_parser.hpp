@@ -50,13 +50,35 @@ inline bool parse_venc_hwenc_us(const char *line, int channel, uint32_t *hwenc_u
 	return true;
 }
 
-/* Online VI delivers a progressive frame over 1/input_fps. VPSS CostTime is
-   the scale job after that frame is in DRAM. Pack u64PTS is encode-complete
-   and cannot be used as a capture start. */
-inline uint32_t bound_capture_us(uint32_t vpss_cost_us, int input_fps)
+inline uint32_t bound_frame_period_us(int input_fps)
+{
+	if (input_fps <= 0)
+		return 0;
+	return 1000000u / static_cast<uint32_t>(input_fps);
+}
+
+/* Completed VI VB besides the in-flight fill, plus VPSS u32Depth. The current
+   progressive frame is counted separately. */
+inline uint32_t bound_capture_queue_frames(int vi_blocks, int vpss_depth)
+{
+	uint32_t frames = 1;
+	if (vi_blocks > 1)
+		frames += static_cast<uint32_t>(vi_blocks - 1);
+	if (vpss_depth > 0)
+		frames += static_cast<uint32_t>(vpss_depth);
+	return frames;
+}
+
+/* Bound path has no source PTS (pack u64PTS is encode-complete). Capture is
+   the queued HDMI/VI/VPSS frames plus VPSS CostTime. Do not read
+   /proc/cvitek/vi. vi_blocks is the VI common pool; vpss_depth is u32Depth. */
+inline uint32_t bound_capture_us(uint32_t vpss_cost_us, int input_fps,
+				 int vi_blocks, int vpss_depth)
 {
 	uint32_t capture_us = vpss_cost_us;
-	if (input_fps > 0)
-		capture_us += 1000000u / static_cast<uint32_t>(input_fps);
+	const uint32_t frame_us = bound_frame_period_us(input_fps);
+	if (frame_us == 0)
+		return capture_us;
+	capture_us += bound_capture_queue_frames(vi_blocks, vpss_depth) * frame_us;
 	return capture_us;
 }
