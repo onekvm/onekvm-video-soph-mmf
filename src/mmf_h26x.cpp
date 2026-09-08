@@ -531,12 +531,14 @@ static void refresh_bound_hw_latency(H26xEncoderState *info)
 		fclose(venc);
 	}
 
+	/* VPSS OUT waitq=1, workq=1; VENC IN waitq=1. u32Depth is snapshot
+	   doneq and is not a bind-path frame of delay. */
 	const uint32_t capture_us = bound_capture_us(
 		vpss_us, info->cfg.input_fps,
 		vi_common_pool_blocks(
 			static_cast<int>(g_runtime.vi_size.u32Width),
 			static_cast<int>(g_runtime.vi_size.u32Height)),
-		MMF_VPSS_LOW_LATENCY_DEPTH);
+		1, 1);
 	if (capture_us > 0 && capture_us < 1000000u)
 		__atomic_store_n(&info->last_capture_ns,
 			static_cast<uint64_t>(capture_us) * 1000ull, __ATOMIC_RELAXED);
