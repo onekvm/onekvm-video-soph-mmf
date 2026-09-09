@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 extern "C" {
 struct onekvm_lt6911_input_timing {
@@ -43,15 +44,24 @@ inline int clamp_output_fps(int fps, int width = 0, int height = 0)
 	int cap = kMaxOutputFps;
 	if (width > 0 && height > 0) {
 		const auto pixels = static_cast<int64_t>(width) * height;
-		/* 1440p60 overruns WAVE4; 1080p120 overruns H.264 L4.2. */
-		if (pixels > 1920 * 1080)
-			cap = 30;
-		else if (pixels > 1280 * 720)
-			cap = kDefaultInputFps;
+		if (pixels > 0) {
+			const int by_rate = static_cast<int>(150000000ll / pixels);
+			if (by_rate < cap)
+				cap = by_rate;
+		}
 	}
+	if (cap < 1)
+		cap = 1;
 	if (fps > cap)
 		return cap;
 	return fps;
+}
+
+inline int clamp_pipeline_fps(int fps, int in_w, int in_h, int out_w, int out_h)
+{
+	const int a = clamp_output_fps(fps, in_w, in_h);
+	const int b = clamp_output_fps(fps, out_w, out_h);
+	return a < b ? a : b;
 }
 
 /* VENC src must be >= dest. 1080p30 still uses src 60; 1440p30 uses src 30;
@@ -97,6 +107,21 @@ inline int vpss_phy_channel(int width = 0)
 	return 1;
 }
 
+inline int capture_pool_blocks(int, int)
+{
+	return 3;
+}
+
+inline int vi_common_pool_blocks(int width, int height)
+{
+	(void)width;
+	(void)height;
+	/* Producer + VPSS consumer. A third UYVY block sits in VPSS waitq
+	   and adds a full frame of capture latency. 2880 already used 2
+	   for carveout; 1080p60 CostTime ~6.7 ms is under one period. */
+	return 2;
+}
+
 int find_free_capture_channel(void);
 int start_capture_pipeline(void);
 int stop_capture_pipeline(void);
@@ -135,6 +160,8 @@ int read_latest_h26x_packet_nowait(int ch, uint8_t *dst, int capacity);
 int drain_h26x_packets(int ch, uint8_t *scratch, int capacity);
 void start_h26x_reader(int ch, bool request_idr = true);
 void stop_h26x_reader(int ch);
+int take_ready_h26x_into(int ch, std::vector<uint8_t> *dst, bool *key_frame);
+int read_manual_h26x_frame(int ch, uint8_t *dst, int capacity, int timeout_ms);
 int take_ready_h26x_packet(int ch, uint8_t *dst, int capacity,
 	bool *key_frame = nullptr);
 bool wait_ready_h26x_packet(int ch, int timeout_ms);
@@ -152,7 +179,11 @@ int set_h26x_output_fps(int ch, int output_fps, int gop);
 int set_h26x_rate_control(int ch, int output_fps, int gop, int bitrate_kbps,
 	int initial_qp, int min_qp, int max_qp);
 int bind_h26x_to_capture(int ch, int vpss_group, int vpss_channel);
+int rebind_h26x_to_vpss(int ch);
+bool h26x_bound_to_vi(int ch);
 int park_h26x_capture(int ch);
+int begin_idle_h26x_drain(int capture_channel, int *encoder_channel);
+int finish_idle_h26x_drain(int encoder_channel);
 int unbind_h26x_from_capture(int ch);
 int vpss_input_width();
 int vpss_input_height();

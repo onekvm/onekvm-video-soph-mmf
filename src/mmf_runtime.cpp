@@ -620,9 +620,11 @@ static CVI_S32 initialize_vendor_system(SIZE_S stSize)
 		DATA_BITWIDTH_8, enCompressMode, DEFAULT_ALIGN);
 	u32BlkSize = MAX(u32BlkSize, u32BlkRotSize);
 	stVbConf.astCommPool[MMF_VB_VI_ID].u32BlkSize	= u32BlkSize;
-	/* 64 MiB ION holds 1440p UYVY×3 plus VPSS NV21×3 plus WAVE4 recon.
-	   Keep three blocks at every supported size. */
-	stVbConf.astCommPool[MMF_VB_VI_ID].u32BlkCnt	= 3;
+	/* Two UYVY blocks: VI fill + VPSS consume. A third block occupied
+	   VPSS waitq=1 and added 1/fps to capture. WAVE4/VPSS private pools
+	   still fit the 64 MiB carveout at 2880. */
+	stVbConf.astCommPool[MMF_VB_VI_ID].u32BlkCnt =
+		vi_common_pool_blocks(stSize.u32Width, stSize.u32Height);
 	stVbConf.astCommPool[MMF_VB_VI_ID].enRemapMode	= VB_REMAP_MODE_CACHED;
 	stVbConf.u32MaxPoolCnt = 1;
 	fprintf(stderr, "OneKVM: common VB %ux%u blk=%u count=%u\n",
