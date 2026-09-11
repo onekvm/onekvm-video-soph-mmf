@@ -2,73 +2,86 @@
 
 [English](README.md) | 简体中文
 
-`onekvm-nanokvm-mmf` 是 OneKVM 面向 NanoKVM 的视频与加密硬件后端。
-它将 SG2002 多媒体处理链路接入 OneKVM Backend ABI，并将设备相关实现隔离在
-独立动态库中，避免 `onekvm-server` 直接依赖 NanoKVM 专用代码。
+OneKVM 面向 NanoKVM 的视频与 SRTP 加密硬件后端。它把 SG2002 多媒体链路接到
+OneKVM Backend ABI，并把厂商 MMF 实现留在独立动态库里，避免 `onekvm-server`
+直接依赖 NanoKVM 专用代码。
+
+设备侧构建必须走 `onekvm-distro` 的 OpenEmbedded/kas。禁止树外交叉编译。
 
 ## 主要功能
 
 - 从 LT6911 HDMI 输入采集画面。
-- 使用硬件编码 H.264、H.265 和 MJPEG。
-- 可以识别从 640x480 到 2560x1440 的常见 HDMI 输入分辨率。
-- OneKVM 提供 1080p、720p 和 480p 三档输出。1080p 最高 60 FPS；720p 可跟随 120 Hz HDMI 源。
-- 可以报告 HDMI 信号状态；使用原始画面接口时还能返回内置的无信号画面。
-- 可以通过官方 CVITEK SPACC 驱动加速 AES-GCM。
+- 硬件编码 H.264、H.265 和 MJPEG。
+- 接受 320×200 到 2880×1620 范围内、不超过 5 MP 的偶数 HDMI 尺寸，并按
+  5 MP@30 FPS（150M pixel/s）吞吐预算判定；不支持 4K 输入。
+- 输出档最高 2880×1620@30。1080p 最高 60 FPS，720p 可跟随 120 Hz HDMI 源。
+- 绑定编码路径：VPSS 直接交给 VENC。Core 只读压缩 AU，不读原始 1080p 帧。
+- 可以报告 HDMI 信号、sink EDID、采集/编码延迟；原始帧回退路径还能返回内置无信号画面。
+- 可通过 CVITEK SPACC 字符设备做可选 AES-GCM 加速。
 
-采集通路、CSIBDG、HDMI watcher 与 VENC reader 的约定见 [docs/video-pipeline.md](docs/video-pipeline.md)。
+采集通路、CSIBDG、HDMI watcher、VENC reader、空闲释放与截图约定见
+[docs/video-pipeline.md](docs/video-pipeline.md)。ABI 见
+[docs/abi.md](docs/abi.md)。
 
-后端以单个动态库的形式部署：
+后端以单个动态库部署：
 
 ```text
 /usr/lib/onekvm/video-backends/nanokvm-mmf.so
 ```
 
-该动态库由 `onekvm-device-nanokvm` 软件包安装，OneKVM 会在需要时动态加载。
-本项目使用独立的标准 CMake 构建流程，不依赖 MaixCDK。
+由 `onekvm-device-nanokvm` 安装，OneKVM 在需要时动态加载。本项目使用独立
+CMake，不依赖 MaixCDK。
 
 ## 分辨率处理
 
-HDMI 输入检测与 OneKVM 视频输出相互独立。目前 LT6911 输入链路可识别以下
-12 种 HDMI 分辨率：
+HDMI 输入检测与 OneKVM 视频输出相互独立。LT6911 输入不是模式白名单：
+在 320×200 到 2880×1620 范围内，偶数尺寸只要不超过 5 MP，并满足 150M pixel/s
+预算即可采集。4K 时序仍会被识别，但无论帧率都报告 `out_of_range`。
+
+可选择的输出档：
 
 ```text
-2560x1440  1920x1080  1600x900  1440x1080  1440x900
+2880x1620  2560x1440  1920x1080  1600x900  1440x1080  1440x900
 1280x1024  1280x960  1280x800   1280x720
 1152x864   1024x768  800x600    640x480
 ```
 
-SG2002 的 VPSS 采集一律走 phy 通道 1（`sc_v1`，最大宽 2880）。通道 0（`sc_d`）
-最大宽只有 1920，2560 的 1:1 转换会 tile，NV21 全 0。链路会跟随受支持的 HDMI
-输入（含 2560x1440@30），也可以缩到 1920x1080、1280x720 或 640x480。1440p 最高
-30 FPS，1080p 最高 60 FPS；HDMI 源为 1280x720@120 时，720p 可以到 120 FPS。
+广告给 Core 的 ABI 表是常用子集：
+2880×1620@30、2560×1440@30、1920×1080@60、1280×720@60、640×480@60。
 
-## 驱动来源与版本
+SG2002 采集一律走 VPSS phy 通道 1（`sc_v1`，最大宽 2880）。通道 0（`sc_d`）
+最大宽只有 1920，2560 的 1:1 转换会 tile，NV21 全 0。自动模式会跟随可直接输出
+的 HDMI 输入。显式 2880×1620 是最大的原生 16:9 输出档；高于 2560×1440 的输入
+使用两块 UYVY VI 缓冲，VPSS 私有池仍为三块，可装入 NanoKVM 的 64 MiB 视频
+carveout。该档受像素预算限制，最高 30 FPS。HDMI 源为 1280×720@120 时，720p
+可以到 120 FPS。
 
-发行构建使用 Sophgo 官方源码编译内核驱动和用户态运行库，不使用 Sipeed SDK
-中预编译的 MMF 组件。
+## 驱动来源
 
-所有组件统一锁定在 2026-06-30 这一批版本：
+用户态 MMF 库来自 Sophgo 官方源码，锁定在同一批 2026-06-30 版本。不使用
+Sipeed SDK 里预编译的 MMF 组件。
 
-| 组件 | 官方仓库 | OneKVM 使用的版本 |
+| 组件 | 来源 | 锁定版本 |
 | --- | --- | --- |
-| Linux 内核 | [`sophgo/linux_5.10`](https://github.com/sophgo/linux_5.10) | `sg200x-dev`，提交 `767d3c5ab10b066d2d5c7c0bd1eab8a5340e923d` |
-| 视频内核驱动 | [`sophgo/osdrv`](https://github.com/sophgo/osdrv) | `sg200x-dev`，提交 `aa542c41df94f7bc656cb740f6622a5dca7dc403` |
-| 视频用户态运行库 | [`sophgo/cvi_mpi`](https://github.com/sophgo/cvi_mpi) | `sg200x-dev` weekly，提交 `75c181ee6e25baca9729a4a9b415f36180b54f93` |
-| LT6911 支持 | [`sophgo/SensorSupportList`](https://github.com/sophgo/SensorSupportList) | `sg200x-dev`，提交 `f064b02ba8a82746f3e87a2c5bb3bd683ff95db0` |
-| 视频编解码固件 | [`sophgo/ramdisk`](https://github.com/sophgo/ramdisk) | 提交 `1ec8fcb63a358c17c369bac38eb42dc16f30a3bb` |
+| 视频用户态（`cvi_mpi`） | [`sophgo/cvi_mpi`](https://github.com/sophgo/cvi_mpi) `sg200x-dev` | `75c181ee6e25baca9729a4a9b415f36180b54f93` |
+| LT6911 传感器列表 | [`sophgo/SensorSupportList`](https://github.com/sophgo/SensorSupportList) `sg200x-dev` | `f064b02ba8a82746f3e87a2c5bb3bd683ff95db0` |
+| 编译 `cvi_mpi` 用的 osdrv | [`sophgo/osdrv`](https://github.com/sophgo/osdrv) `sg200x-dev` | `aa542c41df94f7bc656cb740f6622a5dca7dc403` |
+| 视频编解码固件 | [`sophgo/ramdisk`](https://github.com/sophgo/ramdisk) | `1ec8fcb63a358c17c369bac38eb42dc16f30a3bb` |
+| 视频内核模块 | 工作区 `osdrv-sg200x`（Sophgo osdrv + NanoKVM 补丁） | 配方 `onekvm-device-nanokvm-mmf-modules` |
 
-OSDRV 提供 SG2002 视频硬件所需的内核模块，包括
-`soph_vcodec.ko`、`soph_jpeg.ko`、`soph_vi.ko` 和 `soph_vpss.ko`。
+OSDRV 模块包括 `soph_vcodec.ko`、`soph_jpeg.ko`、`soph_vi.ko`、`soph_vpss.ko`。
+bind 线程回收以及 5.15/6.18 兼容补丁在模块配方里，不在本仓库。运行中的 Linux
+由 `onekvm-distro`（`linux-sophgo`）选择，本仓库不锁定内核。
 
-OneKVM 只在官方源码上增加少量 NanoKVM 兼容和问题修复补丁，视频驱动本身仍然
-来自 Sophgo 官方 OSDRV。
+不要把不同版本的 `cvi_mpi`、osdrv 或固件和此后端混用。必须一起安装的三个 IPK：
 
-这些版本构成一套配套的驱动组合。混用其他版本的内核、OSDRV 或 `cvi_mpi`
-可能导致视频链路无法启动。
+- `onekvm-device-nanokvm-mmf-runtime` — `cvi_mpi` 用户态库
+- `onekvm-device-nanokvm-mmf-modules` — `soph_*` 内核模块
+- `onekvm-device-nanokvm` — 本后端 `.so`
 
 ## 主机侧测试
 
-基础测试不需要 SG2002 SDK，也不需要 NanoKVM 设备：
+不需要 SG2002 SDK，也不需要设备：
 
 ```sh
 cmake -S . -B build/host \
@@ -79,71 +92,67 @@ cmake --build build/host --parallel
 ctest --test-dir build/host --output-on-failure
 ```
 
-这些测试会检查分辨率切换、VI 帧率解析和无信号画面生成。
+覆盖分辨率策略、输出帧率钳位、VI 帧率解析、H.264 annex B、硬件延迟 proc
+解析、EDID 板型、截图准入和无信号画面。
 
-## 为 NanoKVM 交叉构建
+## 为设备构建
 
-需要 SG2002 RISC-V 交叉工具链，以及已经构建好的指定版本 `sophgo/cvi_mpi`：
+在 `onekvm-distro` 中，机型 `onekvm-nanokvm`：
 
 ```sh
-cmake -S . -B build/sg2002 \
-  -DCMAKE_TOOLCHAIN_FILE=/path/to/sg2002-toolchain.cmake \
-  -DCMAKE_OBJCOPY=/path/to/riscv64-unknown-linux-musl-objcopy \
-  -DCVI_MPI_ROOT=/path/to/built/cvi_mpi \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DBUILD_TESTING=OFF
-cmake --build build/sg2002 --parallel
-DESTDIR="$PWD/stage" cmake --install build/sg2002 --prefix /usr
+make package mmf
 ```
 
-默认启用厂商 SG2002 tune flags。如果工具链文件已经指定目标 ISA（例如
-OpenEmbedded 工具链），应增加 `-DONEKVM_USE_VENDOR_TUNE_FLAGS=OFF`。安装过程
-会同时安装后端动态库及 OneKVM device/system-plugin 描述文件。
+会编 `onekvm-device-nanokvm-mmf-runtime` 和 `onekvm-device-nanokvm`。等价写法：
 
-生成可复现的发行产物时，建议使用
-`onekvm-distro/scripts/oe-nanokvm-mmf-artifact.sh`。该脚本会检出锁定的官方
-驱动版本、构建 `cvi_mpi`，再使用配套工具链编译本项目。
+```sh
+./scripts/kas.sh shell kas/nanokvm-sd.yml \
+  -c 'bitbake -c package_write_ipk onekvm-device-nanokvm-mmf-runtime onekvm-device-nanokvm'
+```
 
-## 设备端验证
+用当前工作树编、不改 recipe `SRCREV`：
 
-- `tests/video-backend-abi-smoke.cpp`：加载安装后的动态库并采集、编码一帧。
-- `tests/video-backend-benchmark.cpp`：测试采集帧率、编码帧率、码率和编码耗时。
-- `tools/lt6911-resolution-probe.c`：排查 HDMI 分辨率识别问题。
+```sh
+ONEKVM_DEBUG_WORKTREES=onekvm-nanokvm-mmf \
+  ./scripts/kas.sh shell kas/nanokvm-sd.yml \
+  -c 'bitbake -c package_write_ipk onekvm-device-nanokvm'
+```
+
+详见 `onekvm-distro/docs/debug-build.md`。只部署应用 IPK，然后重启
+`onekvm.service`。未经明确授权不要改 U-Boot、内核或分区。
+
+设备端 smoke（`tests/bound-reader-stress.cpp`、
+`tests/managed-snapshot-smoke.cpp`）只有同时打开 `ONEKVM_BUILD_MMF_BACKEND`
+和 `BUILD_TESTING` 才会编。OE 配方把 `-DBUILD_TESTING=OFF` 写死，debug
+worktree 不会改这个开关。需要这两份二进制时再覆盖 `EXTRA_OECMAKE`。
+
+`tools/lt6911-resolution-probe.c` 不是 CMake 目标。量产 `.so` 除两个 query
+外全部 hidden，探针对已安装的库 `dlsym` 不到 LT6911 符号。排查用 watcher
+日志或调试构建里的 I2C。
 
 ## OneKVM ABI
 
-动态库只对外导出两个入口：
+动态库只导出两个入口：
 
-- `onekvm_video_backend_query`：视频采集和编码。
-- `onekvm_crypto_backend_query`：可选的 AES-GCM 加速。
+- `onekvm_video_backend_query`
+- `onekvm_crypto_backend_query`
 
-接口定义分别位于 `include/onekvm/video_backend_v1.h` 和
-`include/onekvm/crypto_backend_v1.h`。两套接口都有明确版本，加载到不兼容的
-动态库时，OneKVM 会在加载阶段拒绝该后端。其他 MMF 和厂商函数均保持为动态库
-内部实现。
-
-## 视频处理链路
-
-正常使用 H.264/H.265 时，采集硬件会把画面直接交给编码器，完整的 1080p
-原始画面不会经过 OneKVM Core。MJPEG 同样会把采集画面直接交给硬件 JPEG
-编码器。
-
-编码完成后，只把体积小很多的压缩结果复制到一块可重复使用的输出缓冲区，再
-交给 Core。如果其他功能同时需要原始画面，后端才会切换到可能复制一帧原始
-画面的通用路径。这只是内部回退方式，不是另一套对外接口。
-
-AES-GCM 加速通过 OneKVM 的轻量适配层调用官方 `cvitek_spacc` 内核驱动。目前
-H.265 和硬件加密同时运行可能锁死 SG2002，因此 H.265 会由 OneKVM Core 自动
-改用普通的软件 AES-GCM，不会强行启用硬件加速。
+接口在 `include/onekvm/video_backend_v1.h` 和
+`include/onekvm/crypto_backend_v1.h`，都有明确版本。H.265 会话不广告硬件加密，
+Core 改用软件 AES-GCM。CryptoDMA 第一次 `ETIMEDOUT` 后进程内禁用 offload。
 
 ## 无信号画面资源
 
-源图片位于 `assets/no-signal/`。修改图片后，使用下面的命令重新生成 NV21 数据：
+源图片在 `assets/no-signal/`。改图后重新生成 NV21 数据：
 
 ```sh
 go run ./tools/pack_no_signal.go src/no_signal_frames.inc
 ```
 
+运行时不解析 PNG。绑定无信号静帧以 NV21 送进 VPSS
+（`render_no_signal_nv21` → `submit_vpss_nv21`），WAVE4 仍走平常绑定路径编码。
+`src/no_signal_h264.inc` 只给主机测试用。
+
 ## 许可证
 
-本项目使用 GNU General Public License v3.0，完整条款见 [LICENSE](LICENSE)。
+GNU General Public License v3.0，完整条款见 [LICENSE](LICENSE)。

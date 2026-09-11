@@ -1,4 +1,4 @@
-改视频先读 `docs/video-pipeline.md`。
+改视频先读 `docs/video-pipeline.md`。文档索引见 `docs/README.md`。ABI 见 `docs/abi.md`。
 
 设备侧 MMF runtime、backend、IPK 必须用仓库 `onekvm-distro` 的 OpenEmbedded/kas 编：`make package mmf`，或 `kas.sh shell kas/nanokvm-sd.yml` 再 bitbake。禁止树外交叉编译。
 
