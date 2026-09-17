@@ -42,6 +42,7 @@ enum onekvm_video_pixel_format_v1 {
     ONEKVM_VIDEO_PIXEL_NV12 = 2,
     ONEKVM_VIDEO_PIXEL_NV21 = 3,
     ONEKVM_VIDEO_PIXEL_MJPEG = 4,
+    ONEKVM_VIDEO_PIXEL_RGB565 = 5,
 };
 
 #define ONEKVM_VIDEO_FEATURE_SIGNAL_PRESENT (1ull << 0)
@@ -52,6 +53,46 @@ enum onekvm_video_pixel_format_v1 {
 #define ONEKVM_VIDEO_FEATURE_BOUND_ENCODER   (1ull << 5)
 #define ONEKVM_VIDEO_FEATURE_LATENCY         (1ull << 6)
 #define ONEKVM_VIDEO_FEATURE_EDID            (1ull << 7)
+#define ONEKVM_VIDEO_FEATURE_ENCODER_ALLOCATION (1ull << 8)
+#define ONEKVM_VIDEO_FEATURE_SOURCE_SNAPSHOT    (1ull << 9)
+#define ONEKVM_VIDEO_FEATURE_SOURCE_DISPLAY     (1ull << 10)
+#define ONEKVM_VIDEO_FEATURE_SOURCE_DISPLAY_RGA (1ull << 11)
+#define ONEKVM_VIDEO_FEATURE_SOURCE_OVERLAY     (1ull << 12)
+
+#define ONEKVM_VIDEO_DISPLAY_FLAG_RGA (1u << 0)
+#define ONEKVM_VIDEO_OVERLAY_FLAG_RGA (1u << 0)
+
+enum onekvm_video_resource_result_v1 {
+    ONEKVM_VIDEO_RESOURCE_OK = 0,
+    ONEKVM_VIDEO_RESOURCE_INVALID = -1,
+    ONEKVM_VIDEO_RESOURCE_UNSUPPORTED = -2,
+    ONEKVM_VIDEO_RESOURCE_BUSY = -3,
+    ONEKVM_VIDEO_RESOURCE_NO_MEMORY = -4,
+    ONEKVM_VIDEO_RESOURCE_UNINITIALIZED = -5,
+    ONEKVM_VIDEO_RESOURCE_INTERNAL = -6,
+    ONEKVM_VIDEO_RESOURCE_BUFFER_TOO_SMALL = -7,
+    ONEKVM_VIDEO_RESOURCE_TIMEOUT = -8,
+};
+
+enum onekvm_video_encoder_input_mode_v1 {
+    ONEKVM_VIDEO_ENCODER_INPUT_MANUAL = 1,
+    ONEKVM_VIDEO_ENCODER_INPUT_BOUND = 2,
+};
+
+#define ONEKVM_VIDEO_ENCODER_INPUT_MASK_MANUAL \
+    (1u << ONEKVM_VIDEO_ENCODER_INPUT_MANUAL)
+#define ONEKVM_VIDEO_ENCODER_INPUT_MASK_BOUND \
+    (1u << ONEKVM_VIDEO_ENCODER_INPUT_BOUND)
+
+enum onekvm_video_encoder_purpose_v1 {
+    ONEKVM_VIDEO_ENCODER_PURPOSE_REALTIME = 1,
+    ONEKVM_VIDEO_ENCODER_PURPOSE_BACKGROUND = 2,
+};
+
+#define ONEKVM_VIDEO_ENCODER_PURPOSE_MASK_REALTIME \
+    (1u << ONEKVM_VIDEO_ENCODER_PURPOSE_REALTIME)
+#define ONEKVM_VIDEO_ENCODER_PURPOSE_MASK_BACKGROUND \
+    (1u << ONEKVM_VIDEO_ENCODER_PURPOSE_BACKGROUND)
 
 #define ONEKVM_VIDEO_EDID_MAX_BYTES 512
 
@@ -152,6 +193,108 @@ struct onekvm_video_edid_apply_result_v1 {
     uint32_t apply_required;
 };
 
+struct onekvm_video_encoder_resources_v1 {
+    uint32_t struct_size;
+    uint32_t policy_h26x_capacity;
+    uint32_t policy_jpeg_capacity;
+    uint32_t active_h26x;
+    uint32_t active_jpeg;
+    uint32_t hardware_channel_capacity;
+    uint32_t input_mode_mask;
+    uint32_t purpose_mask;
+    uint64_t flags; /* Must be zero in ABI v1. */
+};
+
+struct onekvm_video_encoder_allocation_request_v1 {
+    uint32_t struct_size;
+    struct onekvm_video_encoder_config_v1 config;
+    int32_t width;
+    int32_t height;
+    uint32_t pixel_format;
+    uint32_t input_mode;
+    uint32_t purpose;
+    uint64_t flags; /* Must be zero in ABI v1. */
+};
+
+struct onekvm_video_encoder_allocation_v1 {
+    uint32_t struct_size;
+    uint64_t allocation_id;
+    uint32_t codec;
+    uint32_t input_mode;
+    uint32_t purpose;
+    int32_t width;
+    int32_t height;
+    uint32_t pixel_format;
+    uint32_t flags; /* Zero until allocation capabilities are defined. */
+};
+
+struct onekvm_video_snapshot_request_v1 {
+    uint32_t struct_size;
+    int32_t width;
+    int32_t height;
+    double quality_factor;
+    uint32_t timeout_ms;
+    uint32_t flags; /* Must be zero in ABI v1. */
+};
+
+struct onekvm_video_snapshot_result_v1 {
+    uint32_t struct_size;
+    uint64_t data_size;
+    int32_t width;
+    int32_t height;
+    uint64_t pts_ns;
+};
+
+/* Optional display: packed RGB565 (little-endian), no row padding.
+ * width/height 0 follows the backend default. Explicit sizes must both
+ * be even and positive. timeout_ms 0 uses 250; cap is 1000. flags on
+ * the request must be zero. Result flags may set DISPLAY_FLAG_RGA when
+ * the scale used 2D hardware. */
+struct onekvm_video_display_request_v1 {
+    uint32_t struct_size;
+    int32_t width;
+    int32_t height;
+    uint32_t pixel_format; /* 0 or ONEKVM_VIDEO_PIXEL_RGB565 */
+    uint32_t timeout_ms;
+    uint32_t flags; /* Must be zero in ABI v1. */
+};
+
+struct onekvm_video_display_result_v1 {
+    uint32_t struct_size;
+    uint64_t data_size;
+    int32_t width;
+    int32_t height;
+    uint32_t pixel_format;
+    uint64_t pts_ns;
+    uint32_t flags;
+};
+
+struct onekvm_video_overlay_request_v1 {
+    uint32_t struct_size;
+    int32_t dest_width;
+    int32_t dest_height;
+    int32_t dest_stride; /* pixels; 0 = dest_width */
+    int32_t x;
+    int32_t y;
+    int32_t width;
+    int32_t height;
+    int32_t zoom; /* 1, 2, or 4; 0 = 1 */
+    int32_t pan_x; /* 0–1000 */
+    int32_t pan_y;
+    uint32_t pixel_format; /* 0 or ONEKVM_VIDEO_PIXEL_RGB565 */
+    uint32_t timeout_ms;
+    uint32_t flags; /* Must be zero in ABI v1. */
+};
+
+struct onekvm_video_overlay_result_v1 {
+    uint32_t struct_size;
+    int32_t width;
+    int32_t height;
+    uint32_t pixel_format;
+    uint64_t pts_ns;
+    uint32_t flags; /* OVERLAY_FLAG_RGA when 2D hardware composed */
+};
+
 struct onekvm_video_backend_v1 {
     uint32_t struct_size;
     uint32_t abi_version;
@@ -224,6 +367,45 @@ struct onekvm_video_backend_v1 {
     int32_t (*edid_set)(const struct onekvm_video_edid_blob_v1 *edid,
                         struct onekvm_video_edid_apply_result_v1 *apply,
                         char *error, uint32_t error_capacity);
+    /* Optional tail: explicit, backend-owned encoder resource allocation.
+     * Callers select policy and input shape, never a hardware channel. */
+    int32_t (*encoder_resources)(
+        struct onekvm_video_encoder_resources_v1 *resources,
+        char *error, uint32_t error_capacity);
+    int32_t (*encoder_allocate)(
+        const struct onekvm_video_encoder_allocation_request_v1 *request,
+        void **encoder,
+        struct onekvm_video_encoder_allocation_v1 *allocation,
+        char *error, uint32_t error_capacity);
+    int32_t (*encoder_allocation)(
+        void *encoder,
+        struct onekvm_video_encoder_allocation_v1 *allocation,
+        char *error, uint32_t error_capacity);
+    int32_t (*source_snapshot)(
+        void *source,
+        const struct onekvm_video_snapshot_request_v1 *request,
+        uint8_t *data, uint64_t capacity,
+        struct onekvm_video_snapshot_result_v1 *result,
+        char *error, uint32_t error_capacity);
+    /* Optional tail: scaled RGB565 display. Does not use a JPEG encoder.
+     * NULL / missing FEATURE_SOURCE_DISPLAY means the machine has no
+     * display ABI; callers fall back to encoded or snapshot. */
+    int32_t (*source_display)(
+        void *source,
+        const struct onekvm_video_display_request_v1 *request,
+        uint8_t *data, uint64_t capacity,
+        struct onekvm_video_display_result_v1 *result,
+        char *error, uint32_t error_capacity);
+    /* Optional tail: compose a cover-scaled RGB565 view into dest.
+     * dest is packed LE RGB565, dest_stride pixels (0 = dest_width).
+     * zoom is 1/2/4; pan_x/pan_y are 0–1000. Does not clear dest outside
+     * the rect. SPI/fbdev panels have no VOP plane; this is the overlay. */
+    int32_t (*source_overlay)(
+        void *source,
+        const struct onekvm_video_overlay_request_v1 *request,
+        uint8_t *dest, uint64_t dest_bytes,
+        struct onekvm_video_overlay_result_v1 *result,
+        char *error, uint32_t error_capacity);
 };
 
 /*

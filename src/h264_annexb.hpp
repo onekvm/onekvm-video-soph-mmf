@@ -95,13 +95,21 @@ public:
 		return !sps_.empty() && !pps_.empty() && (!h265 || !vps_.empty());
 	}
 
+	bool needs_parameter_prefix(const uint8_t *data, std::size_t size,
+		bool h265) const
+	{
+		if (data == nullptr || size == 0 || !complete(h265))
+			return false;
+		const uint8_t required = kAnnexBParamSPS | kAnnexBParamPPS |
+			(h265 ? kAnnexBParamVPS : 0);
+		return (annexb_parameter_set_mask(data, size, h265) & required) !=
+			required;
+	}
+
 	std::vector<uint8_t> augment_keyframe(const uint8_t *data,
 		std::size_t size, bool h265) const
 	{
-		const uint8_t required = kAnnexBParamSPS | kAnnexBParamPPS |
-			(h265 ? kAnnexBParamVPS : 0);
-		if (data == nullptr || size == 0 || !complete(h265) ||
-		    (annexb_parameter_set_mask(data, size, h265) & required) == required)
+		if (data == nullptr || size == 0 || !needs_parameter_prefix(data, size, h265))
 			return data != nullptr ? std::vector<uint8_t>(data, data + size)
 				: std::vector<uint8_t>();
 
@@ -149,6 +157,19 @@ inline bool annexb_has_idr(const uint8_t *data, std::size_t size)
 		if ((data[start] & 0x1fu) == 5)
 			return true;
 		index = start + 1;
+	}
+	return false;
+}
+
+inline bool annexb_has_vcl(const uint8_t *data, std::size_t size, bool h265)
+{
+	std::size_t cursor = 0;
+	AnnexBNalUnit unit;
+	while (annexb_next_nal_unit(data, size, &cursor, &unit)) {
+		const uint8_t type = h265 ? (data[unit.start] >> 1) & 0x3f
+			: data[unit.start] & 0x1f;
+		if ((h265 && type <= 31) || (!h265 && type >= 1 && type <= 5))
+			return true;
 	}
 	return false;
 }

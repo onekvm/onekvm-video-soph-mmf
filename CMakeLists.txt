@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(onekvm_device_nanokvm_mmf LANGUAGES C CXX)
+project(onekvm_video_soph_mmf LANGUAGES C CXX)
 
 option(BUILD_TESTING "Build host-side unit tests" OFF)
 include(CTest)
@@ -18,6 +18,12 @@ function(onekvm_enable_warnings target)
 endfunction()
 
 if(BUILD_TESTING)
+    add_executable(snapshot_admission_test tests/snapshot-admission-test.cpp)
+    target_include_directories(snapshot_admission_test PRIVATE include)
+    target_compile_features(snapshot_admission_test PRIVATE cxx_std_17)
+    onekvm_enable_warnings(snapshot_admission_test)
+    add_test(NAME snapshot_admission_test COMMAND snapshot_admission_test)
+
     add_executable(input_resolution_tracker_test
         tests/input-resolution-tracker-test.cpp)
     target_include_directories(input_resolution_tracker_test PRIVATE include)
@@ -85,10 +91,11 @@ set(MMF_SOURCES
     src/onekvm_video_backend.cpp
     src/onekvm_video_encoder.cpp
     src/onekvm_video_source.cpp
+    src/onekvm_video_snapshot.cpp
     src/edid.cpp
     src/lt6911_edid.cpp)
 
-add_library(kvm_mmf SHARED
+add_library(soph_mmf SHARED
     ${MMF_SOURCES}
     "${CVI_MPI_ROOT}/sample/common/sample_common_sys.c"
     "${CVI_MPI_ROOT}/sample/common/sample_common_vpss.c"
@@ -96,7 +103,7 @@ add_library(kvm_mmf SHARED
     "${CVI_MPI_ROOT}/sample/common/sample_common_isp.c"
     "${CVI_MPI_SENSOR_DIR}/lt6911_cmos.c")
 
-target_include_directories(kvm_mmf PRIVATE
+target_include_directories(soph_mmf PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/include"
     "${CMAKE_CURRENT_SOURCE_DIR}"
     "${CVI_MPI_ROOT}/component/panel/cv181x"
@@ -107,25 +114,25 @@ target_include_directories(kvm_mmf PRIVATE
     "${CVI_MPI_ROOT}/3rdparty/inih"
     "${CVI_MPI_SENSOR_DIR}")
 
-target_compile_definitions(kvm_mmf PRIVATE
+target_compile_definitions(soph_mmf PRIVATE
     USE_USER_SEN_DRIVER=1
     SENSOR_LONTIUM_LT6911
     SENSOR2_TYPE=LONTIUM_LT6911_2M_60FPS_8BIT)
 if(ONEKVM_USE_VENDOR_TUNE_FLAGS)
-    target_compile_options(kvm_mmf PRIVATE
+    target_compile_options(soph_mmf PRIVATE
         -mcpu=c906fdv
         -march=rv64imafdcv0p7xthead
         -mcmodel=medany
         -mabi=lp64d
         -Os)
 endif()
-target_compile_features(kvm_mmf PRIVATE cxx_std_17)
-onekvm_enable_warnings(kvm_mmf)
-set_target_properties(kvm_mmf PROPERTIES
+target_compile_features(soph_mmf PRIVATE cxx_std_17)
+onekvm_enable_warnings(soph_mmf)
+set_target_properties(soph_mmf PROPERTIES
     C_VISIBILITY_PRESET hidden
     CXX_VISIBILITY_PRESET hidden
     CXX_EXTENSIONS OFF
-    OUTPUT_NAME "nanokvm-mmf"
+    OUTPUT_NAME "soph-mmf"
     PREFIX ""
     POSITION_INDEPENDENT_CODE ON
     VISIBILITY_INLINES_HIDDEN ON)
@@ -134,8 +141,8 @@ set(CVI_MPI_LIB_DIR "${CVI_MPI_ROOT}/lib")
 # Sophgo's cvi_mpi DSOs omit their cross-library DT_NEEDED metadata.  Keep the
 # complete runtime set attached to this backend so dlopen can resolve symbols
 # between vendor libraries regardless of their order on the link line.
-target_link_options(kvm_mmf PRIVATE "-Wl,--no-as-needed")
-target_link_libraries(kvm_mmf PRIVATE
+target_link_options(soph_mmf PRIVATE "-Wl,--no-as-needed")
+target_link_libraries(soph_mmf PRIVATE
     "${CVI_MPI_LIB_DIR}/libcvi_bin.so"
     "${CVI_MPI_LIB_DIR}/libae.so"
     "${CVI_MPI_LIB_DIR}/libaf.so"
@@ -158,11 +165,11 @@ target_link_libraries(kvm_mmf PRIVATE
 # version script makes the two OneKVM query functions its only public ABI.
 set(ONEKVM_BACKEND_VERSION_SCRIPT
     "${CMAKE_CURRENT_SOURCE_DIR}/src/onekvm_backend.map")
-target_link_options(kvm_mmf PRIVATE
+target_link_options(soph_mmf PRIVATE
     "-Wl,-Bsymbolic"
     "-Wl,--version-script=${ONEKVM_BACKEND_VERSION_SCRIPT}"
     "-Wl,--wrap=CVI_ISP_SensorRegCallBack")
-set_property(TARGET kvm_mmf APPEND PROPERTY
+set_property(TARGET soph_mmf APPEND PROPERTY
     LINK_DEPENDS "${ONEKVM_BACKEND_VERSION_SCRIPT}")
 
 # Sophgo's GCC 10 linker places .riscv.attributes immediately after a full
@@ -173,15 +180,15 @@ set_property(TARGET kvm_mmf APPEND PROPERTY
 if(NOT CMAKE_OBJCOPY)
     message(FATAL_ERROR "CMAKE_OBJCOPY is required for the RISC-V ELF fixup")
 endif()
-add_custom_command(TARGET kvm_mmf POST_BUILD
+add_custom_command(TARGET soph_mmf POST_BUILD
     COMMAND "${CMAKE_OBJCOPY}" --remove-section=.riscv.attributes
-        "$<TARGET_FILE:kvm_mmf>"
+        "$<TARGET_FILE:soph_mmf>"
     VERBATIM)
 
 set(ONEKVM_VIDEO_BACKEND_INSTALL_DIR
     "${CMAKE_INSTALL_LIBDIR}/onekvm/video-backends"
     CACHE STRING "Install directory for OneKVM video backend DSOs")
-install(TARGETS kvm_mmf
+install(TARGETS soph_mmf
     LIBRARY DESTINATION "${ONEKVM_VIDEO_BACKEND_INSTALL_DIR}")
 install(FILES packaging/onekvm/nanokvm-device-backend.json
     DESTINATION "${CMAKE_INSTALL_DATADIR}/onekvm/device-backends"
@@ -198,11 +205,17 @@ install(DIRECTORY assets/edid/presets/
     FILES_MATCHING PATTERN "*.bin")
 
 if(BUILD_TESTING)
+    add_executable(managed_snapshot_smoke tests/managed-snapshot-smoke.cpp)
+    target_include_directories(managed_snapshot_smoke PRIVATE include)
+    target_compile_features(managed_snapshot_smoke PRIVATE cxx_std_17)
+    target_link_libraries(managed_snapshot_smoke PRIVATE dl pthread)
+    onekvm_enable_warnings(managed_snapshot_smoke)
+
     add_executable(bound_reader_stress tests/bound-reader-stress.cpp)
     target_include_directories(bound_reader_stress PRIVATE include)
     target_compile_features(bound_reader_stress PRIVATE cxx_std_17)
     target_link_libraries(bound_reader_stress PRIVATE dl pthread)
     onekvm_enable_warnings(bound_reader_stress)
-    install(TARGETS bound_reader_stress
+    install(TARGETS bound_reader_stress managed_snapshot_smoke
         RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
 endif()

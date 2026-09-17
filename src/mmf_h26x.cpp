@@ -144,24 +144,67 @@ static void _set_venc_common_attr(VENC_CHN_ATTR_S *attr, const H26xEncoderConfig
 
 static void _set_h264_vbr_attr(VENC_CHN_ATTR_S *attr, const H26xEncoderConfig *cfg)
 {
+	/* Coda H.264 AVBR never updates MotionLv on 107, so still-QP
+	 * stays clamped and live MaxBitRate changes never retarget RC.
+	 * VBR applies Max × ChangePos on the next IDR. */
 	attr->stRcAttr.enRcMode = VENC_RC_MODE_H264VBR;
 	attr->stRcAttr.stH264Vbr.u32Gop = cfg->gop;
-	attr->stRcAttr.stH264Vbr.u32StatTime = 2;
+	attr->stRcAttr.stH264Vbr.u32StatTime = MMF_VENC_AVBR_STAT_TIME;
 	attr->stRcAttr.stH264Vbr.u32SrcFrameRate = cfg->input_fps;
 	attr->stRcAttr.stH264Vbr.fr32DstFrameRate = cfg->output_fps;
 	attr->stRcAttr.stH264Vbr.u32MaxBitRate = cfg->bitrate_kbps;
 	attr->stRcAttr.stH264Vbr.bVariFpsEn = CVI_FALSE;
 }
 
-static void _set_h265_vbr_attr(VENC_CHN_ATTR_S *attr, const H26xEncoderConfig *cfg)
+static void _set_h265_avbr_attr(VENC_CHN_ATTR_S *attr, const H26xEncoderConfig *cfg)
 {
-	attr->stRcAttr.enRcMode = VENC_RC_MODE_H265VBR;
-	attr->stRcAttr.stH265Vbr.u32Gop = cfg->gop;
-	attr->stRcAttr.stH265Vbr.u32StatTime = 2;
-	attr->stRcAttr.stH265Vbr.u32SrcFrameRate = cfg->input_fps;
-	attr->stRcAttr.stH265Vbr.fr32DstFrameRate = cfg->output_fps;
-	attr->stRcAttr.stH265Vbr.u32MaxBitRate = cfg->bitrate_kbps;
-	attr->stRcAttr.stH265Vbr.bVariFpsEn = CVI_FALSE;
+	attr->stRcAttr.enRcMode = VENC_RC_MODE_H265AVBR;
+	attr->stRcAttr.stH265AVbr.u32Gop = cfg->gop;
+	attr->stRcAttr.stH265AVbr.u32StatTime = MMF_VENC_AVBR_STAT_TIME;
+	attr->stRcAttr.stH265AVbr.u32SrcFrameRate = cfg->input_fps;
+	attr->stRcAttr.stH265AVbr.fr32DstFrameRate = cfg->output_fps;
+	attr->stRcAttr.stH265AVbr.u32MaxBitRate = cfg->bitrate_kbps;
+	attr->stRcAttr.stH265AVbr.bVariFpsEn = CVI_FALSE;
+}
+
+template <typename VbrParam>
+static void _set_vbr_rc_limits(VbrParam *p, CVI_U32 min_qp, CVI_U32 max_qp)
+{
+	p->s32ChangePos = 90;
+	p->u32MinIprop = 1;
+	p->u32MaxIprop = 100;
+	p->s32MaxReEncodeTimes = 0;
+	p->u32MaxQp = max_qp;
+	p->u32MinQp = min_qp;
+	p->u32MaxIQp = max_qp;
+	p->u32MinIQp = min_qp;
+}
+
+template <typename AvbrParam>
+static void _set_avbr_rc_limits(AvbrParam *p, CVI_U32 min_qp, CVI_U32 max_qp)
+{
+	p->s32ChangePos = 90;
+	p->u32MinIprop = 1;
+	p->u32MaxIprop = 100;
+	p->s32MaxReEncodeTimes = 0;
+	p->u32MaxQp = max_qp;
+	p->u32MinQp = min_qp;
+	p->u32MaxIQp = max_qp;
+	p->u32MinIQp = min_qp;
+	p->s32MinStillPercent = MMF_VENC_AVBR_MIN_STILL_PERCENT;
+	/* CreateChn default is 1 (near-lossless). That pins still bitrate
+	 * independent of MaxBitRate. Use the notes still cap [32, 40] so
+	 * a low UI ceiling can raise QP; 32 blocked the slider. */
+	CVI_U32 still_qp = MMF_VENC_AVBR_MAX_STILL_QP;
+	if (still_qp < min_qp)
+		still_qp = min_qp;
+	if (still_qp > max_qp)
+		still_qp = max_qp;
+	p->u32MaxStillQP = still_qp;
+	p->u32MotionSensitivity = MMF_VENC_AVBR_MOTION_SENSITIVITY;
+	p->s32AvbrFrmLostOpen = 0;
+	p->s32AvbrFrmGap = 0;
+	p->s32AvbrPureStillThr = 4;
 }
 
 static CVI_S32 _set_venc_rc_param(int ch, const H26xEncoderConfig *cfg,
@@ -189,25 +232,10 @@ static CVI_S32 _set_venc_rc_param(int ch, const H26xEncoderConfig *cfg,
 	 * to advanced QP overrides.  Image-quality presets only change bitrate. */
 	param.s32FirstFrameStartQp = initial_qp;
 	param.s32InitialDelay = 1000;
-	if (cfg->codec == H26xCodec::H265) {
-		param.stParamH265Vbr.s32ChangePos = 90;
-		param.stParamH265Vbr.u32MinIprop = 1;
-		param.stParamH265Vbr.u32MaxIprop = 100;
-		param.stParamH265Vbr.s32MaxReEncodeTimes = 0;
-		param.stParamH265Vbr.u32MaxQp = max_qp;
-		param.stParamH265Vbr.u32MinQp = min_qp;
-		param.stParamH265Vbr.u32MaxIQp = max_qp;
-		param.stParamH265Vbr.u32MinIQp = min_qp;
-	} else {
-		param.stParamH264Vbr.s32ChangePos = 90;
-		param.stParamH264Vbr.u32MinIprop = 1;
-		param.stParamH264Vbr.u32MaxIprop = 100;
-		param.stParamH264Vbr.s32MaxReEncodeTimes = 0;
-		param.stParamH264Vbr.u32MaxQp = max_qp;
-		param.stParamH264Vbr.u32MinQp = min_qp;
-		param.stParamH264Vbr.u32MaxIQp = max_qp;
-		param.stParamH264Vbr.u32MinIQp = min_qp;
-	}
+	if (cfg->codec == H26xCodec::H265)
+		_set_avbr_rc_limits(&param.stParamH265AVbr, min_qp, max_qp);
+	else
+		_set_vbr_rc_limits(&param.stParamH264Vbr, min_qp, max_qp);
 
 	ret = CVI_VENC_SetRcParam(ch, &param);
 	if (ret != CVI_SUCCESS)
@@ -248,7 +276,7 @@ static int create_h26x_channel(int ch, const H26xEncoderConfig &config,
 	H26xEncoderState *info = (H26xEncoderState *)&g_runtime.h26x_encoders[ch];
 	_set_venc_common_attr(&attr, cfg);
 	if (cfg->codec == H26xCodec::H265)
-		_set_h265_vbr_attr(&attr, cfg);
+		_set_h265_avbr_attr(&attr, cfg);
 	else
 		_set_h264_vbr_attr(&attr, cfg);
 
@@ -299,7 +327,9 @@ int close_h26x_encoder(int ch) {
 	/* Wake the producer before joining the sole GetStream owner. The vendor
 	 * call may still be inside EnterVcodecLock after its bounded fd poll, and
 	 * the next bound frame is what lets that call complete and observe stop. */
-	if (info->bound_to_capture && resume_vpss_channel(info->capture_channel) != 0)
+	if (info->bound_to_capture &&
+		(resume_vi_dma() != 0 ||
+		 resume_vpss_channel(info->capture_channel) != 0))
 		return -1;
 	stop_h26x_reader(ch);
 	if (info->stream_held)
@@ -522,14 +552,20 @@ static void refresh_bound_hw_latency(H26xEncoderState *info)
 	}
 
 	uint32_t hwenc_us = 0;
+	uint32_t enc_fps = 0;
+	bool got_venc_perf = false;
 	if (FILE *venc = fopen("/proc/cvitek/venc", "r")) {
 		char line[512];
 		while (fgets(line, sizeof(line), venc) != nullptr) {
-			if (parse_venc_hwenc_us(line, info->ch, &hwenc_us))
+			if (parse_venc_perf_line(line, info->ch, &enc_fps, &hwenc_us)) {
+				got_venc_perf = true;
 				break;
+			}
 		}
 		fclose(venc);
 	}
+	if (got_venc_perf)
+		__atomic_store_n(&info->last_enc_fps, enc_fps, __ATOMIC_RELAXED);
 
 	/* Capture stops at VPSS output. VENC waitq/HwEncTime are encode. */
 	uint32_t capture_us = 0;
@@ -856,8 +892,13 @@ int bind_h26x_to_capture(int ch, int vpss_group, int vpss_channel) {
 		if (want_vi == info->bound_to_vi &&
 			info->capture_group == vpss_group &&
 			info->capture_channel == vpss_channel) {
-			if (!want_vi && resume_vpss_channel(vpss_channel) != 0)
+			if (want_vi) {
+				if (enable_vi_dma() != 0)
+					return -1;
+			} else if (resume_vi_dma() != 0 ||
+				   resume_vpss_channel(vpss_channel) != 0) {
 				return -1;
+			}
 			start_h26x_reader(ch);
 			return 0;
 		}
@@ -880,7 +921,9 @@ int bind_h26x_to_capture(int ch, int vpss_group, int vpss_channel) {
 		   VPSS first: that steals the only UYVY blocks. StartRecvFrame
 		   must run AFTER SYS bind or enable_bind_mode is still false
 		   and the bind kthread never starts. */
-		if (detach_vi_from_vpss() != 0) {
+		if (enable_vi_dma() != 0) {
+			fprintf(stderr, "OneKVM: enable VI DMA failed, using VPSS\n");
+		} else if (detach_vi_from_vpss() != 0) {
 			fprintf(stderr, "OneKVM: detach VI from VPSS failed, using VPSS\n");
 		} else {
 			ret = bind_vi_venc(ch);
@@ -897,6 +940,8 @@ int bind_h26x_to_capture(int ch, int vpss_group, int vpss_channel) {
 		}
 	}
 	if (!bound_vi) {
+		if (resume_vi_dma() != 0)
+			return -1;
 		if (resume_vpss_channel(vpss_channel) != 0)
 			return -1;
 		VPSS_CHN_ATTR_S attr;
@@ -1033,8 +1078,11 @@ int unbind_h26x_from_capture(int ch) {
 	info->capture_group = 0;
 	info->capture_channel = 0;
 
+	/* SYS unbind only. DisableChn belongs to park_h26x / idle: a live
+	   exclusive-VI fallback or placeholder rebind still needs DMA, and
+	   CSI 0x0 from a paused VI looks like a hung CSIBDG to the watcher. */
 	park_unbound_vpss_channels();
-	return ret;
+	return 0;
 }
 
 int park_h26x_capture(int ch) {
@@ -1044,12 +1092,16 @@ int park_h26x_capture(int ch) {
 	H26xEncoderState *info = &g_runtime.h26x_encoders[ch];
 	if (!info->bound_to_capture) {
 		park_unbound_vpss_channels();
-		return 0;
+		return pause_vi_dma();
 	}
 	if (info->stream_held && release_h26x_packet(ch) != 0)
 		return -1;
 	H26xReader &reader = g_readers[ch];
 	reader.discard.store(true, std::memory_order_release);
+	if (info->bound_to_vi && rebind_h26x_to_vpss(ch) != 0)
+		return -1;
+	if (pause_vi_dma() != 0)
+		return -1;
 	const int ret = pause_vpss_channel(info->capture_channel);
 	if (ret != 0)
 		return ret;
@@ -1145,11 +1197,11 @@ static int apply_h26x_rate_control(int ch, int output_fps, int gop,
 			attr.stRcAttr.stH264Vbr.u32Gop = static_cast<CVI_U32>(gop);
 			attr.stRcAttr.stH264Vbr.u32MaxBitRate = bitrate_kbps;
 		} else if (attr.stVencAttr.enType == PT_H265 &&
-			   attr.stRcAttr.enRcMode == VENC_RC_MODE_H265VBR) {
-			attr.stRcAttr.stH265Vbr.u32SrcFrameRate = src_fps;
-			attr.stRcAttr.stH265Vbr.fr32DstFrameRate = output_fps;
-			attr.stRcAttr.stH265Vbr.u32Gop = static_cast<CVI_U32>(gop);
-			attr.stRcAttr.stH265Vbr.u32MaxBitRate = bitrate_kbps;
+			   attr.stRcAttr.enRcMode == VENC_RC_MODE_H265AVBR) {
+			attr.stRcAttr.stH265AVbr.u32SrcFrameRate = src_fps;
+			attr.stRcAttr.stH265AVbr.fr32DstFrameRate = output_fps;
+			attr.stRcAttr.stH265AVbr.u32Gop = static_cast<CVI_U32>(gop);
+			attr.stRcAttr.stH265AVbr.u32MaxBitRate = bitrate_kbps;
 		} else {
 			return -1;
 		}
@@ -1458,6 +1510,10 @@ int finish_idle_h26x_drain(int ch)
 		h26x_reader_force_idr(ch);
 		return -1;
 	}
+	if (pause_vi_dma() != 0) {
+		h26x_reader_force_idr(ch);
+		return -1;
+	}
 	{
 		std::lock_guard<std::mutex> lock(reader.mu);
 		clear_reader_queue(reader);
@@ -1568,6 +1624,13 @@ uint64_t h26x_last_capture_ns(int ch)
 	if (ch < 0 || ch >= MMF_VENC_MAX_CHN)
 		return 0;
 	return __atomic_load_n(&g_runtime.h26x_encoders[ch].last_capture_ns, __ATOMIC_RELAXED);
+}
+
+uint32_t h26x_last_enc_fps(int ch)
+{
+	if (ch < 0 || ch >= MMF_VENC_MAX_CHN)
+		return 0;
+	return __atomic_load_n(&g_runtime.h26x_encoders[ch].last_enc_fps, __ATOMIC_RELAXED);
 }
 
 uint64_t h26x_reader_last_packet_ns(int ch)

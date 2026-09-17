@@ -34,20 +34,31 @@ inline bool parse_vpss_grp_cost_us(const char *line, int grp, uint32_t *cost_us)
 
 /* /proc/cvitek/venc PERFORMANCE line. Sample:
      ID: 1 No.SendFramePerSec: 59 No.EncFramePerSec: 59 HwEncTime: 9188 us ... */
-inline bool parse_venc_hwenc_us(const char *line, int channel, uint32_t *hwenc_us)
+inline bool parse_venc_perf_line(const char *line, int channel,
+	uint32_t *enc_fps, uint32_t *hwenc_us)
 {
-	if (line == nullptr || hwenc_us == nullptr || channel < 0)
+	if (line == nullptr || channel < 0)
 		return false;
 	int id = -1;
+	unsigned send = 0;
+	unsigned enc = 0;
 	unsigned hwenc = 0;
 	if (std::sscanf(line,
-			"ID: %d No.SendFramePerSec: %*u No.EncFramePerSec: %*u HwEncTime: %u us",
-			&id, &hwenc) != 2)
+			"ID: %d No.SendFramePerSec: %u No.EncFramePerSec: %u HwEncTime: %u us",
+			&id, &send, &enc, &hwenc) != 4)
 		return false;
 	if (id != channel)
 		return false;
-	*hwenc_us = hwenc;
+	if (enc_fps != nullptr)
+		*enc_fps = enc;
+	if (hwenc_us != nullptr)
+		*hwenc_us = hwenc;
 	return true;
+}
+
+inline bool parse_venc_hwenc_us(const char *line, int channel, uint32_t *hwenc_us)
+{
+	return parse_venc_perf_line(line, channel, nullptr, hwenc_us);
 }
 
 inline uint32_t bound_frame_period_us(int input_fps)

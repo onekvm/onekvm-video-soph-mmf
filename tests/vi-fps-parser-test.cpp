@@ -35,5 +35,11 @@ int main()
 					&fps) ||
 	    fps != 120)
 		return 15;
+	/* 6.18 seq_printf uses tabs and %5d; FrameRate 0 must not glue to IntCnt. */
+	if (!parse_vi_chn_status_fps(
+		    "\t  0\t  0\t  Y\t    0\t\t 3100\t 3100\t    1\t\t    0\t1920\t1080\n",
+		    &fps) ||
+	    fps != 60)
+		return 16;
 	return 0;
 }

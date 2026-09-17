@@ -185,8 +185,8 @@ int close_jpeg_encoder(int channel)
 	return first_error;
 }
 
-int submit_jpeg_frame(int channel, uint8_t *data, int width, int height,
-	int pixel_format, int quality)
+int submit_jpeg_frame_timeout(int channel, uint8_t *data, int width, int height,
+	int pixel_format, int quality, int timeout_ms)
 {
 	if (data == nullptr || pixel_format != PIXEL_FORMAT_NV21)
 		return -1;
@@ -228,35 +228,47 @@ int submit_jpeg_frame(int channel, uint8_t *data, int width, int height,
 			frame_buffer_size(&send_frame->stVFrame));
 	}
 
-	const CVI_S32 result = CVI_VENC_SendFrame(channel, send_frame, 1000);
+	const CVI_S32 result = CVI_VENC_SendFrame(channel, send_frame, timeout_ms);
 	if (result == CVI_SUCCESS)
 		g_runtime.jpeg_frame_pending = true;
 	return result;
 }
 
-int read_jpeg_packet(int channel, uint8_t *destination, int capacity)
+int submit_jpeg_frame(int channel, uint8_t *data, int width, int height,
+	int pixel_format, int quality)
+{
+	return submit_jpeg_frame_timeout(
+		channel, data, width, height, pixel_format, quality, 1000);
+}
+
+int read_jpeg_packet_timeout(int channel, uint8_t *destination, int capacity,
+	int timeout_ms)
 {
 	if (destination == nullptr || capacity <= 0 ||
 		!g_runtime.jpeg_frame_pending || g_runtime.jpeg_stream_held)
 		return -1;
 
 	VENC_CHN_STATUS_S status{};
-	for (int elapsed_ms = 0;; ++elapsed_ms) {
+	int elapsed_ms = 0;
+	for (;; ++elapsed_ms) {
 		const CVI_S32 result = CVI_VENC_QueryStatus(channel, &status);
 		if (result != CVI_SUCCESS ||
 			status.u32CurPacks > MMF_VENC_INTERNAL_PACKS)
 			return -1;
 		if (status.u32CurPacks > 0)
 			break;
-		if (elapsed_ms >= 1000)
+		if (elapsed_ms >= timeout_ms)
 			return -1;
 		usleep(1000);
 	}
 
 	memset(g_runtime.jpeg_packs, 0, sizeof(g_runtime.jpeg_packs));
 	g_runtime.jpeg_stream.pstPack = g_runtime.jpeg_packs;
+	const int stream_timeout_ms = timeout_ms - elapsed_ms;
+	if (stream_timeout_ms <= 0)
+		return -1;
 	CVI_S32 result = CVI_VENC_GetStream(
-		channel, &g_runtime.jpeg_stream, 1000);
+		channel, &g_runtime.jpeg_stream, stream_timeout_ms);
 	if (result != CVI_SUCCESS)
 		return -1;
 	g_runtime.jpeg_frame_pending = false;
@@ -290,6 +302,11 @@ int read_jpeg_packet(int channel, uint8_t *destination, int capacity)
 		total += size;
 	}
 	return static_cast<int>(total);
+}
+
+int read_jpeg_packet(int channel, uint8_t *destination, int capacity)
+{
+	return read_jpeg_packet_timeout(channel, destination, capacity, 1000);
 }
 
 int release_jpeg_packet(int channel)

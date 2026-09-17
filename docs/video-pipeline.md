@@ -69,6 +69,14 @@ CVITEK 会把 H.264 PPS（H.265 还包括 VPS/SPS/PPS）拆成 IDR 前的独立 
 
 只改目标 FPS、码率或 QP 时不要拆 VI/VENC 通道：reader 在两次 `GetStream` 之间改
 `u32MaxBitRate` / `SetRcParam`，并补一次 IDR。不要 `close_encoder`。
+H.264 用 VBR（Coda 的 AVBR `MotionLv` 在 107 上一直是 0，静帧 QP 钳死、live 改
+`MaxBitRate` 也不会重算 target）。H.265 仍用 AVBR：`s32MinStillPercent=90`，
+`u32MaxStillQP=40`，`u32MotionSensitivity=100`，`u32StatTime=1`，
+`s32AvbrFrmLostOpen=0`。
+驱动 CreateChn 默认也曾是 `FrmLostOpen=1`、`MaxStillQP=1`、`ChangePos` 下限 50。
+不要把 `MaxStillQP` 设成 1。
+`MinStillPercent=5` / `MaxStillQP=40` 会把静帧压到 200–300 kbps，画面发糊。
+H.265 走 WAVE4 固件 RC（`cviRcEn=0` / `hostPicRCEnable=0`）。静帧/运动只在目标码率或 MaxQP 真变时发 `ENC_SET_PARA_CHANGE`（`W4_CMD_ENC_RC_TARGET_RATE`）。记录见 `docs/avbr-wave4-firmware-rc.md`。
 
 ## CSIBDG 与画面宽
 
@@ -87,18 +95,18 @@ HDMI 输入不是固定模式白名单：接受 `320×200` 到 `2880×1620` 范�
 
 ## HDMI 探测与 LT6911
 
-HDMI 重建、I2C、`/proc/cvitek/vi` 归 **watcher**。
+HDMI 重建和 LT6911 CSI 时序归 **watcher**。不要读 `/proc/cvitek/vi` 判断热插拔。
 
-- 活 1080 或更高、且媒体已确认 VI 在跑时，watcher 必须完全跳过 VI proc 和 LT6911。即使 1 Hz VI dump 最终也会拖死 CSI。
-- 无信号/未知状态时 1 s 探一次热插拔。
-- 只有接收器低于 1080 且有信号时才回到 100 ms，以便及时跟 800→1080。
+- 活路（已绑定消费者、`cached_signal==1`）完全跳过 LT6911；HDMI 在不在看 VENC 包。即使 1 Hz `80ee` 最终也会拖死 CSI。
+- 空闲没有 VI DMA。watcher 解析 LT6911 CSI（`0xc238`/`0xc206`），HDMI 计数只作回退。1 s 探一次热插拔；接收器低于 1080 时 100 ms，以便跟 800→1080。
 - 绑定编码器实际停帧后再进入恢复探测。
+- 半速锁例外：目标 ≥48 FPS 而 VENC `EncFramePerSec` 连续约 2 s 钉在一半（1080p60→30，720p120→60）时，AU 仍在 1.5 s 存活窗口内，watcher 不会探。用已有 2 Hz `venc` proc 的 `EncFramePerSec`，不要读 `vi`/`vi_dbg`。确认后 `reopen_source`（先 teardown 再 `lt6911_start_csi`）。同一目标帧率只重装一次，直到帧率回到目标附近；真 1080p30 源会闪一次然后停。
 
 开机 `open_source` 分两段写 LT6911，都在 **VI init 之前**。Core 重启不会重跑 `prepare-hdmi`，所以这是 MMF 的职责。不要合成「先 D283 再 805a」的单次 80ee 会话。
 
 1. `lt6911_kick_hdmi()`：开 `80ee`，写 `D283=0x11` 启动测量。只在打开 source 时做一次，不要从活 watcher 重复。
 2. `mmf::initialize()` 回收上一代 MMF owner。旧 VI 尚未清理时重编程 CSI 会在活 HDMI 上锁死 vendor 前端。
-3. `lt6911_start_csi()`：与 `prepare-hdmi` 相同，**先** `0x805a=0x80`、`0x8010=0x00`，等 100 ms，**再** `D283=0x11`，再等 50 ms，最后关 `80ee`。然后才 `start_capture_pipeline()` / `StartViChn`。
+3. `lt6911_start_csi()`：与 `prepare-hdmi` 相同，**先** `0x805a=0x80`、`0x8010=0x00`，等 100 ms，**再** `D283=0x11`，再等 50 ms，最后关 `80ee`。然后才 `start_capture_pipeline()` / `StartViChn`。空闲 `DisableChn` 之后再次 `EnableChn` 也要先走这一段。
 
 不要在 `StartViChn` 之后打 `0x805a=0x88`（CSIBDG 精确匹配，TX 掉到 0 会把 IntCnt 打成 0）。`reboot -f` 只复位 SoC，不复位 LT6911。
 
@@ -116,17 +124,19 @@ VI `FrameRate` 列开机约 1 秒是 0，不能单靠这一列判无信号。判
 
 ## 空闲与释放
 
-无消费者时 Core `videoLoop` 停在 `waitForConsumer`。空闲用 `CVI_VPSS_DisableChn` 停掉 scaler（`CVI_VIP_SCL`），保留 VPSS→VENC、WAVE4 worker 和唯一的用户态 VENC reader；reader 进入 discard 模式，以有界 fd poll 排空停 scaler 后的迟到 AU。实际解绑会让无输入的 worker 在最终 `StopRecvFrame` 时卡进厂商锁。VI 仍跑，用来判断有没有 HDMI。
+无消费者时 Core `videoLoop` 停在 `waitForConsumer`。空闲只 `CVI_VPSS_DisableChn` 停 scaler（`CVI_VIP_SCL`），保持 VI→VPSS 绑定和 VI DMA。`CVI_VI_DisableChn` / UnBind 会把 Preraw 打停，后续 `EnableChn`+`SetChnAttr`+`lt6911_start_csi` 仍拉不回 CSIBDG，活路会掉进无 HDMI 占位。保留 VPSS→VENC、WAVE4 worker 和唯一的用户态 VENC reader；reader 进入 discard 模式，以有界 fd poll 排空停 scaler 后的迟到 AU。实际解绑会让无输入的 worker 在最终 `StopRecvFrame` 时卡进厂商锁。重新绑定先 `EnableChn` VPSS。
+
+`unbind_h26x_from_capture` 只断开 SYS bind，不停 VI。空闲不要 `DisableChn`：在 SG2002 HDMI 上它不可逆。不要因为 CSI `0x0` + HDMI 仍是 1080 就 `reopen_source`（空闲停 scaler 和占位都会出现这个读数）。从空闲恢复只 `resume_vpss_channel`。
 
 重新绑定 VENC 时先清除旧的 `last_packet_ns` 和 `read_error`，再退出 discard 并强制 IDR；这样首帧沿用 `bound_since_ns` 的 1.5 秒 grace，不会把空闲前的旧时间戳误判为 VENC 停帧并切换 placeholder。Enable 失败则保持关闭并让 Core 重试，不要拆 VI。
 
 最终关闭先 join reader，再由同一个 MMF teardown 执行。`close_h26x_encoder` 的顺序是：
 
-1. 若仍绑定，先 `resume_vpss_channel`（停 scaler 时 `GetStream` 可能卡在厂商锁里，需要下一帧才能观察到 stop）
+1. 若仍绑定，先 `resume_vi_dma` + `resume_vpss_channel`（停 scaler / VI DMA 时 `GetStream` 可能卡在厂商锁里，需要下一帧才能观察到 stop）
 2. join reader
 3. 第一次 `StopRecvFrame`（SYS binding 仍启用；此时只把 channel 标成 STOP，bind kthread 还在）
 4. `pause_vpss_channel`
-5. Unbind
+5. Unbind（不停 VI DMA）
 6. 第二次 `StopRecvFrame`（唤醒并 join bind kthread，清掉 `currBindMode`）
 7. `ResetChn` / `DestroyChn`
 
@@ -172,6 +182,7 @@ Core 只做鉴权和成品 JPEG 转发。扩展不得创建第二个 MMF source�
 - 显式最大输入/输出为 **2880×1620@30**（4.67 MP、约 140 Mpixel/s），使用 **64 MiB** 视频 carveout：高于 2560×1440 时 VI 公共池两块 UYVY，VPSS 私有池仍三块。
 - 720p@120 需要源真出 1280×720@120（CEA VIC 47）；Cube 默认 EDID 不含该模式。
 - 活着的受支持模式不要探 LT6911 I2C。
+- CSI 半速（活包仍在、帧率是目标的一半）按上面 HDMI 节重装，不要当无信号占位，也不要为查帧率去 dump `/proc/cvitek/vi`。
 
 ## SRTP CryptoDMA
 

@@ -4,7 +4,6 @@
 
 #include "input_resolution_tracker.hpp"
 #include "mmf.hpp"
-#include "vi_fps_parser.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -52,6 +51,14 @@ static_assert(onekvm::hdmi_watch_interval(1, {800, 600}) ==
     kHDMIChangeGrowProbeInterval);
 static_assert(onekvm::hdmi_watch_interval(1, {1920, 1080}) ==
     std::chrono::duration_cast<std::chrono::milliseconds>(kNoSignalProbeInterval));
+static_assert(onekvm::hdmi_watch_interval(1, {1920, 1080}, false) ==
+    std::chrono::duration_cast<std::chrono::milliseconds>(kNoSignalProbeInterval));
+static_assert(onekvm::hdmi_watch_probe_due(1, {1920, 1080}, false));
+static_assert(onekvm::csi_half_rate_locked(60, 30));
+static_assert(!onekvm::csi_half_rate_locked(60, 59));
+static_assert(!onekvm::csi_half_rate_locked(30, 30));
+static_assert(onekvm::csi_half_rate_rearm_ready(4, false));
+static_assert(!onekvm::csi_half_rate_rearm_ready(4, true));
 static_assert(onekvm::hdmi_watch_interval(0, {}) ==
     std::chrono::duration_cast<std::chrono::milliseconds>(kNoSignalProbeInterval));
 static_assert(onekvm::hdmi_watch_interval(-1, {}) ==
@@ -67,9 +74,6 @@ ONEKVM_VIDEO_INTERNAL inline constexpr auto kVencLiveRecentWindow =
 ONEKVM_VIDEO_INTERNAL inline constexpr auto kVencFirstAuWindow =
     std::chrono::milliseconds(5000);
 ONEKVM_VIDEO_INTERNAL inline constexpr auto kInitialResolutionSampleDelay = std::chrono::milliseconds(20);
-/* Prefer /proc/cvitek/vi. Reading vi_dbg holds the VI debug handler and
-   can stall CSI (VIFPS drops to 0 while SOF/FE counters freeze). */
-ONEKVM_VIDEO_INTERNAL inline constexpr const char *kVideoStatusPath = "/proc/cvitek/vi";
 
 struct ONEKVM_VIDEO_INTERNAL Source {
     std::mutex mutex;
@@ -98,11 +102,16 @@ struct ONEKVM_VIDEO_INTERNAL Source {
     unsigned hdmi_oor_samples = 0;
     unsigned hdmi_follow_samples = 0;
     unsigned hdmi_rearm_samples = 0;
+    unsigned csi_half_rate_samples = 0;
+    bool csi_half_rate_rearmed = false;
+    int csi_half_rate_target = 0;
+    uint64_t last_half_rate_check_ns = 0;
     int capture_width = 0;
     int capture_height = 0;
     std::atomic<uint64_t> cached_input_size{0};
     std::atomic<int32_t> cached_input_fps{0};
     std::atomic<bool> out_of_range{false};
+    std::atomic<bool> capture_live{false};
     std::atomic<bool> hdmi_watch_stop{false};
     std::thread hdmi_watch;
 };
@@ -155,6 +164,9 @@ ONEKVM_VIDEO_INTERNAL int maybe_rebuild_for_hdmi_change(
     Source *source, char *error, uint32_t error_capacity);
 ONEKVM_VIDEO_INTERNAL int maybe_rebuild_for_hdmi_change_now(
     Source *source, char *error, uint32_t error_capacity);
+/* Caller holds encoder and source mutexes. 1 = rebuilt, 0 = no change, -1 = failed. */
+ONEKVM_VIDEO_INTERNAL int maybe_rearm_csi_half_rate(
+    Encoder *encoder, Source *source, char *error, uint32_t error_capacity);
 ONEKVM_VIDEO_INTERNAL int ensure_no_signal_nv21(
     Source *source, int width, int height,
     char *error, uint32_t error_capacity);

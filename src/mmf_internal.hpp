@@ -51,6 +51,19 @@ namespace onekvm::mmf {
 #define MMF_VENC_DEFAULT_INITIAL_QP	35
 #define MMF_VENC_DEFAULT_MIN_QP		20
 #define MMF_VENC_DEFAULT_MAX_QP		51
+/* AVBR target = MaxBitRate × motBitRatio × ChangePos.
+ * motBitRatio = minPercent + (100 - minPercent) × MotionLv / 255.
+ * H.264 Coda on 107 leaves MotionLv at 0 (picMotionLevel never
+ * updates), so this is always still-mode: target = Max × percent × 90%.
+ * MaxStillQP 32 locked ~3 Mbps / QP32 regardless of the UI ceiling, so
+ * the bitrate slider and window-drag both failed (HwEncTime ~9 ms).
+ * 90% tracks the slider like old VBR; 40 is the notes still-quality
+ * cap so 10% quality can actually raise QP. Do not set MaxStillQP=1.
+ * MotionSensitivity is cvi_enc_rc coring_gain/10 (vendor 100). */
+#define MMF_VENC_AVBR_MIN_STILL_PERCENT	90
+#define MMF_VENC_AVBR_MAX_STILL_QP	40
+#define MMF_VENC_AVBR_MOTION_SENSITIVITY	100
+#define MMF_VENC_AVBR_STAT_TIME		1
 
 #define MMF_VB_VI_ID			0
 
@@ -72,6 +85,7 @@ struct H26xEncoderState {
 	bool receiver_started;
 	bool stream_held;
 	bool bound_to_capture;
+	bool bound_to_vi;
 	uint8_t capture_group;
 	uint8_t capture_channel;
 	int fd;
@@ -84,6 +98,7 @@ struct H26xEncoderState {
 	uint64_t last_encode_ns;
 	uint64_t last_capture_ns;
 	uint64_t last_hw_sample_ns;
+	uint32_t last_enc_fps;
 };
 
 struct BufferPool {
@@ -100,11 +115,16 @@ struct RuntimeState {
 	bool vi_chn_is_inited[MMF_VI_MAX_CHN];
 	bool vi_chn_running[MMF_VI_MAX_CHN];
 	bool vi_bound_to_vpss;
+	bool vi_dma_running;
+	bool vi_chn_attr_valid;
+	VI_CHN_ATTR_S vi_chn_attr;
 	int vi_chn_pool_id[MMF_VI_MAX_CHN];
 	SIZE_S vi_size;
 	VIDEO_FRAME_INFO_S *vpss_user_frame[2];
 	int vpss_user_pool_id = -1;
 	int vpss_user_index;
+	const uint8_t *vpss_user_nv21_source = nullptr;
+	uint8_t vpss_user_prepared_mask = 0;
 	VIDEO_FRAME_INFO_S vi_frame[MMF_VI_MAX_CHN];
 	CaptureMapping vi_mappings[MMF_VI_MAX_CHN][MMF_VI_MAP_CACHE_SIZE];
 	uint8_t vi_map_next[MMF_VI_MAX_CHN];

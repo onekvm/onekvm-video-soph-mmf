@@ -5,7 +5,7 @@
 #include <cstring>
 
 namespace {
-constexpr const char *kLibrary = "/usr/lib/onekvm/video-backends/nanokvm-mmf.so";
+constexpr const char *kLibrary = "/usr/lib/onekvm/video-backends/soph-mmf.so";
 
 void fail(const char *operation, const char *detail) {
     std::fprintf(stderr, "%s: %s\n", operation, detail && detail[0] ? detail : "failed");

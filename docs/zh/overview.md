@@ -1,12 +1,14 @@
 # onekvm-video-soph-mmf
 
-[English](README.md) | 简体中文
+[English](../en/overview.md) | 简体中文
 
 OneKVM 面向 NanoKVM 的视频与 SRTP 加密硬件后端。它把 SG2002 多媒体链路接到
 OneKVM Backend ABI，并把厂商 MMF 实现留在独立动态库里，避免 `onekvm-server`
 直接依赖 NanoKVM 专用代码。
 
 设备侧构建必须走 `onekvm-distro` 的 OpenEmbedded/kas。禁止树外交叉编译。
+
+当前默认内核是 **Linux 6.18**。
 
 ## 主要功能
 
@@ -20,8 +22,7 @@ OneKVM Backend ABI，并把厂商 MMF 实现留在独立动态库里，避免 `o
 - 可通过 CVITEK SPACC 字符设备做可选 AES-GCM 加速。
 
 采集通路、CSIBDG、HDMI watcher、VENC reader、空闲释放与截图约定见
-[docs/video-pipeline.md](docs/video-pipeline.md)。ABI 见
-[docs/abi.md](docs/abi.md)。
+[video-pipeline.md](video-pipeline.md)。ABI 见 [abi.md](abi.md)。
 
 后端以单个动态库部署：
 
@@ -56,28 +57,38 @@ SG2002 采集一律走 VPSS phy 通道 1（`sc_v1`，最大宽 2880）。通道 
 carveout。该档受像素预算限制，最高 30 FPS。HDMI 源为 1280×720@120 时，720p
 可以到 120 FPS。
 
-## 驱动来源
+## 内核与驱动
+
+`onekvm-nanokvm` 默认内核是 Linux **6.18**（机型
+`PREFERRED_VERSION_linux-sophgo = "6.18%"`）。配方 `linux-sophgo_6.18.bb`
+从 [`onekvm/linux-6.18-sg200x`](https://github.com/onekvm/linux-6.18-sg200x)
+`main` 检出，`SRCREV` 为 `70c57e514d79cf98b6bb9122281c5e1986658ecf`。
+活设备常见 `uname` 为 `6.18.45-onekvm-preempt`。distro 里仍有 5.15 试验配方，
+**不是**默认。本仓库不另 pin 内核。
 
 用户态 MMF 库来自 Sophgo 官方源码，锁定在同一批 2026-06-30 版本。不使用
 Sipeed SDK 里预编译的 MMF 组件。
 
 | 组件 | 来源 | 锁定版本 |
 | --- | --- | --- |
+| Linux 内核 | [`onekvm/linux-6.18-sg200x`](https://github.com/onekvm/linux-6.18-sg200x) `main` | `70c57e514d79cf98b6bb9122281c5e1986658ecf`（配方 `linux-sophgo` 6.18） |
 | 视频用户态（`cvi_mpi`） | [`sophgo/cvi_mpi`](https://github.com/sophgo/cvi_mpi) `sg200x-dev` | `75c181ee6e25baca9729a4a9b415f36180b54f93` |
 | LT6911 传感器列表 | [`sophgo/SensorSupportList`](https://github.com/sophgo/SensorSupportList) `sg200x-dev` | `f064b02ba8a82746f3e87a2c5bb3bd683ff95db0` |
 | 编译 `cvi_mpi` 用的 osdrv | [`sophgo/osdrv`](https://github.com/sophgo/osdrv) `sg200x-dev` | `aa542c41df94f7bc656cb740f6622a5dca7dc403` |
 | 视频编解码固件 | [`sophgo/ramdisk`](https://github.com/sophgo/ramdisk) | `1ec8fcb63a358c17c369bac38eb42dc16f30a3bb` |
-| 视频内核模块 | 工作区 `osdrv-sg200x`（Sophgo osdrv + NanoKVM 补丁） | 配方 `onekvm-video-soph-mmf-modules` |
+| 视频内核模块 | 工作区 `osdrv-sg200x`（Sophgo osdrv + NanoKVM 补丁，含 6.18 API） | 配方 `onekvm-video-soph-mmf-modules` |
 
 OSDRV 模块包括 `soph_vcodec.ko`、`soph_jpeg.ko`、`soph_vi.ko`、`soph_vpss.ko`。
-bind 线程回收以及 5.15/6.18 兼容补丁在模块配方里，不在本仓库。运行中的 Linux
-由 `onekvm-distro`（`linux-sophgo`）选择，本仓库不锁定内核。
+bind 线程回收以及 6.18 兼容补丁在模块配方里，不在本仓库。
 
-不要把不同版本的 `cvi_mpi`、osdrv 或固件和此后端混用。必须一起安装的三个 IPK：
+不要把不同版本的内核模块、`cvi_mpi`、osdrv 或固件和此后端混用。必须一起安装的
+三个应用/多媒体 IPK：
 
 - `onekvm-video-soph-mmf-runtime` — `cvi_mpi` 用户态库
-- `onekvm-video-soph-mmf-modules` — `soph_*` 内核模块
+- `onekvm-video-soph-mmf-modules` — `soph_*` 内核模块（按 6.18 编）
 - `onekvm-video-soph-mmf` — 本后端 `.so`
+
+内核镜像本身走 `make kernel`，不包含在 `make package mmf` 里。
 
 ## 主机侧测试
 
@@ -143,16 +154,12 @@ Core 改用软件 AES-GCM。CryptoDMA 第一次 `ETIMEDOUT` 后进程内禁用 o
 
 ## 无信号画面资源
 
-源图片在 `assets/no-signal/`。改图后重新生成 NV21 数据：
+见 [no-signal.md](no-signal.md)。改图后：
 
 ```sh
 go run ./tools/pack_no_signal.go src/no_signal_frames.inc
 ```
 
-运行时不解析 PNG。绑定无信号静帧以 NV21 送进 VPSS
-（`render_no_signal_nv21` → `submit_vpss_nv21`），WAVE4 仍走平常绑定路径编码。
-`src/no_signal_h264.inc` 只给主机测试用。
-
 ## 许可证
 
-GNU General Public License v3.0，完整条款见 [LICENSE](LICENSE)。
+GNU General Public License v3.0，完整条款见 [LICENSE](../../LICENSE)。

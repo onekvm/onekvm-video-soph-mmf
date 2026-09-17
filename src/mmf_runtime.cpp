@@ -902,6 +902,9 @@ static CVI_S32 initialize_runtime(void)
 		goto _need_exit_sys_and_deinit_vi;
 	}
 
+	g_runtime.vi_dma_running = true;
+	g_runtime.vi_chn_attr_valid =
+		CVI_VI_GetChnAttr(0, 0, &g_runtime.vi_chn_attr) == CVI_SUCCESS;
 	g_runtime.vi_size.u32Width = stSize.u32Width;
 	g_runtime.vi_size.u32Height = stSize.u32Height;
 

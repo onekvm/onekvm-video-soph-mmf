@@ -249,7 +249,7 @@ void session_destroy(void *opaque) {
 const onekvm_crypto_backend_v1 kBackend = {
     sizeof(onekvm_crypto_backend_v1),
     ONEKVM_CRYPTO_BACKEND_ABI_V1,
-    "nanokvm-mmf",
+    "soph-mmf",
     "nanokvm CryptoDMA AES-GCM",
     // Do not advertise CONCURRENT_H265_VIDEO. SG2002 currently hard-locks
     // under concurrent H.265 VENC and CryptoDMA load, so Core must use its

@@ -44,6 +44,12 @@ int main()
 		0, 0, 0, 1, 0x68, 2,
 		0, 0, 0, 1, 0x65, 3,
 	};
+	if (h264_parameters.needs_parameter_prefix(
+		    h264_complete, sizeof(h264_complete), false))
+		return 37;
+	if (!h264_parameters.needs_parameter_prefix(
+		    sps_idr, sizeof(sps_idr), false))
+		return 38;
 	const std::vector<uint8_t> unchanged = h264_parameters.augment_keyframe(
 		h264_complete, sizeof(h264_complete), false);
 	if (unchanged.size() != sizeof(h264_complete)) return 18;
@@ -88,5 +94,12 @@ int main()
 	if (sps_w != 192 || sps_h != 64) return 28;
 	if (annexb_h264_sps_size(p_only, sizeof(p_only), &sps_w, &sps_h))
 		return 29;
+	if (!annexb_has_vcl(p_only, sizeof(p_only), false)) return 30;
+	if (!annexb_has_vcl(idr_long, sizeof(idr_long), false)) return 31;
+	if (annexb_has_vcl(h264_pps, sizeof(h264_pps), false)) return 32;
+	if (annexb_has_vcl(sps_1080, sizeof(sps_1080), false)) return 33;
+	if (!annexb_has_vcl(h265_p, sizeof(h265_p), true)) return 34;
+	if (annexb_has_vcl(h265_sps, sizeof(h265_sps), true)) return 35;
+	if (annexb_has_vcl(nullptr, 0, false)) return 36;
 	return 0;
 }

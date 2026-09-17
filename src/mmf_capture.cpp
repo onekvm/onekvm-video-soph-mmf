@@ -335,10 +335,11 @@ static int create_capture_channel(int ch, int width, int height, int format, int
 	 * Allocating only depth + producer (two blocks) starves VPSS whenever VENC
 	 * crosses a 16.7 ms frame boundary.  The worker then retries in a tight
 	 * loop, floods dmesg with "Can't acquire VB BLK", and collapses the stream
-	 * to roughly 20-35 FPS.  The third block absorbs that bounded overlap while
+	 * to roughly 20-35 FPS. The third block absorbs that bounded overlap while
 	 * u32Depth remains one, so it adds capacity without adding queue latency. */
-	const int pool_blocks = depth + MMF_VPSS_BORROWED_BLOCKS
-		+ MMF_VPSS_PRODUCER_BLOCKS;
+	const int pool_blocks = capture_pool_blocks(
+		static_cast<int>(g_runtime.vi_size.u32Width),
+		static_cast<int>(g_runtime.vi_size.u32Height));
 	pool_id = _create_vb_pool(name, pool_size_out, pool_blocks);
 	if (pool_id < 0) {
 		printf("[%s][%d]_create_vb_pool failed, id %d\n", __func__, __LINE__, pool_id);
@@ -376,10 +377,13 @@ static int create_capture_channel(int ch, int width, int height, int format, int
 	g_runtime.vi_chn_pool_id[ch] = pool_id;
 	g_runtime.vi_chn_is_inited[ch] = true;
 	g_runtime.vi_chn_running[ch] = true;
-	/* Keep VI alive for HDMI presence. Stop the scaler until VENC or a raw
-	   reader actually consumes frames. */
+	g_runtime.vi_dma_running = true;
+	/* HDMI presence is LT6911 CSI timing. Stop scaler and VI DMA until a
+	   bound encoder or snapshot actually consumes frames. */
 	if (pause_vpss_channel(ch) != 0)
 		SAMPLE_PRT("pause VPSS chn %d after open failed\n", ch);
+	if (pause_vi_dma() != 0)
+		SAMPLE_PRT("pause VI DMA after open failed\n");
 
 	return 0;
 _need_detach_vb_pool:
@@ -449,8 +453,10 @@ int close_capture_channel(int ch) {
 	}
 
 	CVI_S32 s32Ret = CVI_SUCCESS;
-	/* Teardown needs the scaler enabled; DisableChn while idle leaves VI Stop* hanging. */
+	/* Teardown needs the scaler and VI DMA enabled; DisableChn while idle
+	   leaves VI Stop* hanging. */
 	(void)resume_vpss_channel(ch);
+	(void)resume_vi_dma();
 	s32Ret = SAMPLE_COMM_VI_UnBind_VPSS(0, 0, 0);
 	if (s32Ret != CVI_SUCCESS) {
 		SAMPLE_PRT("vi unbind vpss failed. s32Ret: 0x%x !\n", s32Ret);
@@ -519,6 +525,57 @@ int resume_vpss_channel(int ch)
 	return 0;
 }
 
+int enable_vi_dma(void)
+{
+	if (g_runtime.vi_dma_running)
+		return 0;
+	/* DisableChn drops LT6911 CSI TX to 0x0. EnableChn alone does not
+	   restore it; the same 805a/8010/D283 sequence as open_source must
+	   run before the SoC RX starts again. StartViChn also SetChnAttr
+	   first: Disable clears the proc channel, so Enable without attr
+	   leaves VI CHN ATTR empty and Preraw at 0. */
+	if (lt6911_start_csi() != 0)
+		SAMPLE_PRT("LT6911 CSI re-arm before EnableChn failed\n");
+	if (g_runtime.vi_chn_attr_valid) {
+		const CVI_S32 attr = CVI_VI_SetChnAttr(0, 0, &g_runtime.vi_chn_attr);
+		if (attr != CVI_SUCCESS) {
+			SAMPLE_PRT("CVI_VI_SetChnAttr failed with %#x\n", attr);
+			return attr;
+		}
+	}
+	const CVI_S32 ret = CVI_VI_EnableChn(0, 0);
+	if (ret != CVI_SUCCESS && ret != CVI_ERR_VI_FAILED_NOT_DISABLED) {
+		SAMPLE_PRT("CVI_VI_EnableChn failed with %#x\n", ret);
+		return ret;
+	}
+	g_runtime.vi_dma_running = true;
+	std::fprintf(stderr, "OneKVM: VI DMA resumed\n");
+	return 0;
+}
+
+int pause_vi_dma(void)
+{
+	if (!g_runtime.vi_dma_running)
+		return 0;
+	/* Do not CVI_VI_DisableChn and do not UnBind VI→VPSS. On SG2002 HDMI
+	   both stop Preraw: IntCnt dies, EnableChn/SetChnAttr do not bring
+	   CSIBDG back, and the encoder falls through to the no-signal still.
+	   Idle parks the VPSS scaler only. */
+	return 0;
+}
+
+int resume_vi_dma(void)
+{
+	if (enable_vi_dma() != 0)
+		return -1;
+	return capture_use_vi_frames();
+}
+
+bool vi_dma_running(void)
+{
+	return g_runtime.vi_dma_running;
+}
+
 void park_unbound_vpss_channels()
 {
 	for (int ch = 0; ch < MMF_VI_MAX_CHN; ++ch) {
@@ -548,7 +605,8 @@ int reset_capture_channel(int ch, int width, int height, int format, int fps)
 	return open_capture_channel(out_ch, width, height, format, fps);
 }
 
-int acquire_capture_frame(int ch, void **data, int *len, int *width, int *height, int *format) {
+int acquire_capture_frame_timeout(int ch, void **data, int *len, int *width,
+	int *height, int *format, int timeout_ms) {
 	if (ch < 0 || ch >= MMF_VI_MAX_CHN) {
         printf("[%d] invalid ch %d\n", __LINE__, ch);
         return -1;
@@ -563,10 +621,12 @@ int acquire_capture_frame(int ch, void **data, int *len, int *width, int *height
     }
 
 	int ret = -1;
+	if (resume_vi_dma() != 0)
+		return -1;
 	if (resume_vpss_channel(ch) != 0)
 		return -1;
 	VIDEO_FRAME_INFO_S *frame = &g_runtime.vi_frame[ch];
-	if (CVI_VPSS_GetChnFrame(0, ch, frame, 1000) == 0) {
+	if (CVI_VPSS_GetChnFrame(0, ch, frame, timeout_ms) == 0) {
         int image_size = frame->stVFrame.u32Length[0]
                         + frame->stVFrame.u32Length[1]
 				        + frame->stVFrame.u32Length[2];
@@ -593,6 +653,10 @@ int acquire_capture_frame(int ch, void **data, int *len, int *width, int *height
 	return ret;
 }
 
+int acquire_capture_frame(int ch, void **data, int *len, int *width, int *height, int *format) {
+	return acquire_capture_frame_timeout(ch, data, len, width, height, format, 1000);
+}
+
 void release_capture_frame(int ch) {
 	if (ch < 0 || ch >= MMF_VI_MAX_CHN || !g_runtime.vi_chn_is_inited[ch])
 		return;
@@ -615,6 +679,8 @@ static void release_vpss_user_frames()
 		_destroy_vb_pool(static_cast<uint32_t>(g_runtime.vpss_user_pool_id));
 	g_runtime.vpss_user_pool_id = -1;
 	g_runtime.vpss_user_index = 0;
+	g_runtime.vpss_user_nv21_source = nullptr;
+	g_runtime.vpss_user_prepared_mask = 0;
 }
 
 int vpss_input_width()
@@ -729,10 +795,21 @@ int submit_vpss_nv21(const uint8_t *nv21, int width, int height)
 	const int index = g_runtime.vpss_user_index & 1;
 	VIDEO_FRAME_INFO_S *frame = g_runtime.vpss_user_frame[index];
 	VIDEO_FRAME_S *vf = &frame->stVFrame;
-	nv21_to_uyvy(nv21, width, height, vf->pu8VirAddr[0],
-		     static_cast<int>(vf->u32Stride[0]));
-	const CVI_U32 bytes = frame_buffer_size(vf);
-	CVI_SYS_IonFlushCache(vf->u64PhyAddr[0], vf->pu8VirAddr[0], bytes);
+	/* The no-signal NV21 asset is immutable until its source buffer or
+	 * geometry changes. Preparing both DMA buffers once avoids converting and
+	 * flushing the same multi-megabyte still image at the stream frame rate. */
+	if (g_runtime.vpss_user_nv21_source != nv21) {
+		g_runtime.vpss_user_nv21_source = nv21;
+		g_runtime.vpss_user_prepared_mask = 0;
+	}
+	const uint8_t prepared_bit = static_cast<uint8_t>(1u << index);
+	if ((g_runtime.vpss_user_prepared_mask & prepared_bit) == 0) {
+		nv21_to_uyvy(nv21, width, height, vf->pu8VirAddr[0],
+			     static_cast<int>(vf->u32Stride[0]));
+		const CVI_U32 bytes = frame_buffer_size(vf);
+		CVI_SYS_IonFlushCache(vf->u64PhyAddr[0], vf->pu8VirAddr[0], bytes);
+		g_runtime.vpss_user_prepared_mask |= prepared_bit;
+	}
 	vf->u32TimeRef += 2;
 	vf->u64PTS += 1;
 	const CVI_S32 ret = CVI_VPSS_SendFrame(0, frame, 1000);

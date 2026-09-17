@@ -1,8 +1,10 @@
-# OneKVM no-signal artwork
+# No-signal artwork
 
-These PNG files are deterministic screenshots of the approved Vue artwork in
-`onekvm-ui/src/components/NoSignal.vue`. They are captured at 1920×1080,
-1280×720 and 640×480, then converted to packed NV21 arrays by:
+English | [简体中文](../zh/no-signal.md)
+
+The PNGs under `assets/no-signal/` are deterministic screenshots of the
+approved Vue artwork in `onekvm-ui/src/components/NoSignal.vue`, captured at
+1920×1080, 1280×720 and 640×480. Convert them to packed NV21 with:
 
 ```sh
 go run ./tools/pack_no_signal.go src/no_signal_frames.inc

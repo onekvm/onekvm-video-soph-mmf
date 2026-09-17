@@ -1,6 +1,6 @@
 # onekvm-video-soph-mmf
 
-English | [简体中文](README.zh-CN.md)
+English | [简体中文](../zh/overview.md)
 
 NanoKVM video and SRTP crypto backend for OneKVM. It connects the SG2002
 multimedia pipeline to the OneKVM backend ABI and keeps vendor MMF code out of
@@ -8,6 +8,8 @@ multimedia pipeline to the OneKVM backend ABI and keeps vendor MMF code out of
 
 Device builds go through `onekvm-distro` OpenEmbedded/kas. Do not cross-compile
 this tree outside that distro.
+
+The default kernel is **Linux 6.18**.
 
 ## Features
 
@@ -24,9 +26,8 @@ this tree outside that distro.
 - Optional AES-GCM offload through the CVITEK SPACC character device.
 
 The Cube capture path, CSI bridge matching, HDMI watcher, VENC reader, idle
-teardown, and snapshot rules are in
-[docs/video-pipeline.md](docs/video-pipeline.md). ABI details are in
-[docs/abi.md](docs/abi.md).
+teardown, and snapshot rules are in [video-pipeline.md](video-pipeline.md).
+ABI details are in [abi.md](abi.md).
 
 The backend is one shared library:
 
@@ -64,30 +65,40 @@ which fits the NanoKVM 64 MiB video carveout. That profile is capped at 30 FPS
 by the pixel budget. 720p can run at 120 FPS when the HDMI source emits
 1280×720@120.
 
-## Driver stack
+## Kernel and drivers
+
+`onekvm-nanokvm` defaults to Linux **6.18**
+(`PREFERRED_VERSION_linux-sophgo = "6.18%"`). Recipe `linux-sophgo_6.18.bb`
+fetches [`onekvm/linux-6.18-sg200x`](https://github.com/onekvm/linux-6.18-sg200x)
+`main` at `70c57e514d79cf98b6bb9122281c5e1986658ecf`. Live devices commonly
+report `6.18.45-onekvm-preempt`. A 5.15 recipe still exists for experiments;
+it is **not** the default. This repository does not pin a kernel of its own.
 
 Userspace MMF libraries are built from official Sophgo sources, pinned as one
 2026-06-30 set. Prebuilt Sipeed MMF blobs are not used.
 
 | Part | Source | Pin |
 | --- | --- | --- |
+| Linux kernel | [`onekvm/linux-6.18-sg200x`](https://github.com/onekvm/linux-6.18-sg200x) `main` | `70c57e514d79cf98b6bb9122281c5e1986658ecf` (recipe `linux-sophgo` 6.18) |
 | Video userspace (`cvi_mpi`) | [`sophgo/cvi_mpi`](https://github.com/sophgo/cvi_mpi) `sg200x-dev` | `75c181ee6e25baca9729a4a9b415f36180b54f93` |
 | Sensor list (LT6911) | [`sophgo/SensorSupportList`](https://github.com/sophgo/SensorSupportList) `sg200x-dev` | `f064b02ba8a82746f3e87a2c5bb3bd683ff95db0` |
 | `cvi_mpi` build-time osdrv | [`sophgo/osdrv`](https://github.com/sophgo/osdrv) `sg200x-dev` | `aa542c41df94f7bc656cb740f6622a5dca7dc403` |
 | Video codec firmware | [`sophgo/ramdisk`](https://github.com/sophgo/ramdisk) | `1ec8fcb63a358c17c369bac38eb42dc16f30a3bb` |
-| Video kernel modules | workspace `osdrv-sg200x` (Sophgo osdrv plus NanoKVM patches) | recipe `onekvm-video-soph-mmf-modules` |
+| Video kernel modules | workspace `osdrv-sg200x` (Sophgo osdrv plus NanoKVM patches, including 6.18 API) | recipe `onekvm-video-soph-mmf-modules` |
 
 Kernel modules include `soph_vcodec.ko`, `soph_jpeg.ko`, `soph_vi.ko`, and
-`soph_vpss.ko`. Bind-thread teardown and 5.15/6.18 compatibility live in that
-module recipe, not in this repository. The running Linux image is selected by
-`onekvm-distro` (`linux-sophgo`); this repo does not pin a kernel.
+`soph_vpss.ko`. Bind-thread teardown and 6.18 compatibility live in that
+module recipe, not in this repository.
 
-Do not mix a different `cvi_mpi`, osdrv, or firmware revision with this
-backend. The three IPKs that must be installed together are:
+Do not mix a different kernel module set, `cvi_mpi`, osdrv, or firmware
+revision with this backend. The three application/multimedia IPKs that must
+be installed together are:
 
 - `onekvm-video-soph-mmf-runtime` — `cvi_mpi` libraries
-- `onekvm-video-soph-mmf-modules` — `soph_*` kernel modules
+- `onekvm-video-soph-mmf-modules` — `soph_*` kernel modules (built for 6.18)
 - `onekvm-video-soph-mmf` — this backend `.so`
+
+The kernel image itself is `make kernel`, not `make package mmf`.
 
 ## Host-side tests
 
@@ -160,16 +171,12 @@ process.
 
 ## No-signal assets
 
-Source PNGs are under `assets/no-signal/`. After changing them:
+See [no-signal.md](no-signal.md). After changing the artwork:
 
 ```sh
 go run ./tools/pack_no_signal.go src/no_signal_frames.inc
 ```
 
-The runtime does not parse PNG. Bound no-signal stills go through VPSS as
-NV21 (`render_no_signal_nv21` → `submit_vpss_nv21`); WAVE4 encodes them on
-the normal bind path. `src/no_signal_h264.inc` is only used by host tests.
-
 ## License
 
-GNU General Public License v3.0. See [LICENSE](LICENSE).
+GNU General Public License v3.0. See [LICENSE](../../LICENSE).

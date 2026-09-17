@@ -13,7 +13,7 @@
 namespace {
 
 using Clock = std::chrono::steady_clock;
-constexpr const char *kLibrary = "/usr/lib/onekvm/video-backends/nanokvm-mmf.so";
+constexpr const char *kLibrary = "/usr/lib/onekvm/video-backends/soph-mmf.so";
 
 struct Measurement {
     int captured = 0;

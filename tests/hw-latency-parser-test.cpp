@@ -18,11 +18,17 @@ int main()
 		return 3;
 
 	uint32_t hwenc = 0;
+	uint32_t enc_fps = 0;
 	if (!parse_venc_hwenc_us(
 		    "ID: 1 No.SendFramePerSec: 59 No.EncFramePerSec: 59 HwEncTime: 9188 us MaxHwEncTime: 9835 us EncodedFrame: 112014\n",
 		    1, &hwenc) ||
 		hwenc != 9188)
 		return 4;
+	if (!parse_venc_perf_line(
+		    "ID: 1\t No.SendFramePerSec: 30\t No.EncFramePerSec: 30\t HwEncTime: 9094 us\t MaxHwEncTime: 11890 us\t EncodedFrame: 23332\n",
+		    1, &enc_fps, &hwenc) ||
+		enc_fps != 30 || hwenc != 9094)
+		return 16;
 	if (parse_venc_hwenc_us(
 		    "ID: 1 No.SendFramePerSec: 59 No.EncFramePerSec: 59 HwEncTime: 9188 us MaxHwEncTime: 9835 us EncodedFrame: 112014\n",
 		    0, &hwenc))

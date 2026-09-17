@@ -38,63 +38,6 @@ std::pair<int, int> source_output_size(const Source *source) {
     return {static_cast<int>(out.width), static_cast<int>(out.height)};
 }
 
-bool read_vi_fps(Source *source, double *fps) {
-    if (source == nullptr || fps == nullptr)
-        return false;
-    FILE *file = std::fopen(kVideoStatusPath, "r");
-    if (file == nullptr) {
-        return false;
-    }
-    char line[256];
-    bool in_chn_status = false;
-    bool found = false;
-    while (std::fgets(line, sizeof(line), file) != nullptr) {
-        if (parse_vi_chn_status_header(line)) {
-            in_chn_status = true;
-            continue;
-        }
-        ViChnStatus status{};
-        if (in_chn_status && parse_vi_chn_status(line, &status)) {
-            const int last = source->last_vi_int_cnt.load(
-                std::memory_order_relaxed);
-            const uint64_t now = monotonic_ns();
-            if (!status.enabled) {
-                *fps = 0;
-            } else if (status.frame_rate > 0) {
-                *fps = static_cast<double>(status.frame_rate);
-            } else if (status.int_cnt > last) {
-                *fps = 60;
-            } else if (status.int_cnt > 0) {
-                /* Another caller already consumed this IntCnt sample.
-                   Kernel FrameRate stays 0 for a full second; treat a
-                   recent increment as live so we do not flash 无 HDMI. */
-                const uint64_t changed = source->last_vi_int_change_ns.load(
-                    std::memory_order_relaxed);
-                *fps = (changed != 0 && now >= changed &&
-                        now - changed < 1500000000ull)
-                    ? 60
-                    : 0;
-            } else {
-                *fps = 0;
-            }
-            if (status.int_cnt != last) {
-                source->last_vi_int_cnt.store(
-                    status.int_cnt, std::memory_order_relaxed);
-                source->last_vi_int_change_ns.store(
-                    now, std::memory_order_relaxed);
-            }
-            found = true;
-            break;
-        }
-        if (parse_vi_fps_line(line, fps)) {
-            found = true;
-            break;
-        }
-    }
-    std::fclose(file);
-    return found;
-}
-
 uint64_t monotonic_ns() {
     return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count());
@@ -145,21 +88,22 @@ bool read_hdmi_input(onekvm::InputResolution *resolution) {
     return csi.width != 0;
 }
 
-bool read_supported_input_resolution(onekvm::InputResolution *resolution) {
+bool read_supported_input_resolution(onekvm::InputResolution *resolution,
+                                     int fps) {
     onekvm::InputResolution value{};
     if (!read_hdmi_input(&value) ||
-        !onekvm::supported_input_resolution(value))
+        !onekvm::supported_input_rate(value, fps))
         return false;
     *resolution = value;
     return true;
 }
 
-onekvm::InputResolution initial_input_resolution() {
+onekvm::InputResolution initial_input_resolution(int fps) {
     onekvm::InputResolution first{};
     onekvm::InputResolution second{};
-    if (read_supported_input_resolution(&first)) {
+    if (read_supported_input_resolution(&first, fps)) {
         std::this_thread::sleep_for(kInitialResolutionSampleDelay);
-        if (read_supported_input_resolution(&second) && first == second)
+        if (read_supported_input_resolution(&second, fps) && first == second)
             return first;
     }
     return {1920, 1080};
@@ -177,10 +121,10 @@ bool stable_hdmi_input(onekvm::InputResolution *resolution) {
     return true;
 }
 
-bool stable_input_resolution(onekvm::InputResolution *resolution) {
+bool stable_input_resolution(onekvm::InputResolution *resolution, int fps) {
     onekvm::InputResolution value{};
     if (!stable_hdmi_input(&value) ||
-        !onekvm::supported_input_resolution(value))
+        !onekvm::supported_input_rate(value, fps))
         return false;
     *resolution = value;
     return true;
@@ -189,11 +133,14 @@ bool stable_input_resolution(onekvm::InputResolution *resolution) {
 int cached_signal_present(Source *source) {
     if (source == nullptr) return 0;
     const uint64_t now = monotonic_ns();
-    /* Do not treat recent VENC packets as HDMI. After a host mode change
-       the encoder can keep repeating the old geometry while VI IntCnt
-       is already frozen. */
+    /* Live HDMI is VENC packets, not VI IntCnt. After a host mode change
+       the encoder can keep repeating the old geometry; the packet path
+       marks cached_signal=0 and the watcher then probes CSI. */
 
     const int cached = source->cached_signal.load(std::memory_order_relaxed);
+    if (source->capture_live.load(std::memory_order_relaxed))
+        return cached;
+
     const auto probe_window = cached == 0
         ? kNoSignalProbeInterval : kSignalProbeInterval;
     const uint64_t probe_interval = static_cast<uint64_t>(
@@ -206,8 +153,10 @@ int cached_signal_present(Source *source) {
     if (source->signal_probe_running.test_and_set(std::memory_order_acquire)) {
         return source->cached_signal.load(std::memory_order_relaxed);
     }
-    double fps = 0;
-    const int present = read_vi_fps(source, &fps) ? (fps > 0 ? 1 : 0) : -1;
+    onekvm::InputResolution csi{};
+    onekvm::InputResolution hdmi{};
+    const int present = read_hdmi_timing(&csi, &hdmi)
+        ? (onekvm::csi_timing_present(csi, hdmi) ? 1 : 0) : -1;
     source->cached_signal.store(present, std::memory_order_relaxed);
     source->last_signal_probe_ns.store(monotonic_ns(), std::memory_order_relaxed);
     source->signal_probe_running.clear(std::memory_order_release);
@@ -265,6 +214,7 @@ void close_source(Source *source) {
     source->initialized = false;
     source->capture_width = 0;
     source->capture_height = 0;
+    source->capture_live.store(false, std::memory_order_relaxed);
     source->no_signal_frame.clear();
 }
 
@@ -276,16 +226,18 @@ int open_source(Source *source, const onekvm_video_source_config_v1 *config,
         return -1;
     }
     std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
-    /* After reboot the LT6911 HDMI RX stays idle until D283 is written
-       once.  Repeating that from the watcher disrupts CSI. Core restart
-       does not rerun prepare-hdmi, so arm CSI TX before VI init. */
-    (void)lt6911_kick_hdmi();
-    if (lt6911_start_csi() != 0) {
-        std::fprintf(stderr, "OneKVM: LT6911 CSI arm before VI failed\n");
+    if (pcie_hdmi_startup_reset() != 0) {
+        set_error(error, error_capacity, "reset PCIe HDMI bridge failed: %s",
+                  std::strerror(errno));
+        return -1;
     }
+    /* After reboot the LT6911 HDMI RX stays idle until D283 is written
+       once. Repeating that from the watcher disrupts CSI. */
+    (void)lt6911_kick_hdmi();
+    const int requested_fps = config->fps > 0 ? static_cast<int>(config->fps) : 60;
     const onekvm::InputResolution input = requested_input != nullptr &&
-        onekvm::supported_input_resolution(*requested_input)
-        ? *requested_input : initial_input_resolution();
+        onekvm::supported_input_rate(*requested_input, requested_fps)
+        ? *requested_input : initial_input_resolution(requested_fps);
     const auto output = onekvm::target_output_resolution(
         config->resolution, input);
     const int width = static_cast<int>(output.width);
@@ -299,6 +251,15 @@ int open_source(Source *source, const onekvm_video_source_config_v1 *config,
     }
     if (mmf::initialize() != 0) {
         set_error(error, error_capacity, "initialize failed");
+        return -1;
+    }
+    /* initialize() also reclaims stale MMF owners. Arm the LT6911 only after
+       that teardown, but before StartViChn: programming CSI while an old VI
+       generation is still active can deadlock the vendor frontend on a Core
+       restart. */
+    if (lt6911_start_csi() != 0) {
+        mmf::shutdown();
+        set_error(error, error_capacity, "LT6911 CSI arm before VI failed");
         return -1;
     }
     if (mmf::start_capture_pipeline() != 0) {
@@ -315,10 +276,9 @@ int open_source(Source *source, const onekvm_video_source_config_v1 *config,
     }
     mmf::set_capture_mirror(channel, false);
     mmf::set_capture_flip(channel, false);
-    const int requested_fps = config->fps > 0 ? static_cast<int>(config->fps) : 60;
-    const int fps = onekvm::mmf::clamp_output_fps(
+    const int fps = onekvm::mmf::clamp_pipeline_fps(
         requested_fps, static_cast<int>(input.width),
-        static_cast<int>(input.height));
+        static_cast<int>(input.height), width, height);
     int result = mmf::open_capture_channel(channel, width, height, kMMFNV21, fps);
     if (result != 0) {
         mmf::stop_capture_pipeline();
@@ -340,11 +300,14 @@ int open_source(Source *source, const onekvm_video_source_config_v1 *config,
     source->hdmi_blanking_samples = 0;
     source->hdmi_oor_samples = 0;
     source->hdmi_follow_samples = 0;
+    source->hdmi_rearm_samples = 0;
+    source->csi_half_rate_samples = 0;
+    source->last_half_rate_check_ns = 0;
     source->out_of_range.store(false, std::memory_order_relaxed);
     onekvm::InputResolution probed{};
     if (read_hdmi_input(&probed)) {
         source->reported_input = probed;
-        if (onekvm::classify_hdmi_input(probed) ==
+        if (onekvm::classify_hdmi_input(probed, requested_fps) ==
             onekvm::HdmiInputClass::OutOfRange) {
             source->out_of_range.store(true, std::memory_order_relaxed);
             std::fprintf(stderr,
@@ -391,11 +354,12 @@ int rebuild_for_hdmi_timing(Source *source, bool force_probe, char *error,
 
     /* VENC last_frame_ns is not HDMI liveness. GetStream can stall while
        CSI is still running; probing LT6911 then interrupts a live frontend.
-       After a host mode change IntCnt freezes, so a fresh VI sample is the
-       only safe gate. */
-    double fps = 0;
-    const bool recent_frames = read_vi_fps(source, &fps) && fps > 0;
-    source->cached_signal.store(recent_frames ? 1 : 0, std::memory_order_relaxed);
+       Idle has no VI DMA, so CSI timing is the presence signal. A live
+       bound path skips I2C while cached_signal stays 1. */
+    const bool capture_live = source->capture_live.load(
+        std::memory_order_relaxed);
+    const bool recent_frames = capture_live &&
+        source->cached_signal.load(std::memory_order_relaxed) == 1;
     source->last_signal_probe_ns.store(monotonic_ns(), std::memory_order_relaxed);
 
     /* A live supported mode does not need I2C. Touching 80ee here is what
@@ -426,6 +390,10 @@ int rebuild_for_hdmi_timing(Source *source, bool force_probe, char *error,
         return 0;
 
     hdmi = onekvm::infer_hdmi_mode(hdmi);
+    if (!capture_live)
+        source->cached_signal.store(
+            onekvm::csi_timing_present(csi, hdmi) ? 1 : 0,
+            std::memory_order_relaxed);
     if (hdmi.width == 0)
         source->hdmi_blanking_samples++;
     else
@@ -437,9 +405,11 @@ int rebuild_for_hdmi_timing(Source *source, bool force_probe, char *error,
         publish_input_format(source);
     }
 
-    const auto kind = onekvm::classify_hdmi_input(reported);
+    const int configured_fps = source->config.fps > 0
+        ? static_cast<int>(source->config.fps) : 60;
+    const auto kind = onekvm::classify_hdmi_input(reported, configured_fps);
     if (kind == onekvm::HdmiInputClass::OutOfRange) {
-        if (onekvm::supported_input_resolution(csi)) {
+        if (onekvm::supported_input_rate(csi, configured_fps)) {
             source->hdmi_oor_samples = 0;
             source->out_of_range.store(false, std::memory_order_relaxed);
             return 0;
@@ -451,8 +421,7 @@ int rebuild_for_hdmi_timing(Source *source, bool force_probe, char *error,
                          "OneKVM: HDMI input %ux%u is out of range\n",
                          reported.width, reported.height);
         }
-        if (current == onekvm::kMaxViReceiver)
-            return 0;
+        return 0;
     } else {
         source->hdmi_oor_samples = 0;
     }
@@ -464,15 +433,26 @@ int rebuild_for_hdmi_timing(Source *source, bool force_probe, char *error,
         receiver = onekvm::kMaxViReceiver;
     source->hdmi_follow_samples = onekvm::next_hdmi_follow_samples(
         recent_frames, current, hdmi, source->hdmi_follow_samples);
+    /* CSI 0x0 while HDMI still reports the current 1080 is normal when
+       VPSS is parked (idle) and after placeholder unbinds VI. Do not reopen. */
+    source->hdmi_rearm_samples = onekvm::next_hdmi_csi_rearm_samples(
+        recent_frames, csi, hdmi, current, source->hdmi_rearm_samples,
+        false);
     if (!onekvm::should_rebuild_vi_receiver(
             current, receiver, csi, hdmi, recent_frames)) {
-        if (kind == onekvm::HdmiInputClass::Supported)
-            source->out_of_range.store(false, std::memory_order_relaxed);
-        return 0;
-    }
-    if (onekvm::resolution_pixels(receiver) < onekvm::resolution_pixels(current) &&
-        !onekvm::hdmi_stalled_follow_ready(
-            csi, receiver, source->hdmi_follow_samples)) {
+        if (!onekvm::hdmi_csi_rearm_ready(source->hdmi_rearm_samples)) {
+            if (kind == onekvm::HdmiInputClass::Supported)
+                source->out_of_range.store(false, std::memory_order_relaxed);
+            return 0;
+        }
+        if (source->last_recovery.time_since_epoch().count() != 0 &&
+            now - source->last_recovery < kRecoveryInterval)
+            return 0;
+        receiver = current;
+    } else if (onekvm::resolution_pixels(receiver) <
+                   onekvm::resolution_pixels(current) &&
+               !onekvm::hdmi_stalled_follow_ready(
+                   csi, receiver, source->hdmi_follow_samples)) {
         if (kind == onekvm::HdmiInputClass::Supported)
             source->out_of_range.store(false, std::memory_order_relaxed);
         return 0;
@@ -480,16 +460,25 @@ int rebuild_for_hdmi_timing(Source *source, bool force_probe, char *error,
     source->out_of_range.store(false, std::memory_order_relaxed);
 
     source->failures = 0;
-    source->last_recovery = now;
-    std::fprintf(stderr,
-                 "OneKVM: HDMI timing CSI %ux%u HDMI %ux%u; grow/shrink VI %ux%u -> %ux%u\n",
-                 csi.width, csi.height, hdmi.width, hdmi.height,
-                 current.width, current.height,
-                 receiver.width, receiver.height);
+    if (receiver == current) {
+        std::fprintf(stderr,
+                     "OneKVM: HDMI timing CSI %ux%u HDMI %ux%u; rearm VI %ux%u\n",
+                     csi.width, csi.height, hdmi.width, hdmi.height,
+                     current.width, current.height);
+    } else {
+        std::fprintf(stderr,
+                     "OneKVM: HDMI timing CSI %ux%u HDMI %ux%u; grow/shrink VI %ux%u -> %ux%u\n",
+                     csi.width, csi.height, hdmi.width, hdmi.height,
+                     current.width, current.height,
+                     receiver.width, receiver.height);
+    }
     const int reopen = reopen_source_for_input(
         source, receiver, error, error_capacity);
     if (reopen != 0)
         return -1;
+    /* open_source clears last_recovery. Stamp after reopen so a stale
+       I2C 1080 cannot HPD-loop every three watcher samples. */
+    source->last_recovery = std::chrono::steady_clock::now();
     set_error(error, error_capacity,
               "HDMI input changed to %ux%u; pipeline rebuilt",
               receiver.width, receiver.height);
@@ -506,6 +495,68 @@ int maybe_rebuild_for_hdmi_change_now(Source *source, char *error,
     return rebuild_for_hdmi_timing(source, true, error, error_capacity);
 }
 
+int maybe_rearm_csi_half_rate(Encoder *encoder, Source *source,
+                              char *error, uint32_t error_capacity) {
+    if (encoder == nullptr || source == nullptr)
+        return 0;
+    if (encoder->placeholder_frames || !encoder->initialized ||
+        encoder->channel < kFirstVENCChannel)
+        return 0;
+    if (!source->capture_live.load(std::memory_order_relaxed))
+        return 0;
+    const uint64_t now_ns = monotonic_ns();
+    const uint64_t interval_ns = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            onekvm::kCsiHalfRateSampleInterval).count());
+    if (source->last_half_rate_check_ns != 0 &&
+        now_ns >= source->last_half_rate_check_ns &&
+        now_ns - source->last_half_rate_check_ns < interval_ns)
+        return 0;
+    source->last_half_rate_check_ns = now_ns;
+
+    const int fps = encoder->config.fps > 0 ? encoder->config.fps : 60;
+    const int target = mmf::clamp_output_fps(
+        fps, encoder->width, encoder->height);
+    const int enc_fps = static_cast<int>(mmf::h26x_last_enc_fps(encoder->channel));
+    if (target != source->csi_half_rate_target) {
+        source->csi_half_rate_target = target;
+        source->csi_half_rate_rearmed = false;
+        source->csi_half_rate_samples = 0;
+    }
+    if (onekvm::csi_half_rate_recovered(target, enc_fps)) {
+        source->csi_half_rate_samples = 0;
+        source->csi_half_rate_rearmed = false;
+        return 0;
+    }
+    source->csi_half_rate_samples = onekvm::next_csi_half_rate_samples(
+        target, enc_fps, source->csi_half_rate_samples,
+        source->csi_half_rate_rearmed);
+    if (!onekvm::csi_half_rate_rearm_ready(
+            source->csi_half_rate_samples, source->csi_half_rate_rearmed))
+        return 0;
+
+    const auto now = std::chrono::steady_clock::now();
+    if (source->last_recovery.time_since_epoch().count() != 0 &&
+        now - source->last_recovery < kRecoveryInterval)
+        return 0;
+
+    onekvm::InputResolution receiver = source->input_resolution.current();
+    if (receiver.width == 0 || receiver.height == 0)
+        receiver = {1920, 1080};
+    std::fprintf(stderr,
+                 "OneKVM: CSI half-rate EncFramePerSec=%d target=%d; rearm VI %ux%u\n",
+                 enc_fps, target, receiver.width, receiver.height);
+    const int reopen = reopen_source_for_input(
+        source, receiver, error, error_capacity);
+    source->last_recovery = std::chrono::steady_clock::now();
+    if (reopen != 0)
+        return -1;
+    source->csi_half_rate_rearmed = true;
+    set_error(error, error_capacity,
+              "CSI half-rate %d/%d fps; pipeline rebuilt", enc_fps, target);
+    return 1;
+}
+
 void hdmi_watch_sleep(Source *source, std::chrono::milliseconds total)
 {
     auto remaining = total;
@@ -520,10 +571,31 @@ void hdmi_watch_sleep(Source *source, std::chrono::milliseconds total)
 
 void hdmi_watch_loop(Source *source) {
     while (!source->hdmi_watch_stop.load(std::memory_order_relaxed)) {
+        const uint64_t packed = source->cached_input_size.load(
+            std::memory_order_acquire);
+        const onekvm::InputResolution current{
+            static_cast<uint32_t>(packed >> 32),
+            static_cast<uint32_t>(packed & 0xffffffffu),
+        };
         hdmi_watch_sleep(source, onekvm::hdmi_watch_interval(
-            source->cached_signal.load(std::memory_order_relaxed)));
+            source->cached_signal.load(std::memory_order_relaxed),
+            current,
+            source->capture_live.load(std::memory_order_relaxed)));
         if (source->hdmi_watch_stop.load(std::memory_order_relaxed))
             break;
+
+        /* At 1080p and above there is no receiver-grow transition to catch.
+           Once a bound encoder has proved the path live, stay completely off
+           LT6911: even a 1 Hz 80ee access eventually stalls CSI. Idle probes
+           CSI I2C instead of /proc/cvitek/vi. A bound encoder detects a real
+           stop and changes cached_signal before asking for recovery. */
+        const int cached_signal = source->cached_signal.load(
+            std::memory_order_relaxed);
+        if (!onekvm::hdmi_watch_probe_due(
+                cached_signal, current,
+                source->capture_live.load(std::memory_order_relaxed)))
+            continue;
+
         char error[256];
         std::lock_guard<std::mutex> lock(source->mutex);
         if (source->hdmi_watch_stop.load(std::memory_order_relaxed))
@@ -543,9 +615,8 @@ void hdmi_watch_loop(Source *source) {
             }
             continue;
         }
-        /* Do not read /proc/cvitek/vi here. maybe_rebuild already samples
-           it; a second read in the same tick sees a flat IntCnt and used
-           to mark HDMI missing while VENC was still at 60fps. */
+        /* Idle CSI probes belong here. maybe_rebuild also reads LT6911;
+           do not fopen /proc/cvitek/vi in the same tick. */
         const bool need_fast =
             !onekvm::supported_input_resolution(
                 source->input_resolution.current()) &&
@@ -618,7 +689,11 @@ int32_t source_reset(void *opaque, const onekvm_video_source_config_v1 *config,
         config->resolution, source->input_resolution.current());
     const int width = static_cast<int>(output.width);
     const int height = static_cast<int>(output.height);
-    const int fps = config->fps > 0 ? static_cast<int>(config->fps) : 60;
+    const int fps = onekvm::mmf::clamp_pipeline_fps(
+        config->fps > 0 ? static_cast<int>(config->fps) : 60,
+        static_cast<int>(source->input_resolution.current().width),
+        static_cast<int>(source->input_resolution.current().height),
+        width, height);
     std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
     int result = mmf::reset_capture_channel(
         source->channel, width, height, kMMFNV21, fps);

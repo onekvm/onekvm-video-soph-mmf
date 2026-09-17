@@ -3,6 +3,7 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 
 namespace onekvm::video_backend {
 namespace {
@@ -28,7 +29,26 @@ bool valid_edid(const uint8_t *data, uint32_t size)
 
 EdidBoardInfo &board()
 {
-    static EdidBoardInfo info = probe_edid_board();
+    /* First probe can run before HDMI/I2C is ready (status polls start early).
+       Retry while chip is still unknown so chip_id is not stuck empty forever. */
+    static std::mutex mu;
+    static EdidBoardInfo info;
+    static bool initialized = false;
+    static int chip_retries = 0;
+    constexpr int kMaxChipRetries = 20;
+    std::lock_guard<std::mutex> lock(mu);
+    if (!initialized) {
+        info = probe_edid_board();
+        initialized = true;
+    } else if (info.chip == Lt6911Chip::Unknown && chip_retries < kMaxChipRetries) {
+        ++chip_retries;
+        EdidBoardInfo again = probe_edid_board();
+        if (again.chip != Lt6911Chip::Unknown ||
+            (info.board == NanoKVMBoard::Unknown &&
+             again.board != NanoKVMBoard::Unknown)) {
+            info = again;
+        }
+    }
     return info;
 }
 
@@ -91,15 +111,20 @@ int32_t edid_set(const onekvm_video_edid_blob_v1 *edid,
         return -1;
     }
     std::lock_guard<std::recursive_mutex> lock(g_mmf_mutex);
-    if (info.board == NanoKVMBoard::PCIe)
-        (void)pcie_hdmi_reset();
+    if (info.board == NanoKVMBoard::PCIe && pcie_hdmi_reset() != 0) {
+        set_error(error, error_capacity, "reset PCIe HDMI before EDID write");
+        return -1;
+    }
     if (lt6911_edid_write(edid->data, edid->size) != 0) {
         set_error(error, error_capacity, "write HDMI EDID");
         return -1;
     }
     (void)persist_active_edid(edid->data, edid->size);
     if (info.board == NanoKVMBoard::PCIe) {
-        (void)pcie_hdmi_reset();
+        if (pcie_hdmi_reset() != 0) {
+            set_error(error, error_capacity, "reset PCIe HDMI after EDID write");
+            return -1;
+        }
         apply->apply_required = ONEKVM_VIDEO_EDID_APPLY_HOTPLUG;
     } else {
         apply->apply_required = ONEKVM_VIDEO_EDID_APPLY_REBOOT;

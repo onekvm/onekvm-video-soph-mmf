@@ -13,7 +13,7 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 constexpr const char *kLibrary =
-    "/usr/lib/onekvm/video-backends/nanokvm-mmf.so";
+    "/usr/lib/onekvm/video-backends/soph-mmf.so";
 
 bool read_until_packet(const onekvm_video_backend_v1 *api, void *encoder,
                        std::chrono::seconds timeout, bool *key_frame) {
@@ -132,7 +132,33 @@ int main(int argc, char **argv) {
             ++failures;
             break;
         }
-        std::printf("cycle=%d key_frame=1\n", cycle + 1);
+        if (api->encoder_unbind_source(
+                encoder, error, sizeof(error)) != 0) {
+            std::fprintf(stderr, "cycle %d unbind: %s\n", cycle + 1, error);
+            ++failures;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        if (api->encoder_bind_source(
+                encoder, source, error, sizeof(error)) != 0) {
+            std::fprintf(stderr, "cycle %d rebind: %s\n", cycle + 1, error);
+            ++failures;
+            break;
+        }
+        key_frame = false;
+        if (!read_until_packet(
+                api, encoder, std::chrono::seconds(3), &key_frame)) {
+            ++failures;
+            break;
+        }
+        if (!key_frame) {
+            std::fprintf(stderr,
+                         "cycle %d rebound with a non-IDR packet\n", cycle + 1);
+            ++failures;
+            break;
+        }
+        std::printf("cycle=%d stalled_key_frame=1 rebound_key_frame=1\n",
+                    cycle + 1);
         std::fflush(stdout);
     }
 

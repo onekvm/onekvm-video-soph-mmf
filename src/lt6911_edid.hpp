@@ -43,6 +43,7 @@ EdidBoardInfo probe_edid_board();
 int lt6911_edid_read(uint8_t *data, size_t size);
 int lt6911_edid_write(const uint8_t *data, size_t size);
 int pcie_hdmi_reset();
+int pcie_hdmi_startup_reset();
 int persist_active_edid(const uint8_t *data, size_t size);
 int restore_active_edid_if_needed();
 

@@ -54,18 +54,8 @@ static int valid_pipe(VI_PIPE pipe)
 
 static int supported_active_size(uint32_t width, uint32_t height)
 {
-	static const uint16_t sizes[][2] = {
-		{2560, 1440}, {1920, 1080}, {1600, 900}, {1440, 1080}, {1440, 900},
-		{1280, 1024}, {1280, 960}, {1280, 800}, {1280, 720},
-		{1152, 864}, {1024, 768}, {800, 600}, {640, 480},
-	};
-	size_t i;
-
-	for (i = 0; i < sizeof(sizes) / sizeof(sizes[0]); ++i) {
-		if (width == sizes[i][0] && height == sizes[i][1])
-			return 1;
-	}
-	return 0;
+	return width >= 320 && height >= 200 && width <= 4096 && height <= 2160 &&
+		(width & 1u) == 0 && (height & 1u) == 0;
 }
 
 /* LT6911C HDMI/D counters are half-width on some firmware and full-width on
@@ -73,15 +63,14 @@ static int supported_active_size(uint32_t width, uint32_t height)
    still works, but do not invent 3840 when the register already holds 1920. */
 static void normalize_half_or_full_width(uint32_t *width, uint32_t height)
 {
-	uint32_t doubled;
-
 	if (width == NULL)
 		return;
-	doubled = *width * 2;
-	if (supported_active_size(doubled, height)) {
-		*width = doubled;
-		return;
-	}
+	if ((*width == 960 && height == 1080) ||
+	    (*width == 1280 && height == 1440) ||
+	    (*width == 1920 && height == 2160) ||
+	    (*width == 640 && height == 720) ||
+	    (*width == 400 && height == 600))
+		*width *= 2;
 }
 
 static int plausible_active_size(uint32_t width, uint32_t height)
@@ -467,7 +456,7 @@ int lt6911_start_csi(void)
 	pthread_mutex_unlock(&g_i2c_lock);
 	if (cleanup != CVI_SUCCESS)
 		return CVI_FAILURE;
-	fprintf(stderr, "OneKVM: LT6911 CSI armed before VI init\n");
+	fprintf(stderr, "OneKVM: LT6911 CSI armed\n");
 	return CVI_SUCCESS;
 error:
 	(void)lt6911_i2c_write(pipe, 0x80ee, 0x00);

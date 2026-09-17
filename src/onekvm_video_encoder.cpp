@@ -520,6 +520,7 @@ int bind_encoder_to_source_locked(Encoder *encoder, Source *source,
     }
     encoder->source_bound = true;
     encoder->bound_source = source;
+    source->capture_live.store(true, std::memory_order_relaxed);
     encoder->frame_pending = false;
     encoder->prepared_size = 0;
     encoder->prepared_pts_ns = 0;
@@ -590,8 +591,12 @@ int encode_bound_placeholder(Encoder *encoder, Source *source,
         encoder->placeholder_idr_tries = 0;
         encoder->placeholder_logged = false;
         /* 1080p watcher skips LT6911 while cached_signal==1. Mark missing
-           so it can rearm CSI after a real HDMI loss. */
+           so it can rearm CSI after a real HDMI loss. A new live episode
+           may half-rate lock again, so forget the previous CSI rearm. */
         source->cached_signal.store(0, std::memory_order_relaxed);
+        source->csi_half_rate_rearmed = false;
+        source->csi_half_rate_samples = 0;
+        source->last_half_rate_check_ns = 0;
     }
     if (encoder->channel < 0 || !encoder->initialized || !encoder->source_bound) {
         set_error(error, error_capacity, "placeholder requires a bound VENC channel");
@@ -767,6 +772,18 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
             }
             encoder->packet_borrowed = false;
         }
+    }
+    if (!encoder->placeholder_frames) {
+        const int rebuilt = maybe_rearm_csi_half_rate(
+            encoder, source, error, error_capacity);
+        if (rebuilt != 0) {
+            encoder->placeholder_frames = false;
+            invalidate_stale_encoder(encoder);
+            return -1;
+        }
+    }
+    {
+        std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
         if (encoder->request_keyframe) {
             /* Only mark the reader. CVI_VENC_RequestIDR shares the channel
                ioctl lock with GetStream and must stay off the video loop. */
@@ -936,7 +953,7 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
         encoder->request_keyframe = true;
         {
             std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
-            (void)mmf::capture_use_vi_frames();
+            (void)mmf::resume_vi_dma();
             (void)mmf::bind_h26x_to_capture(encoder->channel, 0, source->channel);
         }
         if (bind_encoder_to_source_locked(
@@ -965,7 +982,7 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
         encoder->placeholder_frames = false;
         {
             std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
-            (void)mmf::capture_use_vi_frames();
+            (void)mmf::resume_vi_dma();
         }
         invalidate_stale_encoder(encoder);
         return -1;
@@ -1004,6 +1021,7 @@ int32_t encoder_unbind_source(void *opaque, char *error, uint32_t error_capacity
     if (!encoder->source_bound && encoder->bound_source == nullptr) {
         std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
         mmf::park_unbound_vpss_channels();
+        (void)mmf::pause_vi_dma();
         return 0;
     }
     /* Keep the configured channel, VPSS binding, and vendor receive worker
@@ -1018,6 +1036,9 @@ int32_t encoder_unbind_source(void *opaque, char *error, uint32_t error_capacity
         set_error(error, error_capacity, "park VPSS/VENC capture failed");
         return -1;
     }
+    if (encoder->bound_source != nullptr)
+        encoder->bound_source->capture_live.store(
+            false, std::memory_order_relaxed);
     encoder->source_bound = false;
     encoder->frame_pending = false;
     encoder->packet_borrowed = false;
@@ -1416,7 +1437,7 @@ const onekvm_video_format_v1 kFormats[] = {
 const onekvm_video_backend_v1 kBackend = {
     sizeof(onekvm_video_backend_v1),
     ONEKVM_VIDEO_BACKEND_ABI_V1,
-    "nanokvm-mmf",
+    "soph-mmf",
     ONEKVM_VIDEO_CODEC_MASK_AUTO | ONEKVM_VIDEO_CODEC_MASK_H264 |
         ONEKVM_VIDEO_CODEC_MASK_H265 | ONEKVM_VIDEO_CODEC_MASK_MJPEG,
     ONEKVM_VIDEO_FEATURE_SIGNAL_PRESENT | ONEKVM_VIDEO_FEATURE_KEYFRAME |

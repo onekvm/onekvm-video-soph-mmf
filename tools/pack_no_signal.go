@@ -1,5 +1,5 @@
 // pack_no_signal converts the approved Vue-rendered PNG artwork into compact
-// PackBits-style NV21 byte arrays consumed directly by nanokvm-mmf.so.
+// PackBits-style NV21 byte arrays consumed directly by soph-mmf.so.
 package main
 
 import (

@@ -28,7 +28,7 @@ static int load_function(void *handle, const char *name,
 int main(int argc, char **argv)
 {
 	const char *library = argc > 1 ? argv[1]
-		: "/usr/lib/onekvm/video-backends/nanokvm-mmf.so";
+		: "/usr/lib/onekvm/video-backends/soph-mmf.so";
 	int samples = argc > 2 ? atoi(argv[2]) : 5;
 	void *handle = dlopen(library, RTLD_NOW | RTLD_LOCAL);
 	get_input_size_fn get_input_size;
