@@ -5,14 +5,12 @@
 #include <atomic>
 #include <cerrno>
 #include <chrono>
-#include <climits>
 #include <condition_variable>
 #include <cstring>
 #include <deque>
-#include <linux/futex.h>
 #include <mutex>
 #include <poll.h>
-#include <sys/syscall.h>
+#include <sys/eventfd.h>
 #include <thread>
 #include <unistd.h>
 #include <vector>
@@ -49,7 +47,7 @@ struct H26xReader {
 	std::atomic<uint64_t> last_packet_ns{0};
 	std::atomic<int> read_error{0};
 	std::atomic<bool> discard{false};
-	alignas(uint32_t) uint32_t wait_sequence = 0;
+	std::atomic<int> ready_event_fd{-1};
 	std::mutex mu;
 	std::mutex join_mu;
 	std::condition_variable cv;
@@ -79,10 +77,30 @@ static H26xReader g_readers[MMF_VENC_MAX_CHN];
 
 static void notify_h26x_reader(H26xReader &reader)
 {
-	__atomic_add_fetch(&reader.wait_sequence, 1, __ATOMIC_RELEASE);
-	(void)syscall(SYS_futex, &reader.wait_sequence, FUTEX_WAKE_PRIVATE,
-		INT_MAX, nullptr, nullptr, 0);
+	const int fd = reader.ready_event_fd.load(std::memory_order_acquire);
+	if (fd >= 0) {
+		const uint64_t value = 1;
+		ssize_t written;
+		do {
+			written = write(fd, &value, sizeof(value));
+		} while (written < 0 && errno == EINTR);
+		/* EAGAIN only means the event counter is already saturated/readable. */
+	}
 	reader.cv.notify_all();
+}
+
+static void ensure_h26x_ready_event(H26xReader &reader)
+{
+	if (reader.ready_event_fd.load(std::memory_order_acquire) >= 0)
+		return;
+	const int fd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+	if (fd < 0) {
+		std::fprintf(stderr,
+			"OneKVM: eventfd for VENC reader unavailable: %s; using 1 ms polling\n",
+			std::strerror(errno));
+		return;
+	}
+	reader.ready_event_fd.store(fd, std::memory_order_release);
 }
 
 static uint64_t reader_now_ns()
@@ -1290,6 +1308,7 @@ void start_h26x_reader(int ch, bool request_idr)
 		return;
 	H26xReader &reader = g_readers[ch];
 	std::lock_guard<std::mutex> join_lock(reader.join_mu);
+	ensure_h26x_ready_event(reader);
 	if (reader.running.load(std::memory_order_acquire)) {
 		{
 			std::lock_guard<std::mutex> lock(reader.mu);
@@ -1607,18 +1626,49 @@ bool wait_ready_h26x_packet(int ch, int timeout_ms)
 			if (reader.stop.load(std::memory_order_relaxed))
 				return false;
 		}
+		const int fd = reader.ready_event_fd.load(std::memory_order_acquire);
+		if (fd >= 0) {
+			/* Drain notifications observed before the queue check, then check the
+			 * queue again. A producer racing either check leaves the fd readable. */
+			uint64_t value;
+			ssize_t consumed;
+			do {
+				consumed = read(fd, &value, sizeof(value));
+			} while (consumed == static_cast<ssize_t>(sizeof(value)) ||
+				(consumed < 0 && errno == EINTR));
+			{
+				std::lock_guard<std::mutex> lock(reader.mu);
+				if (!reader.queue.empty())
+					return true;
+				if (reader.stop.load(std::memory_order_relaxed))
+					return false;
+			}
+		}
 		const auto now = std::chrono::steady_clock::now();
 		if (now >= deadline)
 			return false;
-		/* std::condition_variable::wait_for returns immediately on this
-		   musl/riscv64 runtime. FUTEX_WAIT_PRIVATE also missed wakes and
-		   let the 16-slot reader overflow (VENC 60, Core 1 FPS). Sleep 1 ms
-		   so the wait stays interruptible without a busy poll. */
-		auto pause = deadline - now;
-		const auto poll = std::chrono::milliseconds(1);
-		if (pause > poll)
-			pause = poll;
-		std::this_thread::sleep_for(pause);
+		if (fd < 0) {
+			/* Compatibility fallback for kernels/processes where eventfd could
+			 * not be created. */
+			auto pause = deadline - now;
+			const auto interval = std::chrono::milliseconds(1);
+			if (pause > interval)
+				pause = interval;
+			std::this_thread::sleep_for(pause);
+			continue;
+		}
+		const auto remaining_us = std::chrono::duration_cast<
+			std::chrono::microseconds>(deadline - now).count();
+		const int poll_ms = static_cast<int>((remaining_us + 999) / 1000);
+		struct pollfd pfd = {fd, POLLIN, 0};
+		int result;
+		do {
+			result = poll(&pfd, 1, poll_ms);
+		} while (result < 0 && errno == EINTR);
+		if (result == 0)
+			return false;
+		if (result < 0 || (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)))
+			return false;
 	}
 }
 
