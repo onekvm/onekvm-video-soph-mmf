@@ -167,6 +167,15 @@ static void _set_h265_avbr_attr(VENC_CHN_ATTR_S *attr, const H26xEncoderConfig *
 	attr->stRcAttr.stH265AVbr.bVariFpsEn = CVI_FALSE;
 }
 
+static CVI_U32 _max_i_qp(CVI_U32 min_qp, CVI_U32 max_qp)
+{
+	/* kmpp rc:qp_max_i is 2 below rc:qp_max. */
+	CVI_U32 i_max = max_qp >= 2 ? max_qp - 2 : max_qp;
+	if (i_max < min_qp)
+		i_max = min_qp;
+	return i_max;
+}
+
 template <typename VbrParam>
 static void _set_vbr_rc_limits(VbrParam *p, CVI_U32 min_qp, CVI_U32 max_qp)
 {
@@ -176,7 +185,7 @@ static void _set_vbr_rc_limits(VbrParam *p, CVI_U32 min_qp, CVI_U32 max_qp)
 	p->s32MaxReEncodeTimes = 0;
 	p->u32MaxQp = max_qp;
 	p->u32MinQp = min_qp;
-	p->u32MaxIQp = max_qp;
+	p->u32MaxIQp = _max_i_qp(min_qp, max_qp);
 	p->u32MinIQp = min_qp;
 }
 
@@ -189,7 +198,7 @@ static void _set_avbr_rc_limits(AvbrParam *p, CVI_U32 min_qp, CVI_U32 max_qp)
 	p->s32MaxReEncodeTimes = 0;
 	p->u32MaxQp = max_qp;
 	p->u32MinQp = min_qp;
-	p->u32MaxIQp = max_qp;
+	p->u32MaxIQp = _max_i_qp(min_qp, max_qp);
 	p->u32MinIQp = min_qp;
 	p->s32MinStillPercent = MMF_VENC_AVBR_MIN_STILL_PERCENT;
 	/* CreateChn default is 1 (near-lossless). That pins still bitrate
@@ -198,8 +207,8 @@ static void _set_avbr_rc_limits(AvbrParam *p, CVI_U32 min_qp, CVI_U32 max_qp)
 	CVI_U32 still_qp = MMF_VENC_AVBR_MAX_STILL_QP;
 	if (still_qp < min_qp)
 		still_qp = min_qp;
-	if (still_qp > max_qp)
-		still_qp = max_qp;
+	if (still_qp > p->u32MaxIQp)
+		still_qp = p->u32MaxIQp;
 	p->u32MaxStillQP = still_qp;
 	p->u32MotionSensitivity = MMF_VENC_AVBR_MOTION_SENSITIVITY;
 	p->s32AvbrFrmLostOpen = 0;
@@ -228,8 +237,7 @@ static CVI_S32 _set_venc_rc_param(int ch, const H26xEncoderConfig *cfg,
 		return ret;
 	}
 
-	/* Keep NanoKVM's original QP defaults unless the caller explicitly opts in
-	 * to advanced QP overrides.  Image-quality presets only change bitrate. */
+	/* Default QP matches kmpp. Image-quality presets only change bitrate. */
 	param.s32FirstFrameStartQp = initial_qp;
 	param.s32InitialDelay = 1000;
 	if (cfg->codec == H26xCodec::H265)

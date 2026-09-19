@@ -46,11 +46,14 @@ namespace onekvm::mmf {
 #define MMF_VPSS_BORROWED_BLOCKS	1
 #define MMF_VPSS_PRODUCER_BLOCKS	1
 
-/* NanoKVM's original H.264 rate-control defaults.  Automatic image quality
- * changes the bitrate budget only; it must not silently change QP. */
-#define MMF_VENC_DEFAULT_INITIAL_QP	35
-#define MMF_VENC_DEFAULT_MIN_QP		20
-#define MMF_VENC_DEFAULT_MAX_QP		51
+/* Match kmpp onekvm_setup (PicoKVM VEPU). Quality slider still only
+ * changes the bitrate budget; 0 in config means these defaults.
+ * I-frame max is 2 below P max (46 vs 48). */
+#define MMF_VENC_DEFAULT_INITIAL_QP	22
+#define MMF_VENC_DEFAULT_MIN_QP		12
+#define MMF_VENC_DEFAULT_MAX_QP		48
+#define MMF_VENC_DEFAULT_MIN_I_QP	12
+#define MMF_VENC_DEFAULT_MAX_I_QP	46
 /* AVBR target = MaxBitRate × motBitRatio × ChangePos.
  * motBitRatio = minPercent + (100 - minPercent) × MotionLv / 255.
  * H.264 Coda on 107 leaves MotionLv at 0 (picMotionLevel never
