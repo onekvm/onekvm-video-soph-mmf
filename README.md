@@ -24,9 +24,9 @@ this tree outside that distro.
 - Optional AES-GCM offload through the CVITEK SPACC character device.
 
 The Cube capture path, CSI bridge matching, HDMI watcher, VENC reader, idle
-teardown, and snapshot rules are in
-[docs/video-pipeline.md](docs/video-pipeline.md). ABI details are in
-[docs/abi.md](docs/abi.md).
+teardown, and snapshot rules are currently maintained in the Chinese
+[video pipeline specification](docs/zh/video-pipeline.md). ABI details are in
+[docs/en/abi.md](docs/en/abi.md).
 
 The backend is one shared library:
 

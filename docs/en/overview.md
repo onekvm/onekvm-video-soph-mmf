@@ -26,7 +26,8 @@ The default kernel is **Linux 6.18**.
 - Optional AES-GCM offload through the CVITEK SPACC character device.
 
 The Cube capture path, CSI bridge matching, HDMI watcher, VENC reader, idle
-teardown, and snapshot rules are in [video-pipeline.md](video-pipeline.md).
+teardown, and snapshot rules are in the Chinese
+[video-pipeline.md](../zh/video-pipeline.md).
 ABI details are in [abi.md](abi.md).
 
 The backend is one shared library:

@@ -20,8 +20,8 @@ OneKVM Backend ABI，并把厂商 MMF 实现留在独立动态库里，避免 `o
 - 可通过 CVITEK SPACC 字符设备做可选 AES-GCM 加速。
 
 采集通路、CSIBDG、HDMI watcher、VENC reader、空闲释放与截图约定见
-[docs/video-pipeline.md](docs/video-pipeline.md)。ABI 见
-[docs/abi.md](docs/abi.md)。
+[docs/zh/video-pipeline.md](docs/zh/video-pipeline.md)。ABI 见
+[docs/zh/abi.md](docs/zh/abi.md)。
 
 后端以单个动态库部署：
 

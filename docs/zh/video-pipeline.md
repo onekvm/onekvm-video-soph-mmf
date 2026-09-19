@@ -1,5 +1,7 @@
 # Cube HDMI 采集通路
 
+[English documentation index](../en/README.md) | 简体中文
+
 NanoKVM Cube（SG2002）默认视频是 **LT6911 HDMI → CSI → VI → VPSS → VENC**。
 Core 走绑定 H.264/H.265，不读原始帧。改采集、绑定、释放或 HDMI 探测前先读本文。
 验收数据和试验过程记在工作区 `docs/`，不要把流水账写回这里。

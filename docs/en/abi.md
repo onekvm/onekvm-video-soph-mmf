@@ -47,7 +47,7 @@ whitelist:
 ```
 
 Pixel format is NV21. Input acceptance and the full selectable list are in
-[video-pipeline.md](video-pipeline.md) and
+the Chinese [video-pipeline.md](../zh/video-pipeline.md) and
 `include/input_resolution_tracker.hpp`.
 
 ### Bound vs manual
