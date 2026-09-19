@@ -65,6 +65,17 @@ static void recycle_reader_buffer(H26xReader &reader, std::vector<uint8_t> &&buf
 	reader.spare.push_back(std::move(buf));
 }
 
+static std::vector<uint8_t> take_reader_buffer(H26xReader &reader)
+{
+	std::vector<uint8_t> buf;
+	std::lock_guard<std::mutex> lock(reader.mu);
+	if (!reader.spare.empty()) {
+		buf = std::move(reader.spare.back());
+		reader.spare.pop_back();
+	}
+	return buf;
+}
+
 static void clear_reader_queue(H26xReader &reader)
 {
 	while (!reader.queue.empty()) {
@@ -1449,7 +1460,9 @@ void start_h26x_reader(int ch, bool request_idr)
 				packet.data = parameter_sets.augment_keyframe(
 					scratch.data(), static_cast<std::size_t>(got), h265);
 			} else {
-				packet.data.assign(scratch.data(), scratch.data() + got);
+				std::vector<uint8_t> buf = take_reader_buffer(self);
+				buf.assign(scratch.data(), scratch.data() + got);
+				packet.data = std::move(buf);
 			}
 			bool overflow = false;
 			{
