@@ -406,6 +406,8 @@ int lt6911_edid_write(const uint8_t *data, size_t size)
 
 int pcie_hdmi_reset()
 {
+    if (!pcie_variant())
+        return 0;
     return pcie_hdmi_reset_us(100000, 100000);
 }
 

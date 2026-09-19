@@ -102,6 +102,14 @@ struct ONEKVM_VIDEO_INTERNAL Source {
     unsigned hdmi_oor_samples = 0;
     unsigned hdmi_follow_samples = 0;
     unsigned hdmi_rearm_samples = 0;
+    /* A PCIe LT6911 can lose both reported HDMI and CSI timing after the
+       source remains active behind a splitter. Count blank probes while a
+       bound stream is in the placeholder path so recovery can issue a real
+       HPD reset instead of waiting forever for a geometry sample. */
+    unsigned hdmi_blank_rearm_samples = 0;
+    /* A full PCIe HPD reset is expensive. Do it once per continuous blank
+       period; clear the latch only after timing becomes non-zero again. */
+    bool hdmi_blank_rearm_attempted = false;
     unsigned csi_half_rate_samples = 0;
     bool csi_half_rate_rearmed = false;
     int csi_half_rate_target = 0;

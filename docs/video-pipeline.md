@@ -87,7 +87,7 @@ CSI 桥是 **精确匹配**：宽度大于设定（GT）或小于设定（LS）�
 - `video.resolution=0`（自动）时，VI/VENC 跟当前 **支持的** HDMI 输入。480 对应 **640×480**，不是 854×480。
 - 目标分辨率只改 VPSS/VENC。VI 接收端：HDMI 变大立刻放大；HDMI 变小要等 CSI 有效尺寸跟上。HDMI 时序空白时不要缩小。
 - VI 已经停帧（`FrameRate=0`）时例外：HDMI I2C 连续给出另一个支持的模式，就跟过去重建。假 1440 把 CSIBDG 配大之后，源已经回到 1080、CSI 仍是 `0x0`，再等 CSI 会对死。
-- 同一几何也会卡住：VI 停帧、CSI `0x0`、I2C 仍报当前 1080 时 `should_rebuild_vi_receiver` 为假。连续 3 次同样读数后 `reopen_source` 重新 arm LT6911（含 PCIe HPD 脉冲），不要干等 CSI。占位路径必须把 `cached_signal` 置 0，否则 1080p watcher 把占位 VENC 当成活流、不再探测。
+- 同一几何也会卡住：VI 停帧、CSI `0x0`、I2C 仍报当前 1080 时 `should_rebuild_vi_receiver` 为假。连续 3 次同样读数后 `reopen_source` 重新 arm LT6911（含 PCIe HPD 脉冲），不要干等 CSI；同一段连续无信号期间只允许一次完整 HPD reset，等重新读到非零时序后才重新解锁，避免 reset/MMF 重建风暴。占位路径必须把 `cached_signal` 置 0，否则 1080p watcher 把占位 VENC 当成活流、不再探测。
 - 不要只信 HDMI I2C，也不要只信 CSI 当前宽。只信 HDMI 会在 MIPI 仍是 1920 时把 VI 配成 800；只信 CSI 会在 800→1080 时把接收端留在 800。
 - CSI 已是合法模式时，忽略 I2C 垃圾 OOR 读数。
 

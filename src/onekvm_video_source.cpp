@@ -301,6 +301,7 @@ int open_source(Source *source, const onekvm_video_source_config_v1 *config,
     source->hdmi_oor_samples = 0;
     source->hdmi_follow_samples = 0;
     source->hdmi_rearm_samples = 0;
+    source->hdmi_blank_rearm_samples = 0;
     source->csi_half_rate_samples = 0;
     source->last_half_rate_check_ns = 0;
     source->out_of_range.store(false, std::memory_order_relaxed);
@@ -334,11 +335,19 @@ int recover_source(Source *source, char *error, uint32_t error_capacity) {
 }
 
 int reopen_source_for_input(Source *source, onekvm::InputResolution input,
-                            char *error, uint32_t error_capacity) {
+                            char *error, uint32_t error_capacity,
+                            bool force_pcie_reset = false) {
     const onekvm_video_source_config_v1 config = source->config;
     source->pending_receiver = input;
     std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
     close_source(source);
+    if (force_pcie_reset && pcie_hdmi_reset() != 0) {
+        set_error(error, error_capacity, "reset PCIe HDMI bridge failed: %s",
+                  std::strerror(errno));
+        return -1;
+    }
+    if (force_pcie_reset)
+        std::fprintf(stderr, "OneKVM: PCIe HDMI HPD reset before CSI rearm\n");
     if (open_source(source, &config, error, error_capacity, &input) != 0)
         return -1;
     source->pending_receiver = {};
@@ -438,9 +447,33 @@ int rebuild_for_hdmi_timing(Source *source, bool force_probe, char *error,
     source->hdmi_rearm_samples = onekvm::next_hdmi_csi_rearm_samples(
         recent_frames, csi, hdmi, current, source->hdmi_rearm_samples,
         false);
+    /* A live splitter source can leave LT6911 reporting 0x0 for both the
+       upstream HDMI and downstream CSI counters. The geometry-based rearm
+       gate cannot fire in that state. On PCIe, after three blank probes,
+       rebuild with the real 100 ms GPIO HPD reset. Restrict this to a stale
+       bound stream so an idle/no-source device does not reset forever. */
+    const bool blank_live_loss = capture_live &&
+        source->cached_signal.load(std::memory_order_relaxed) == 0 &&
+        csi.width == 0 && csi.height == 0 &&
+        hdmi.width == 0 && hdmi.height == 0;
+    if (blank_live_loss) {
+        if (source->hdmi_blank_rearm_samples < 3)
+            source->hdmi_blank_rearm_samples++;
+    } else {
+        source->hdmi_blank_rearm_samples = 0;
+        /* A non-blank timing sample marks the end of this loss period and
+           permits one full reset if the splitter loses the signal again. */
+        if (csi.width != 0 || csi.height != 0 ||
+            hdmi.width != 0 || hdmi.height != 0)
+            source->hdmi_blank_rearm_attempted = false;
+    }
+    const bool blank_rearm_ready =
+        !source->hdmi_blank_rearm_attempted &&
+        source->hdmi_blank_rearm_samples >= 3;
     if (!onekvm::should_rebuild_vi_receiver(
             current, receiver, csi, hdmi, recent_frames)) {
-        if (!onekvm::hdmi_csi_rearm_ready(source->hdmi_rearm_samples)) {
+        if (!onekvm::hdmi_csi_rearm_ready(source->hdmi_rearm_samples) &&
+            !blank_rearm_ready) {
             if (kind == onekvm::HdmiInputClass::Supported)
                 source->out_of_range.store(false, std::memory_order_relaxed);
             return 0;
@@ -460,6 +493,11 @@ int rebuild_for_hdmi_timing(Source *source, bool force_probe, char *error,
     source->out_of_range.store(false, std::memory_order_relaxed);
 
     source->failures = 0;
+    const bool force_pcie_reset = receiver == current &&
+        (blank_rearm_ready || (!recent_frames &&
+            onekvm::hdmi_csi_rearm_ready(source->hdmi_rearm_samples)));
+    if (blank_rearm_ready)
+        source->hdmi_blank_rearm_attempted = true;
     if (receiver == current) {
         std::fprintf(stderr,
                      "OneKVM: HDMI timing CSI %ux%u HDMI %ux%u; rearm VI %ux%u\n",
@@ -473,7 +511,7 @@ int rebuild_for_hdmi_timing(Source *source, bool force_probe, char *error,
                      receiver.width, receiver.height);
     }
     const int reopen = reopen_source_for_input(
-        source, receiver, error, error_capacity);
+        source, receiver, error, error_capacity, force_pcie_reset);
     if (reopen != 0)
         return -1;
     /* open_source clears last_recovery. Stamp after reopen so a stale
