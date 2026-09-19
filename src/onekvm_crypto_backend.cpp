@@ -74,10 +74,11 @@ struct Session {
     uint32_t auth_tag_size = kAuthTagSize;
 };
 
-/* cvitek-spacc wait_event timeout is 1 s. If the CryptoDMA IRQ never
-   completes, every SRTP batch stalls the video loop at 1 FPS. After the
-   first ETIMEDOUT, skip further ioctls so Core can stay on software AES. */
+/* A transient timeout falls back in Core for that batch. Only reject future
+   ioctls after two consecutive timeouts; a successful fresh batch proves the
+   engine recovered and clears the streak. */
 std::atomic<bool> g_offload_unusable{false};
+std::atomic<uint32_t> g_timeout_streak{0};
 
 void set_error(char *error, uint32_t capacity, const char *operation, int code) {
     if (error == nullptr || capacity == 0) return;
@@ -101,10 +102,20 @@ int32_t reject_unusable(char *error, uint32_t capacity, const char *operation) {
 
 int32_t fail_encrypt_ioctl(char *error, uint32_t capacity, const char *operation) {
     const int code = errno == 0 ? EIO : errno;
-    if (code == ETIMEDOUT)
-        g_offload_unusable.store(true, std::memory_order_release);
+    if (code == ETIMEDOUT) {
+        const uint32_t failures =
+            g_timeout_streak.fetch_add(1, std::memory_order_acq_rel) + 1;
+        if (failures >= 2)
+            g_offload_unusable.store(true, std::memory_order_release);
+    } else {
+        g_timeout_streak.store(0, std::memory_order_release);
+    }
     set_error(error, capacity, operation, code);
     return -code;
+}
+
+void record_encrypt_success() {
+    g_timeout_streak.store(0, std::memory_order_release);
 }
 
 int32_t validate_request(const Session *session, onekvm_crypto_request_v1 *request,
@@ -197,6 +208,7 @@ int32_t session_seal(void *opaque, onekvm_crypto_request_v1 *request,
     KernelEncryptRequest kernel = kernel_request(*request);
     if (::ioctl(session->fd, kEncrypt, &kernel) != 0)
         return fail_encrypt_ioctl(error, error_capacity, "AES-GCM offload");
+    record_encrypt_success();
     request->output_size = request->src_size + session->auth_tag_size;
     return 0;
 }
@@ -229,6 +241,7 @@ int32_t session_seal_batch(void *opaque, onekvm_crypto_request_v1 *requests,
         *completed = batch.completed;
         return fail_encrypt_ioctl(error, error_capacity, "AES-GCM batch offload");
     }
+    record_encrypt_success();
     *completed = batch.completed;
     for (uint32_t index = 0; index < batch.completed && index < count; ++index)
         requests[index].output_size = requests[index].src_size + session->auth_tag_size;
