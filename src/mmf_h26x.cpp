@@ -613,6 +613,7 @@ static int copy_h26x_packet(int ch, uint8_t *dst, int capacity,
 
 	CVI_S32 ret = CVI_FAILURE;
 	uint64_t pack_ready_ns = 0;
+	unsigned int busy_retries = 0;
 	for (;;) {
 		gettimeofday(&now, NULL);
 		const int64_t remaining = wait_timeout_us > 0
@@ -665,11 +666,19 @@ static int copy_h26x_packet(int ch, uint8_t *dst, int capacity,
 		if (ret == CVI_ERR_VENC_BUSY) {
 			if (wait_timeout_us <= 0 || past_deadline)
 				return 0;
-			usleep(200);
+			/* The SG2002 VENC fd can remain readable while the bind worker is
+			 * between access units.  A tight GetStream retry then turns a stalled
+			 * encoder into a userspace busy loop (and can starve UAC ISO work).
+			 * Give the first few retries a short latency-friendly delay, then
+			 * back off to 5 ms when the fd's readiness is clearly stale. */
+			++busy_retries;
+			const useconds_t retry_us = busy_retries <= 3 ? 1000 : 5000;
+			usleep(retry_us);
 			continue;
 		}
 		if (ret != CVI_SUCCESS)
 			return -1;
+		busy_retries = 0;
 		break;
 	}
 	if (!info->bound_to_capture)
