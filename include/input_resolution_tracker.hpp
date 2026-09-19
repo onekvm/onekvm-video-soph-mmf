@@ -255,6 +255,10 @@ constexpr bool should_grow_to_max_vi_receiver(
     InputResolution current, InputResolution hdmi,
     unsigned blanking_samples = 0)
 {
+    /* A PCIe cold start may bootstrap at 640x480 while the splitter source
+       has already negotiated 1080p.  If 640 is the real input it produces
+       frames before this three-sample blanking gate; otherwise fall back to
+       the receiver maximum so the pipeline can discover the current mode. */
     if (current == kMaxViReceiver || current.width == 0)
         return false;
     if (hdmi.width == 0)
@@ -405,28 +409,28 @@ constexpr bool hdmi_resolution_probe_due(
 }
 
 /* cached_signal: 1 = live frames, 0 = no HDMI, -1 = unknown.
-   capture_live is VI DMA + a bound consumer. Idle probes CSI I2C; a live
-   1080p+ path must not. Sub-1080 still uses the 100 ms grow probe. */
+   capture_live is VI DMA + a bound consumer. Neither an idle armed receiver
+   nor a live path may touch LT6911 merely to poll status: even a status read
+   can stop the CSI output on low-clock modes. A consumer first tries the
+   configured VI path; VENC staleness then clears cached_signal and enables
+   recovery probing. */
 constexpr auto hdmi_watch_interval(
     int cached_signal, InputResolution current = {},
     bool capture_live = true)
 {
     using namespace std::chrono_literals;
-    const bool grow = current.width != 0 &&
-        resolution_pixels(current) < resolution_pixels(kMaxViReceiver);
-    if (!capture_live)
-        return grow ? 100ms : 1000ms;
-    return cached_signal == 1 && grow ? 100ms : 1000ms;
+    (void)cached_signal;
+    (void)current;
+    (void)capture_live;
+    return 1000ms;
 }
 
 constexpr bool hdmi_watch_probe_due(
     int cached_signal, InputResolution current,
     bool capture_live = true)
 {
-    if (!capture_live)
-        return true;
-    return cached_signal != 1 || current.width == 0 ||
-        resolution_pixels(current) < resolution_pixels(kMaxViReceiver);
+    (void)current;
+    return capture_live && cached_signal != 1;
 }
 
 class InputResolutionTracker {

@@ -354,6 +354,7 @@ EdidBoardInfo probe_edid_board()
     onekvm_lt6911_i2c_lock();
     if (open_bus() == 0) {
         info.chip = detect_chip();
+        (void)disable();
         close_bus();
     }
     onekvm_lt6911_i2c_unlock();
@@ -372,6 +373,11 @@ EdidBoardInfo probe_edid_board()
         break;
     }
     return info;
+}
+
+bool pcie_hdmi_variant()
+{
+    return pcie_variant();
 }
 
 int lt6911_edid_read(uint8_t *data, size_t size)
@@ -408,7 +414,10 @@ int pcie_hdmi_reset()
 {
     if (!pcie_variant())
         return 0;
-    return pcie_hdmi_reset_us(100000, 100000);
+    /* Match NanoKVM's Reset HDMI operation: GPIO451 is held low for a full
+       second before it is enabled again. A 100 ms pulse is sufficient for
+       HPD renegotiation but does not reliably reset the LT6911UXC MCU. */
+    return pcie_hdmi_reset_us(1000000, 100000);
 }
 
 int pcie_hdmi_startup_reset()

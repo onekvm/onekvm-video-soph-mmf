@@ -48,12 +48,15 @@ ONEKVM_VIDEO_INTERNAL inline constexpr auto kHDMIChangeGrowProbeInterval =
 ONEKVM_VIDEO_INTERNAL inline constexpr auto kSignalProbeInterval = std::chrono::seconds(10);
 ONEKVM_VIDEO_INTERNAL inline constexpr auto kNoSignalProbeInterval = std::chrono::seconds(1);
 static_assert(onekvm::hdmi_watch_interval(1, {800, 600}) ==
-    kHDMIChangeGrowProbeInterval);
+    std::chrono::duration_cast<std::chrono::milliseconds>(kNoSignalProbeInterval));
 static_assert(onekvm::hdmi_watch_interval(1, {1920, 1080}) ==
     std::chrono::duration_cast<std::chrono::milliseconds>(kNoSignalProbeInterval));
 static_assert(onekvm::hdmi_watch_interval(1, {1920, 1080}, false) ==
     std::chrono::duration_cast<std::chrono::milliseconds>(kNoSignalProbeInterval));
-static_assert(onekvm::hdmi_watch_probe_due(1, {1920, 1080}, false));
+static_assert(!onekvm::hdmi_watch_probe_due(1, {1920, 1080}, false));
+static_assert(!onekvm::hdmi_watch_probe_due(1, {800, 600}, true));
+static_assert(onekvm::hdmi_watch_probe_due(0, {640, 480}, true));
+static_assert(!onekvm::hdmi_watch_probe_due(0, {640, 480}, false));
 static_assert(onekvm::csi_half_rate_locked(60, 30));
 static_assert(!onekvm::csi_half_rate_locked(60, 59));
 static_assert(!onekvm::csi_half_rate_locked(30, 30));
@@ -68,11 +71,18 @@ ONEKVM_VIDEO_INTERNAL inline constexpr auto kRecentFrameSignalWindow = std::chro
    picture jump.  Wait out a short GetStream stall first. */
 ONEKVM_VIDEO_INTERNAL inline constexpr auto kVencLiveRecentWindow =
     std::chrono::milliseconds(1500);
-/* Exclusive VI→VENC has no VPSS RecvCnt, and VI FrameRate stays 0 for about
-   a second after bind. 1.5 s is too short: the packet path then treats
-   "no AU yet" as no HDMI, probes LT6911 80ee, and stalls CSI. */
+/* A newly resumed VPSS→VENC path may take longer than the normal live-AU
+   staleness window to emit its first packet. 1.5 s is too short: the packet
+   path then treats "no AU yet" as no HDMI, probes LT6911 80ee, and stalls
+   low-clock CSI before it finishes locking. */
 ONEKVM_VIDEO_INTERNAL inline constexpr auto kVencFirstAuWindow =
     std::chrono::milliseconds(5000);
+/* A full PCIe HDMI reset restarts the LT6911UXC MCU.  Let its firmware
+   reacquire HDMI and restore CSI before inspecting the timing or applying
+   the host-side CSI arm sequence.  Otherwise open_source follows the reset
+   with another startup pulse while the BIOS source is still negotiating. */
+ONEKVM_VIDEO_INTERNAL inline constexpr auto kPcieHDMIResetRecoverySettle =
+    std::chrono::milliseconds(2500);
 ONEKVM_VIDEO_INTERNAL inline constexpr auto kInitialResolutionSampleDelay = std::chrono::milliseconds(20);
 
 struct ONEKVM_VIDEO_INTERNAL Source {

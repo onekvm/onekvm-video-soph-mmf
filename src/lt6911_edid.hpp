@@ -40,6 +40,7 @@ inline NanoKVMBoard parse_nanokvm_board(const char *hardware_json)
     return NanoKVMBoard::Unknown;
 }
 EdidBoardInfo probe_edid_board();
+bool pcie_hdmi_variant();
 int lt6911_edid_read(uint8_t *data, size_t size);
 int lt6911_edid_write(const uint8_t *data, size_t size);
 int pcie_hdmi_reset();

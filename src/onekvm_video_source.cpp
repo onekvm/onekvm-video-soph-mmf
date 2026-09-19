@@ -99,6 +99,21 @@ bool read_supported_input_resolution(onekvm::InputResolution *resolution,
 }
 
 onekvm::InputResolution initial_input_resolution(int fps) {
+    /* On the PCIe fixture the upstream splitter can leave LT6911's HDMI
+       timing counters at the previous (usually 1080p) mode while the CSI
+       active counters are still zero.  The HDMI counters are useful after
+       a live mode change, but they are not a trustworthy cold-start source
+       of geometry in this state.  Arm the receiver with the mode observed
+       on the companion KVM and let the watcher promote it once CSI locks. */
+    const bool pcie = probe_edid_board().board == NanoKVMBoard::PCIe;
+    if (pcie) {
+        onekvm::InputResolution csi{};
+        onekvm::InputResolution hdmi{};
+        if (!read_hdmi_timing(&csi, &hdmi) ||
+            !onekvm::supported_input_resolution(
+                onekvm::csi_reported_size(csi, hdmi)))
+            return {640, 480};
+    }
     onekvm::InputResolution first{};
     onekvm::InputResolution second{};
     if (read_supported_input_resolution(&first, fps)) {
@@ -106,6 +121,15 @@ onekvm::InputResolution initial_input_resolution(int fps) {
         if (read_supported_input_resolution(&second, fps) && first == second)
             return first;
     }
+    /* The PCIe fixture is commonly fed by a splitter while the source is
+       still in BIOS.  That source mode is 640x480; LT6911 can report zero
+       counters until its CSI receiver is armed with the same geometry.  A
+       1920x1080 fallback therefore leaves this cold-start case in a circular
+       no-frame state.  Keep the conservative 1080p default on Cube/Lite,
+       but bootstrap PCIe with the mode verified on the companion KVM.  If a
+       real timing appears later, the HDMI watcher will still rebuild to it. */
+    if (pcie)
+        return {640, 480};
     return {1920, 1080};
 }
 
@@ -132,35 +156,12 @@ bool stable_input_resolution(onekvm::InputResolution *resolution, int fps) {
 
 int cached_signal_present(Source *source) {
     if (source == nullptr) return 0;
-    const uint64_t now = monotonic_ns();
     /* Live HDMI is VENC packets, not VI IntCnt. After a host mode change
        the encoder can keep repeating the old geometry; the packet path
-       marks cached_signal=0 and the watcher then probes CSI. */
-
-    const int cached = source->cached_signal.load(std::memory_order_relaxed);
-    if (source->capture_live.load(std::memory_order_relaxed))
-        return cached;
-
-    const auto probe_window = cached == 0
-        ? kNoSignalProbeInterval : kSignalProbeInterval;
-    const uint64_t probe_interval = static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::nanoseconds>(
-            probe_window).count());
-    const uint64_t last_probe = source->last_signal_probe_ns.load(std::memory_order_relaxed);
-    if (last_probe != 0 && now >= last_probe && now - last_probe < probe_interval) {
-        return cached;
-    }
-    if (source->signal_probe_running.test_and_set(std::memory_order_acquire)) {
-        return source->cached_signal.load(std::memory_order_relaxed);
-    }
-    onekvm::InputResolution csi{};
-    onekvm::InputResolution hdmi{};
-    const int present = read_hdmi_timing(&csi, &hdmi)
-        ? (onekvm::csi_timing_present(csi, hdmi) ? 1 : 0) : -1;
-    source->cached_signal.store(present, std::memory_order_relaxed);
-    source->last_signal_probe_ns.store(monotonic_ns(), std::memory_order_relaxed);
-    source->signal_probe_running.clear(std::memory_order_release);
-    return present;
+       marks cached_signal=0 and the watcher then probes CSI. Do not turn a
+       status query into an idle LT6911 I2C transaction: the receiver remains
+       armed while VPSS is parked, and low-clock CSI can stop on that read. */
+    return source->cached_signal.load(std::memory_order_relaxed);
 }
 
 void publish_input_format(Source *source) {
@@ -220,24 +221,55 @@ void close_source(Source *source) {
 
 int open_source(Source *source, const onekvm_video_source_config_v1 *config,
                 char *error, uint32_t error_capacity,
-                const onekvm::InputResolution *requested_input = nullptr) {
+                const onekvm::InputResolution *requested_input = nullptr,
+                bool pcie_reset_done = false) {
     if (config == nullptr || config->struct_size < sizeof(*config)) {
         set_error(error, error_capacity, "invalid source configuration");
         return -1;
     }
     std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
-    if (pcie_hdmi_startup_reset() != 0) {
-        set_error(error, error_capacity, "reset PCIe HDMI bridge failed: %s",
-                  std::strerror(errno));
-        return -1;
-    }
-    /* After reboot the LT6911 HDMI RX stays idle until D283 is written
-       once. Repeating that from the watcher disrupts CSI. */
-    (void)lt6911_kick_hdmi();
     const int requested_fps = config->fps > 0 ? static_cast<int>(config->fps) : 60;
+    onekvm::InputResolution locked_csi{};
+    onekvm::InputResolution locked_hdmi{};
+    onekvm::InputResolution locked_receiver{};
+    bool preserve_locked_csi = false;
+    if (pcie_hdmi_variant() &&
+        read_hdmi_timing(&locked_csi, &locked_hdmi)) {
+        /* On LT6911UXC the 0x85 active-size counters are returned through
+           locked_hdmi; locked_csi is the LT6911C 0xc2 register family and
+           remains zero. Select the valid receiver geometry across both
+           families before deciding whether the bridge is already locked. */
+        locked_receiver =
+            onekvm::csi_reported_size(locked_csi, locked_hdmi);
+        preserve_locked_csi =
+            onekvm::supported_input_rate(locked_receiver, requested_fps);
+    }
+    if (preserve_locked_csi && requested_input != nullptr &&
+        *requested_input != locked_receiver)
+        preserve_locked_csi = false;
+    if (!preserve_locked_csi) {
+        /* A full recovery reset has already restarted the bridge and waited
+           for its firmware.  Do not immediately follow it with the normal
+           startup pulse: on low-clock BIOS modes that restarts negotiation a
+           second time just before kick_hdmi/start_csi. */
+        if (!pcie_reset_done && pcie_hdmi_startup_reset() != 0) {
+            set_error(error, error_capacity, "reset PCIe HDMI bridge failed: %s",
+                      std::strerror(errno));
+            return -1;
+        }
+        /* After reboot the LT6911 HDMI RX stays idle until D283 is written
+           once. Repeating that from the watcher disrupts CSI. */
+        (void)lt6911_kick_hdmi();
+    } else {
+        std::fprintf(stderr,
+                     "OneKVM: preserving locked LT6911 CSI %ux%u\n",
+                     locked_receiver.width, locked_receiver.height);
+    }
     const onekvm::InputResolution input = requested_input != nullptr &&
         onekvm::supported_input_rate(*requested_input, requested_fps)
-        ? *requested_input : initial_input_resolution(requested_fps);
+        ? *requested_input
+        : preserve_locked_csi ? locked_receiver
+        : initial_input_resolution(requested_fps);
     const auto output = onekvm::target_output_resolution(
         config->resolution, input);
     const int width = static_cast<int>(output.width);
@@ -257,7 +289,7 @@ int open_source(Source *source, const onekvm_video_source_config_v1 *config,
        that teardown, but before StartViChn: programming CSI while an old VI
        generation is still active can deadlock the vendor frontend on a Core
        restart. */
-    if (lt6911_start_csi() != 0) {
+    if (!preserve_locked_csi && lt6911_start_csi() != 0) {
         mmf::shutdown();
         set_error(error, error_capacity, "LT6911 CSI arm before VI failed");
         return -1;
@@ -305,17 +337,11 @@ int open_source(Source *source, const onekvm_video_source_config_v1 *config,
     source->csi_half_rate_samples = 0;
     source->last_half_rate_check_ns = 0;
     source->out_of_range.store(false, std::memory_order_relaxed);
-    onekvm::InputResolution probed{};
-    if (read_hdmi_input(&probed)) {
-        source->reported_input = probed;
-        if (onekvm::classify_hdmi_input(probed, requested_fps) ==
-            onekvm::HdmiInputClass::OutOfRange) {
-            source->out_of_range.store(true, std::memory_order_relaxed);
-            std::fprintf(stderr,
-                         "OneKVM: HDMI input %ux%u is out of range\n",
-                         probed.width, probed.height);
-        }
-    }
+    /* input was selected before lt6911_start_csi()/StartViChn. Do not
+       re-read LT6911 here: opening 80ee after CSI is armed can stop a valid
+       low-clock stream before the first consumer has a chance to prove it
+       through VENC packets. Later staleness-driven recovery publishes a new
+       geometry or out-of-range state when the source actually changes. */
     publish_input_format(source);
     source->no_signal_frame.clear();
     reset_signal_cache(source);
@@ -347,8 +373,11 @@ int reopen_source_for_input(Source *source, onekvm::InputResolution input,
         return -1;
     }
     if (force_pcie_reset)
-        std::fprintf(stderr, "OneKVM: PCIe HDMI HPD reset before CSI rearm\n");
-    if (open_source(source, &config, error, error_capacity, &input) != 0)
+        std::fprintf(stderr, "OneKVM: PCIe HDMI reset before CSI rearm\n");
+    if (force_pcie_reset)
+        std::this_thread::sleep_for(kPcieHDMIResetRecoverySettle);
+    if (open_source(source, &config, error, error_capacity, &input,
+                    force_pcie_reset) != 0)
         return -1;
     source->pending_receiver = {};
     std::fprintf(stderr, "OneKVM: HDMI input resolution changed to %ux%u\n",
@@ -496,7 +525,11 @@ int rebuild_for_hdmi_timing(Source *source, bool force_probe, char *error,
     const bool force_pcie_reset = receiver == current &&
         (blank_rearm_ready || (!recent_frames &&
             onekvm::hdmi_csi_rearm_ready(source->hdmi_rearm_samples)));
-    if (blank_rearm_ready)
+    /* Growing the bootstrap receiver can coincide with the blank-reset
+       threshold, but that rebuild does not pulse GPIO451.  Consume the
+       once-per-loss latch only when this reopen will actually perform the
+       full PCIe HDMI reset; otherwise the new geometry can never request it. */
+    if (force_pcie_reset && blank_rearm_ready)
         source->hdmi_blank_rearm_attempted = true;
     if (receiver == current) {
         std::fprintf(stderr,
@@ -653,8 +686,9 @@ void hdmi_watch_loop(Source *source) {
             }
             continue;
         }
-        /* Idle CSI probes belong here. maybe_rebuild also reads LT6911;
-           do not fopen /proc/cvitek/vi in the same tick. */
+        /* Only a bound consumer which has observed VENC staleness may reach
+           the recovery probe. Idle polling can stop low-clock CSI before the
+           first consumer arrives. */
         const bool need_fast =
             !onekvm::supported_input_resolution(
                 source->input_resolution.current()) &&
@@ -704,7 +738,9 @@ int32_t source_create(const onekvm_video_source_config_v1 *config, void **result
         set_error(error, error_capacity, "allocate source: out of memory");
         return -1;
     }
-    (void)restore_active_edid_if_needed();
+    /* EDID writes already program the bridge and persist the same bytes in
+       /var/lib. Rewriting that file on every source creation performs two
+       needless PCIe resets and can destroy a low-clock lock before VI opens. */
     if (open_source(source, config, error, error_capacity) != 0) {
         delete source;
         return -1;

@@ -27,19 +27,20 @@ int main() {
     if (tracker.observe({640, 480}) != InputResolutionObservation::Unchanged) return 5;
 
     using namespace std::chrono_literals;
-    if (hdmi_watch_interval(1, {800, 600}) != 100ms) return 46;
+    if (hdmi_watch_interval(1, {800, 600}) != 1s) return 46;
     if (hdmi_watch_interval(1, {1920, 1080}) != 1s) return 47;
     if (hdmi_watch_interval(1, {2560, 1440}) != 1s) return 48;
     if (hdmi_watch_interval(0, {800, 600}) != 1s) return 68;
     if (hdmi_watch_interval(-1, {}) != 1s) return 69;
-    if (!hdmi_watch_probe_due(1, {800, 600})) return 70;
+    if (hdmi_watch_probe_due(1, {800, 600})) return 70;
     if (hdmi_watch_probe_due(1, {1920, 1080})) return 71;
     if (hdmi_watch_probe_due(1, {2560, 1440})) return 72;
     if (!hdmi_watch_probe_due(0, {1920, 1080})) return 73;
     if (!hdmi_watch_probe_due(-1, {})) return 74;
-    if (!hdmi_watch_probe_due(1, {1920, 1080}, false)) return 79;
+    if (hdmi_watch_probe_due(1, {1920, 1080}, false)) return 79;
     if (hdmi_watch_interval(1, {1920, 1080}, false) != 1s) return 80;
-    if (hdmi_watch_interval(1, {800, 600}, false) != 100ms) return 81;
+    if (hdmi_watch_interval(1, {800, 600}, false) != 1s) return 81;
+    if (hdmi_watch_probe_due(0, {640, 480}, false)) return 82;
     if (!csi_timing_present({1920, 1080})) return 82;
     if (!csi_timing_present({0, 0}, {1920, 1080})) return 83;
     if (csi_timing_present({0, 0}, {0, 0})) return 84;
@@ -133,6 +134,8 @@ int main() {
         return 47;
     if (!should_grow_to_max_vi_receiver({800, 600}, {0, 0}, 3))
         return 48;
+    if (!should_grow_to_max_vi_receiver({640, 480}, {0, 0}, 3))
+        return 49;
     if (!should_grow_to_max_vi_receiver({800, 600}, {1920, 1080}))
         return 43;
     if (should_grow_to_max_vi_receiver({800, 600}, {800, 600}))

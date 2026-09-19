@@ -861,11 +861,9 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
         const uint64_t live_ns = static_cast<uint64_t>(
             std::chrono::duration_cast<std::chrono::nanoseconds>(
                 kVencLiveRecentWindow).count());
-        const uint64_t first_au_ns = mmf::h26x_bound_to_vi(encoder->channel)
-            ? static_cast<uint64_t>(
-                std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    kVencFirstAuWindow).count())
-            : live_ns;
+        const uint64_t first_au_ns = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                kVencFirstAuWindow).count());
         /* cached_signal starts at unknown/no-signal and the HDMI watcher may
            not publish its first sample before Core opens WebRTC.  Do not tear
            down a newly bound producer merely because the VENC worker has not
