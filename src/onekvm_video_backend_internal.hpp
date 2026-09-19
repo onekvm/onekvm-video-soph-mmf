@@ -139,6 +139,9 @@ struct ONEKVM_VIDEO_INTERNAL Encoder {
     std::vector<uint8_t> output;
     uint64_t mmf_generation = 0;
     Source *bound_source = nullptr;
+    /* Keep the source handle across UnbindVideoSource so encoder_reset can
+       detect a geometry change after source.Reset rebuilds VPSS. */
+    Source *reset_source = nullptr;
     std::atomic<uint64_t> last_capture_ns{0};
     std::atomic<uint64_t> last_encode_ns{0};
     bool managed_allocation = false;

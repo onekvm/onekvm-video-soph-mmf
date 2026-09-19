@@ -133,6 +133,7 @@ void close_encoder(Encoder *encoder) {
     encoder->bound_since_ns = 0;
     encoder->mmf_generation = 0;
     encoder->bound_source = nullptr;
+    encoder->reset_source = nullptr;
 }
 
 void invalidate_stale_encoder(Encoder *encoder) {
@@ -164,6 +165,7 @@ void invalidate_stale_encoder(Encoder *encoder) {
     encoder->prepared_pts_ns = 0;
     encoder->bound_since_ns = 0;
     encoder->mmf_generation = 0;
+    encoder->reset_source = nullptr;
 }
 
 void recover_encoder_after_stream_error(Encoder *encoder) {
@@ -363,6 +365,26 @@ int32_t encoder_reset(void *opaque, const onekvm_video_encoder_config_v1 *config
         encoder->codec_type = next_codec;
         return 0;
     }
+    /* ResetVideo unbinds the encoder before resetting the source.  The source
+       then owns a new VPSS output geometry, but this encoder still has the old
+       VENC dimensions.  A rate-control update cannot change those dimensions,
+       so recreate the channel and let the next bind configure its new size. */
+    bool source_geometry_changed = false;
+    if (encoder->initialized && encoder->codec_type != 0 &&
+        encoder->reset_source != nullptr) {
+        const auto [source_width, source_height] =
+            source_output_size(encoder->reset_source);
+        source_geometry_changed = source_width > 0 && source_height > 0 &&
+            (source_width != encoder->width || source_height != encoder->height);
+    }
+    if (source_geometry_changed) {
+        close_encoder(encoder);
+        encoder->config = next;
+        encoder->codec_type = next_codec;
+        encoder->request_keyframe = true;
+        encoder->output.clear();
+        return 0;
+    }
     if (encoder->initialized && encoder->codec_type != 0 &&
         encoder->codec_type == next_codec && encoder->channel >= 0 &&
         encoder->width > 0 && encoder->height > 0) {
@@ -515,6 +537,7 @@ int bind_encoder_to_source_locked(Encoder *encoder, Source *source,
     }
     encoder->source_bound = true;
     encoder->bound_source = source;
+    encoder->reset_source = source;
     source->capture_live.store(true, std::memory_order_relaxed);
     encoder->frame_pending = false;
     encoder->prepared_size = 0;
