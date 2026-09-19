@@ -30,7 +30,7 @@ HDMI 源
 - `StartRecvFrame` 必须在 SYS bind 之后。否则 `enable_bind_mode` 仍为假，bind kthread 不会起来。
 - 绑定 VPSS→VENC 时 `bIsoSendFrmEn` 必须关掉。绑定路径从不 `SendFrame`；打开隔离后编码计数涨、`GetStream` 队列为空。
 - 首 AU 到达前不要因 VI `FrameRate=0` 走 `maybe_rebuild` 或打 LT6911 `80ee`。
-- HDMI watcher 的初始信号可能晚于 WebRTC 建链。第一个 AU 到达前保留 1.5 秒 live grace，不能因 `cached_signal` 未就绪就 unbind 后直送静帧。
+- HDMI watcher 的初始信号可能晚于 WebRTC 建链。新绑定或从空闲恢复后，第一个 AU 到达前保留 5 秒首帧窗口；1.5 秒只用于已经出过 AU 的活流停顿。不能因 `cached_signal` 未就绪就 unbind 后直送静帧。
 - Cube WAVE4 进程里只有一个 H.264/H.265 worker。绑定后不要 `DestroyChn` / `StopRecvFrame` 切换 H.264↔H.265。要换编码走设备视频设置的 `ResetVideo`（先 unbind）。
 - RustDesk/RTSP 共用绑定主路；info 报实际 codec。
 
@@ -87,7 +87,8 @@ CSI 桥是 **精确匹配**：宽度大于设定（GT）或小于设定（LS）�
 - `video.resolution=0`（自动）时，VI/VENC 跟当前 **支持的** HDMI 输入。480 对应 **640×480**，不是 854×480。
 - 目标分辨率只改 VPSS/VENC。VI 接收端：HDMI 变大立刻放大；HDMI 变小要等 CSI 有效尺寸跟上。HDMI 时序空白时不要缩小。
 - VI 已经停帧（`FrameRate=0`）时例外：HDMI I2C 连续给出另一个支持的模式，就跟过去重建。假 1440 把 CSIBDG 配大之后，源已经回到 1080、CSI 仍是 `0x0`，再等 CSI 会对死。
-- 同一几何也会卡住：VI 停帧、CSI `0x0`、I2C 仍报当前 1080 时 `should_rebuild_vi_receiver` 为假。连续 3 次同样读数后 `reopen_source` 重新 arm LT6911（含 PCIe HPD 脉冲），不要干等 CSI；同一段连续无信号期间只允许一次完整 HPD reset，等重新读到非零时序后才重新解锁，避免 reset/MMF 重建风暴。占位路径必须把 `cached_signal` 置 0，否则 1080p watcher 把占位 VENC 当成活流、不再探测。
+- PCIe 冷启动可以先用 640×480 bootstrap；若它是实际输入，首帧会在空白门限前到达并保持 640。若 CSI/HDMI 连续 3 次仍全为 `0x0`，把接收端提升到 1920×1080 上限再试，处理同屏器另一端已经把源协商到 1080p、而本端读不到时序的情况。这是接收器探测，不是输入分辨率白名单。
+- 同一几何也会卡住：VI 停帧、CSI `0x0`、I2C 仍报当前 1080 时 `should_rebuild_vi_receiver` 为假。连续 3 次同样读数后 `reopen_source` 重新 arm LT6911（PCIe 先执行与 NanoKVM `Reset HDMI` 相同的 GPIO451 低电平 1 秒完整复位）。GPIO 拉高后静置 2.5 秒，再检查固件是否已经恢复 CSI；这次完整 reset 已经替代 startup pulse，禁止紧接着再做一次 10 ms reset。若静置后 CSI 已恢复则保留固件锁定并直接启动 VI，否则才走 host-side CSI arm。只有实际执行 GPIO reset 才消费一次性 reset latch；仅变更接收几何不能提前锁死后续恢复。不要干等 CSI；同一段连续无信号期间只允许一次完整 HDMI reset，等重新读到非零时序后才重新解锁，避免 reset/MMF 重建风暴。占位路径必须把 `cached_signal` 置 0，否则 1080p watcher 把占位 VENC 当成活流、不再探测。
 - 不要只信 HDMI I2C，也不要只信 CSI 当前宽。只信 HDMI 会在 MIPI 仍是 1920 时把 VI 配成 800；只信 CSI 会在 800→1080 时把接收端留在 800。
 - CSI 已是合法模式时，忽略 I2C 垃圾 OOR 读数。
 
@@ -98,15 +99,19 @@ HDMI 输入不是固定模式白名单：接受 `320×200` 到 `2880×1620` 范�
 HDMI 重建和 LT6911 CSI 时序归 **watcher**。不要读 `/proc/cvitek/vi` 判断热插拔。
 
 - 活路（已绑定消费者、`cached_signal==1`）完全跳过 LT6911；HDMI 在不在看 VENC 包。即使 1 Hz `80ee` 最终也会拖死 CSI。
-- 空闲没有 VI DMA。watcher 解析 LT6911 CSI（`0xc238`/`0xc206`），HDMI 计数只作回退。1 s 探一次热插拔；接收器低于 1080 时 100 ms，以便跟 800→1080。
+- 空闲时保持 LT6911、VI 和 VI→VPSS 已配置，但不读 LT6911 I²C；状态查询只返回缓存。消费者接入后先直接恢复 VPSS/VENC，任何分辨率只要 VENC 正常出包都不得探 LT6911。模式切换或无信号先表现为 VENC 停帧并切换占位，随后 watcher 才解析 LT6911 CSI（`0xc238`/`0xc206`）并恢复。这样会把空闲期间发生的模式切换延迟到下一个消费者，但不会在消费者到来前用状态探测打停低时钟 CSI。
 - 绑定编码器实际停帧后再进入恢复探测。
 - 半速锁例外：目标 ≥48 FPS 而 VENC `EncFramePerSec` 连续约 2 s 钉在一半（1080p60→30，720p120→60）时，AU 仍在 1.5 s 存活窗口内，watcher 不会探。用已有 2 Hz `venc` proc 的 `EncFramePerSec`，不要读 `vi`/`vi_dbg`。确认后 `reopen_source`（先 teardown 再 `lt6911_start_csi`）。同一目标帧率只重装一次，直到帧率回到目标附近；真 1080p30 源会闪一次然后停。
 
 开机 `open_source` 分两段写 LT6911，都在 **VI init 之前**。Core 重启不会重跑 `prepare-hdmi`，所以这是 MMF 的职责。不要合成「先 D283 再 805a」的单次 80ee 会话。
 
+PCIe 例外：VI 尚未启动时若 CSI 已报告稳定、受支持的 active size，直接保留固件现有锁定并启动 VI，不再执行 GPIO reset、`kick_hdmi` 或 `lt6911_start_csi`。这用于固件已经接受、但重新 arm 会丢锁的低时钟模式。只有 CSI 未锁定或请求几何与 CSI 不一致时才走下面的恢复序列。持久化 EDID 在写入时已经更新桥片；创建 source 不得再次无条件恢复 EDID并连做两次 GPIO reset。
+
 1. `lt6911_kick_hdmi()`：开 `80ee`，写 `D283=0x11` 启动测量。只在打开 source 时做一次，不要从活 watcher 重复。
 2. `mmf::initialize()` 回收上一代 MMF owner。旧 VI 尚未清理时重编程 CSI 会在活 HDMI 上锁死 vendor 前端。
 3. `lt6911_start_csi()`：与 `prepare-hdmi` 相同，**先** `0x805a=0x80`、`0x8010=0x00`，等 100 ms，**再** `D283=0x11`，再等 50 ms，最后关 `80ee`。然后才 `start_capture_pipeline()` / `StartViChn`。空闲 `DisableChn` 之后再次 `EnableChn` 也要先走这一段。
+
+输入几何必须在第 3 步之前确定。`StartViChn` 后不要为了发布状态再调用 `read_hdmi_input()`；低时钟模式会在第一次消费者到来前被这次 `80ee` 读取打停。启动后沿用已配置的输入几何，真正停帧后再由恢复 watcher 更新。
 
 不要在 `StartViChn` 之后打 `0x805a=0x88`（CSIBDG 精确匹配，TX 掉到 0 会把 IntCnt 打成 0）。`reboot -f` 只复位 SoC，不复位 LT6911。
 
@@ -120,7 +125,7 @@ HDMI 重建和 LT6911 CSI 时序归 **watcher**。不要读 `/proc/cvitek/vi` �
 
 超过几何范围或 150M pixel/s 吞吐预算的 HDMI 模式仍在 status 中提供 `hdmi_error=out_of_range` 和实测 `input_width/height`，UI 显示「不支持的分辨率」；绑定视频同样走 VPSS 上游静帧。
 
-VI `FrameRate` 列开机约 1 秒是 0，不能单靠这一列判无信号。判定输入消失仍要等 VENC 最近一包超过存活窗口（当前 1.5 s），避免短暂的 reader/IDR 间隙触发重建。
+VI `FrameRate` 列开机约 1 秒是 0，不能单靠这一列判无信号。已经收到过 AU 后，判定输入消失仍要等 VENC 最近一包超过存活窗口（当前 1.5 s）；新绑定或从空闲恢复后使用独立的 5 秒首帧窗口，避免慢锁定被误判成无信号并触发 LT6911 恢复。
 
 ## 空闲与释放
 
@@ -189,17 +194,3 @@ Core 只做鉴权和成品 JPEG 转发。扩展不得创建第二个 MMF source�
 `write_sample` 在视频线程上同步 `block_on` 加密。完成位是 `CRYPTODMA_WR_INT`，不要 `wait_event` 活 DTB 上那条从不触发的 PLIC 59。
 第一次 `ETIMEDOUT` 后进程内禁用 offload，避免再卡成 1 FPS。
 不要给 crypto backend 打 `CONCURRENT_H265_VIDEO`：H.265 VENC 和 CryptoDMA 同时跑会锁死 SG2002，Core 对 H.265 会话改用软件 AES-GCM。
-
-## 相关记录
-
-工作区实验记录（不是本仓库的规范）：
-
-| 文档 | 内容 |
-|------|------|
-| `docs/2k-30.md` | 2560×1440@30、ION 64 MiB |
-| `docs/3k-30.md` | 2880×1620@30 最大输出 |
-| `docs/720p-high-refresh.md` | 1280×720@120 |
-| `docs/cryptodma-srtp-timeout.md` | CryptoDMA 完成位与 1 FPS 回落 |
-| `docs/managed-snapshot-validation.md` | 受管截图与无信号准入 |
-| `docs/recall-video-validation.md` | VPSS Depth 与截图延迟 |
-| `docs/linux-5.15.md` / `docs/linux-6.18.md` | 试验机内核 bring-up |

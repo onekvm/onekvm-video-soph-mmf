@@ -2,8 +2,8 @@
 
 [English](../en/README.md) | 简体中文
 
-给代理和改视频的人看。流水账、本机排查写 `../../local-docs/`（gitignore）。
-试验机验收记在工作区 `onekvm/docs/`，不要把 rXX 会话写回这里。
+给代理和改视频的人看。本文档树只保留持续维护的接口和架构约束。
+流水账、本机排查和试验机记录写入 `../../local-docs/`（gitignore），不纳入本索引。
 
 当前默认内核是 **Linux 6.18**（`onekvm-nanokvm` 的 `PREFERRED_VERSION_linux-sophgo = "6.18%"`）。
 
@@ -16,19 +16,5 @@
 | [../../AGENTS.md](../../AGENTS.md) | 给代理的硬约束（`CLAUDE.md` 软链到此） |
 
 根目录 [README.zh-CN.md](../../README.zh-CN.md) 指向本文档树。
-
-## 工作区里的相关记录
-
-这些文件不在本仓库，但是当前试验结论的出处：
-
-| 文档 | 内容 |
-|------|------|
-| `docs/linux-6.18.md` | 当前默认内核 bring-up |
-| `docs/2k-30.md` | 2560×1440@30 |
-| `docs/3k-30.md` | 2880×1620@30 |
-| `docs/720p-high-refresh.md` | 1280×720@120 |
-| `docs/cryptodma-srtp-timeout.md` | CryptoDMA 完成位 |
-| `docs/managed-snapshot-validation.md` | 受管截图 |
-| `docs/linux-5.15.md` | 5.15 试验（不是默认） |
 
 设备侧 MMF runtime、backend、IPK 必须用 `onekvm-distro` 编。禁止树外交叉编译。
