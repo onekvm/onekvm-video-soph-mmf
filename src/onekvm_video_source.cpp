@@ -638,12 +638,20 @@ void stop_hdmi_watch(Source *source) {
         source->hdmi_watch.join();
 }
 
-void start_hdmi_watch(Source *source) {
-    if (source == nullptr)
+void ensure_hdmi_watch(Source *source) {
+    if (source == nullptr || source->hdmi_watch.joinable())
         return;
-    stop_hdmi_watch(source);
     source->hdmi_watch_stop.store(false, std::memory_order_relaxed);
-    source->hdmi_watch = std::thread(hdmi_watch_loop, source);
+    try {
+        source->hdmi_watch = std::thread(hdmi_watch_loop, source);
+    } catch (const std::exception &ex) {
+        source->hdmi_watch_stop.store(true, std::memory_order_relaxed);
+        std::fprintf(stderr, "OneKVM: HDMI watch thread failed: %s\n",
+                     ex.what());
+    } catch (...) {
+        source->hdmi_watch_stop.store(true, std::memory_order_relaxed);
+        std::fprintf(stderr, "OneKVM: HDMI watch thread failed\n");
+    }
 }
 
 int32_t source_create(const onekvm_video_source_config_v1 *config, void **result,
@@ -663,12 +671,7 @@ int32_t source_create(const onekvm_video_source_config_v1 *config, void **result
         delete source;
         return -1;
     }
-    try {
-        start_hdmi_watch(source);
-    } catch (const std::exception &ex) {
-        std::fprintf(stderr, "OneKVM: HDMI watch thread failed: %s\n",
-                     ex.what());
-    }
+    ensure_hdmi_watch(source);
     *result = source;
     return 0;
 }

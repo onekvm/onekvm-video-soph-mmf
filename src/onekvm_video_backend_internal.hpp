@@ -174,6 +174,8 @@ ONEKVM_VIDEO_INTERNAL int no_signal_frame(
     Source *source, onekvm_video_frame_v1 *frame,
     char *error, uint32_t error_capacity);
 ONEKVM_VIDEO_INTERNAL int cached_signal_present(Source *source);
+ONEKVM_VIDEO_INTERNAL void stop_hdmi_watch(Source *source);
+ONEKVM_VIDEO_INTERNAL void ensure_hdmi_watch(Source *source);
 
 ONEKVM_VIDEO_INTERNAL int32_t source_create(
     const onekvm_video_source_config_v1 *config, void **result,

@@ -498,10 +498,14 @@ int bind_encoder_to_source_locked(Encoder *encoder, Source *source,
         return configure_result;
     /* Core binds every iteration. Placeholder keeps VPSS→VENC bound and
        only switches the VPSS input to user frames. */
-    if (encoder->placeholder_frames && encoder->bound_source == source)
+    if (encoder->placeholder_frames && encoder->bound_source == source) {
+        ensure_hdmi_watch(source);
         return 0;
-    if (encoder->source_bound && encoder->bound_source == source)
+    }
+    if (encoder->source_bound && encoder->bound_source == source) {
+        ensure_hdmi_watch(source);
         return 0;
+    }
 
     std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
     const int result = mmf::bind_h26x_to_capture(encoder->channel, 0, source->channel);
@@ -521,6 +525,7 @@ int bind_encoder_to_source_locked(Encoder *encoder, Source *source,
        wait. Assume live until VENC actually goes stale. */
     if (source->cached_signal.load(std::memory_order_relaxed) < 1)
         source->cached_signal.store(1, std::memory_order_relaxed);
+    ensure_hdmi_watch(source);
     return 0;
 }
 
@@ -1015,6 +1020,10 @@ int32_t encoder_unbind_source(void *opaque, char *error, uint32_t error_capacity
         (void)mmf::pause_vi_dma();
         return 0;
     }
+    Source *source = encoder->bound_source;
+    /* The watcher may rebuild the shared MMF runtime.  Join it before parking
+       or closing VENC so it cannot reopen VI/VPSS in parallel with teardown. */
+    stop_hdmi_watch(source);
     /* Keep the configured channel, VPSS binding, and vendor receive worker
        across reconnects, but let MMF stop/join its userspace reader while
        parked. Actually unbinding the producer here leaves WAVE4 input-starved;
@@ -1027,9 +1036,8 @@ int32_t encoder_unbind_source(void *opaque, char *error, uint32_t error_capacity
         set_error(error, error_capacity, "park VPSS/VENC capture failed");
         return -1;
     }
-    if (encoder->bound_source != nullptr)
-        encoder->bound_source->capture_live.store(
-            false, std::memory_order_relaxed);
+    if (source != nullptr)
+        source->capture_live.store(false, std::memory_order_relaxed);
     encoder->source_bound = false;
     encoder->frame_pending = false;
     encoder->packet_borrowed = false;
