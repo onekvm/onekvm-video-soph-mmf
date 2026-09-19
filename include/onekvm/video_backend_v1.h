@@ -406,6 +406,12 @@ struct onekvm_video_backend_v1 {
         uint8_t *dest, uint64_t dest_bytes,
         struct onekvm_video_overlay_result_v1 *result,
         char *error, uint32_t error_capacity);
+    /* Optional tail: move the last encoder_read_packet buffer to the caller.
+     * owner is freed with encoder_free_taken_packet. data remains valid until
+     * that free. Missing members: copy from encoder_read_packet. */
+    int32_t (*encoder_take_packet)(void *encoder, uint8_t **data, uint32_t *size,
+                                   void **owner);
+    void (*encoder_free_taken_packet)(void *owner);
 };
 
 /*

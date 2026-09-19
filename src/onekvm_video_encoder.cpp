@@ -405,20 +405,11 @@ size_t complete_jpeg_size(const uint8_t *data, size_t size) {
 
 int drain_venc_packet(Encoder *encoder, const uint8_t **output_data,
                       uint64_t *output_pts_ns, bool *key_frame) {
-    /* Do not expose VENC-owned pack addresses to Go/Pion.  RTP packetization
-       and batched socket writes can outlive the driver's safe borrow window;
-       keeping the stream held during that work also lets the producer fill
-       its 12-pack queue, at which point cached SPS/PPS headers are dropped.
-
-       Copy the encoded access unit into the encoder's reusable staging buffer
-       and release the driver stream before crossing the ABI.  This is only a
-       copy of the compressed bitstream (not the multi-megabyte raw frame), and
-       performs no allocation in the steady state. */
-    if (encoder->output.size() < kVENCBufferSize)
-        encoder->output.resize(kVENCBufferSize);
-    const int result = mmf::take_ready_h26x_packet(
-        encoder->channel, encoder->output.data(),
-        static_cast<int>(encoder->output.size()), key_frame);
+    /* VENC pack addresses must not cross the ABI: RTP/sendmmsg outlive
+       ReleaseStream. The reader already copied out of the driver into a
+       recycled vector; move that buffer here instead of memcpy again. */
+    const int result = mmf::take_ready_h26x_into(
+        encoder->channel, &encoder->output, key_frame);
     if (result < 0) {
         recover_encoder_after_stream_error(encoder);
         return result;
@@ -1274,6 +1265,39 @@ uint32_t encoder_codec(void *opaque) {
     return public_codec(encoder->codec_type);
 }
 
+namespace {
+struct TakenPacket {
+    std::vector<uint8_t> buf;
+};
+} // namespace
+
+int32_t encoder_take_packet(void *opaque, uint8_t **data, uint32_t *size, void **owner)
+{
+    if (data != nullptr)
+        *data = nullptr;
+    if (size != nullptr)
+        *size = 0;
+    if (owner != nullptr)
+        *owner = nullptr;
+    auto *encoder = static_cast<Encoder *>(opaque);
+    if (encoder == nullptr || data == nullptr || size == nullptr || owner == nullptr)
+        return -1;
+    std::lock_guard<std::mutex> lock(encoder->mutex);
+    if (encoder->output.empty())
+        return 0;
+    auto *taken = new TakenPacket;
+    taken->buf.swap(encoder->output);
+    *data = taken->buf.data();
+    *size = static_cast<uint32_t>(taken->buf.size());
+    *owner = taken;
+    return 0;
+}
+
+void encoder_free_taken_packet(void *owner)
+{
+    delete static_cast<TakenPacket *>(owner);
+}
+
 void encoder_release_packet(void *opaque) {
     auto *encoder = static_cast<Encoder *>(opaque);
     if (encoder == nullptr) return;
@@ -1479,6 +1503,10 @@ const onekvm_video_backend_v1 kBackend = {
     encoder_allocate,
     encoder_allocation,
     source_snapshot,
+    nullptr,
+    nullptr,
+    encoder_take_packet,
+    encoder_free_taken_packet,
 };
 
 
