@@ -46,7 +46,7 @@ void fill_nv21_black(uint8_t *data, int width, int height)
 }
 
 void letterbox_nv21(const uint8_t *src, int src_w, int src_h,
-		    uint8_t *dst, int dst_w, int dst_h)
+		    uint8_t *dst, int dst_w, int dst_h, bool stretch = false)
 {
 	fill_nv21_black(dst, dst_w, dst_h);
 	if (src == nullptr || src_w <= 0 || src_h <= 0 || dst_w <= 0 || dst_h <= 0)
@@ -54,7 +54,10 @@ void letterbox_nv21(const uint8_t *src, int src_w, int src_h,
 
 	int fit_w;
 	int fit_h;
-	if (static_cast<int64_t>(src_w) * dst_h <= static_cast<int64_t>(src_h) * dst_w) {
+	if (stretch) {
+		fit_w = dst_w;
+		fit_h = dst_h;
+	} else if (static_cast<int64_t>(src_w) * dst_h <= static_cast<int64_t>(src_h) * dst_w) {
 		fit_h = dst_h;
 		fit_w = static_cast<int>(static_cast<int64_t>(src_w) * dst_h / src_h);
 	} else {
@@ -122,12 +125,14 @@ bool unpack(const no_signal_asset_t &asset, uint8_t *output, std::size_t output_
 
 } // namespace
 
-extern "C" int render_no_signal_nv21(uint8_t *data, int capacity, int width, int height)
+extern "C" int render_no_signal_nv21_for_output(uint8_t *data, int capacity,
+		int width, int height, int output_width, int output_height)
 {
 	/* NV21 stores one luma byte per pixel and one interleaved VU pair per 2x2
 	 * block. Reject invalid geometry before converting it to size_t; otherwise
 	 * a negative height becomes a very large unsigned allocation size. */
 	if (data == nullptr || capacity <= 0 || width <= 0 || height <= 0 ||
+		output_width <= 0 || output_height <= 0 ||
 		(width & 1) != 0 || (height & 1) != 0)
 		return -1;
 	const std::size_t pixels = static_cast<std::size_t>(width) *
@@ -138,7 +143,9 @@ extern "C" int render_no_signal_nv21(uint8_t *data, int capacity, int width, int
 	if (image_size > static_cast<std::size_t>(capacity))
 		return -1;
 
-	const no_signal_asset_t *exact = find_asset(width, height);
+	const bool scaled_for_output = width != output_width || height != output_height;
+	const no_signal_asset_t *exact = scaled_for_output
+		? nullptr : find_asset(width, height);
 	if (exact != nullptr) {
 		if (!unpack(*exact, data, image_size))
 			fill_nv21_black(data, width, height);
@@ -148,7 +155,7 @@ extern "C" int render_no_signal_nv21(uint8_t *data, int capacity, int width, int
 	/* Packed artwork is only 1080/720/480. Other VENC sizes (800x600,
 	   1024x768, auto-follow HDMI) letterbox the nearest PNG. A still
 	   black frame is better than failing encoder_read_packet. */
-	const no_signal_asset_t *src = nearest_asset(width, height);
+	const no_signal_asset_t *src = nearest_asset(output_width, output_height);
 	if (src == nullptr) {
 		fill_nv21_black(data, width, height);
 		return static_cast<int>(image_size);
@@ -167,8 +174,16 @@ extern "C" int render_no_signal_nv21(uint8_t *data, int capacity, int width, int
 		fill_nv21_black(data, width, height);
 		return static_cast<int>(image_size);
 	}
-	letterbox_nv21(unpacked.data(), src->width, src->height, data, width, height);
+	letterbox_nv21(unpacked.data(), src->width, src->height, data, width, height,
+			scaled_for_output);
 	return static_cast<int>(image_size);
+}
+
+extern "C" int render_no_signal_nv21(uint8_t *data, int capacity,
+		int width, int height)
+{
+	return render_no_signal_nv21_for_output(data, capacity, width, height,
+			width, height);
 }
 
 extern "C" int no_signal_h264(int width, int height, const uint8_t **data, size_t *size)

@@ -220,6 +220,37 @@ constexpr InputResolution infer_hdmi_mode(InputResolution hdmi)
    If VI is already dead (no recent frames) and HDMI reports a different
    supported mode, follow HDMI: waiting for CSI after a false grow never
    unsticks a hung CSIBDG (1080 source, 1440 receiver). */
+/* PCIe open_source falls back to 640x480 when LT6911 counters are still
+   0x0. 720x480 is the same bootstrap family (splitter/BIOS).  Neither
+   should be treated as a proven live HDMI mode. */
+constexpr bool is_pcie_bootstrap_resolution(InputResolution resolution)
+{
+    return resolution.height == 480 &&
+        resolution.width >= 640 && resolution.width <= 720;
+}
+
+/* Cold-start VI size after the pre-CSI probe window.
+   Prefer two matching samples, then any supported HDMI reading seen during
+   the window, then a recalled live mode from the previous process, then the
+   PCIe 640x480 / Cube 1080p fallback. */
+constexpr InputResolution pick_initial_vi_resolution(
+    bool pcie,
+    InputResolution stable,
+    InputResolution best_seen,
+    InputResolution recalled = {})
+{
+    if (supported_input_resolution(stable))
+        return stable;
+    if (supported_input_resolution(best_seen))
+        return best_seen;
+    if (supported_input_resolution(recalled) &&
+        !is_pcie_bootstrap_resolution(recalled))
+        return recalled;
+    if (pcie)
+        return {640, 480};
+    return {1920, 1080};
+}
+
 constexpr InputResolution choose_vi_receiver_size(
     InputResolution csi,
     InputResolution hdmi,
@@ -351,6 +382,27 @@ constexpr bool hdmi_csi_rearm_ready(unsigned samples)
     return samples >= kHDMICsiRearmSamples;
 }
 
+/* Once the bound encoder has gone stale and entered placeholder, two silent
+   samples distinguish persistent blanking from a transient read. Recovery
+   first closes the source and waits for the next timing; GPIO is a fallback
+   only when a reported timing still produces no live access units. */
+constexpr unsigned kHDMIBlankRearmSamples = 2;
+
+constexpr unsigned next_hdmi_blank_rearm_samples(
+    bool blank_live_loss, unsigned samples)
+{
+    if (!blank_live_loss)
+        return 0;
+    if (samples >= kHDMIBlankRearmSamples)
+        return kHDMIBlankRearmSamples;
+    return samples + 1;
+}
+
+constexpr bool hdmi_blank_rearm_ready(unsigned samples, bool attempted)
+{
+    return !attempted && samples >= kHDMIBlankRearmSamples;
+}
+
 /* Live AUs at ~half the configured pipeline fps. 1080p60 HDMI with LT6911
    CSI stuck at 30 still looks "live" (packet every 33 ms < 1.5 s stale
    window), so the watcher never probes. 720p120→60 is the same class.
@@ -419,9 +471,9 @@ constexpr auto hdmi_watch_interval(
     bool capture_live = true)
 {
     using namespace std::chrono_literals;
-    (void)cached_signal;
-    (void)current;
-    (void)capture_live;
+    if (cached_signal != 1 &&
+        (capture_live || is_pcie_bootstrap_resolution(current)))
+        return 100ms;
     return 1000ms;
 }
 
@@ -429,8 +481,13 @@ constexpr bool hdmi_watch_probe_due(
     int cached_signal, InputResolution current,
     bool capture_live = true)
 {
-    (void)current;
-    return capture_live && cached_signal != 1;
+    if (cached_signal == 1)
+        return false;
+    if (capture_live)
+        return true;
+    /* PCIe 640/720x480 bootstrap: silent-probe HDMI before any consumer
+       binds, so WebRTC never locks onto a 640 SPS. */
+    return is_pcie_bootstrap_resolution(current);
 }
 
 class InputResolutionTracker {

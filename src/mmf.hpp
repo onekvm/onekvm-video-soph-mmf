@@ -12,15 +12,24 @@ struct onekvm_lt6911_input_timing {
     uint32_t csi_height;
     uint32_t hdmi_width;
     uint32_t hdmi_height;
+    uint32_t uxc_rx_width;
+    uint32_t uxc_rx_height;
+    uint32_t uxc_rx_signal;
 };
 
 int render_no_signal_nv21(uint8_t *data, int capacity, int width, int height);
+int render_no_signal_nv21_for_output(uint8_t *data, int capacity,
+                                     int width, int height,
+                                     int output_width, int output_height);
 int no_signal_h264(int width, int height, const uint8_t **data, size_t *size);
 int lt6911_get_input_timing(int pipe, struct onekvm_lt6911_input_timing *timing);
+int lt6911_get_input_timing_pcie(int pipe, struct onekvm_lt6911_input_timing *timing);
+int lt6911_get_input_timing_silent(int pipe, struct onekvm_lt6911_input_timing *timing);
 int lt6911_get_input_size(int pipe, uint32_t *width, uint32_t *height);
 int lt6911_get_capture_size(uint32_t *width, uint32_t *height);
 int lt6911_kick_hdmi(void);
 int lt6911_start_csi(void);
+int lt6911_start_csi_with_cached_timing(void);
 void onekvm_lt6911_i2c_lock(void);
 void onekvm_lt6911_i2c_unlock(void);
 int onekvm_lt6911_set_active_size(uint32_t width, uint32_t height);
@@ -94,6 +103,10 @@ struct RateControl {
 };
 
 // init sys
+/* Reclaim a multimedia generation left by a previous process before touching
+   LT6911.  This is intentionally separate from initialize(): the bridge must
+   be armed after stale VI teardown but before the new VI starts. */
+int reclaim_stale_runtime(void);
 int initialize(void);
 int shutdown(void);
 
@@ -142,13 +155,18 @@ void set_capture_flip(int ch, bool en);
 
 // get vi frame
 int acquire_capture_frame(int ch, void **data, int *len, int *width, int *height, int *format);
+int acquire_capture_frame_timeout(int ch, void **data, int *len, int *width,
+	int *height, int *format, int timeout_ms);
 void release_capture_frame(int ch);
 
 // venc
 int open_jpeg_encoder(int ch, int w, int h, int format, int quality);
 int close_jpeg_encoder(int ch);
 int submit_jpeg_frame(int ch, uint8_t *data, int w, int h, int format, int quality);
+int submit_jpeg_frame_timeout(int ch, uint8_t *data, int w, int h,
+	int format, int quality, int timeout_ms);
 int read_jpeg_packet(int ch, uint8_t *dst, int capacity);
+int read_jpeg_packet_timeout(int ch, uint8_t *dst, int capacity, int timeout_ms);
 int release_jpeg_packet(int ch);
 int open_h26x_encoder(int ch, const H26xEncoderConfig &config,
     const RateControl &rate_control);

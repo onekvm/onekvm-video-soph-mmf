@@ -76,10 +76,10 @@ Sipeed SDK 里预编译的 MMF 组件。
 | LT6911 传感器列表 | [`sophgo/SensorSupportList`](https://github.com/sophgo/SensorSupportList) `sg200x-dev` | `f064b02ba8a82746f3e87a2c5bb3bd683ff95db0` |
 | 编译 `cvi_mpi` 用的 osdrv | [`sophgo/osdrv`](https://github.com/sophgo/osdrv) `sg200x-dev` | `aa542c41df94f7bc656cb740f6622a5dca7dc403` |
 | 视频编解码固件 | [`sophgo/ramdisk`](https://github.com/sophgo/ramdisk) | `1ec8fcb63a358c17c369bac38eb42dc16f30a3bb` |
-| 视频内核模块 | 工作区 `osdrv-sg200x`（Sophgo osdrv + NanoKVM 补丁，含 6.18 API） | 配方 `onekvm-video-soph-mmf-modules` |
+| 视频内核模块 | 工作区 `osdrv-sg200x`（直接维护 NanoKVM 适配与 6.18 API） | 配方 `onekvm-video-soph-mmf-modules` |
 
 OSDRV 模块包括 `soph_vcodec.ko`、`soph_jpeg.ko`、`soph_vi.ko`、`soph_vpss.ko`。
-bind 线程回收以及 6.18 兼容补丁在模块配方里，不在本仓库。
+bind 线程回收和 6.18 兼容实现直接维护在 `osdrv-sg200x` 源码仓库。
 
 不要把不同版本的内核模块、`cvi_mpi`、osdrv 或固件和此后端混用。必须一起安装的
 三个应用/多媒体 IPK：
@@ -150,7 +150,8 @@ worktree 不会改这个开关。需要这两份二进制时再覆盖 `EXTRA_OEC
 
 接口在 `include/onekvm/video_backend_v1.h` 和
 `include/onekvm/crypto_backend_v1.h`，都有明确版本。H.265 会话不广告硬件加密，
-Core 改用软件 AES-GCM。CryptoDMA 第一次 `ETIMEDOUT` 后进程内禁用 offload。
+Core 改用软件 AES-GCM。CryptoDMA 单次 `ETIMEDOUT` 只让当前批次走软件；
+Core 使用最长 30 秒的指数退避自动探测恢复，不会在进程生命周期内永久禁用 offload。
 
 ## 无信号画面资源
 

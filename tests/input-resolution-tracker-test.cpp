@@ -30,8 +30,8 @@ int main() {
     if (hdmi_watch_interval(1, {800, 600}) != 1s) return 46;
     if (hdmi_watch_interval(1, {1920, 1080}) != 1s) return 47;
     if (hdmi_watch_interval(1, {2560, 1440}) != 1s) return 48;
-    if (hdmi_watch_interval(0, {800, 600}) != 1s) return 68;
-    if (hdmi_watch_interval(-1, {}) != 1s) return 69;
+    if (hdmi_watch_interval(0, {800, 600}) != 100ms) return 68;
+    if (hdmi_watch_interval(-1, {}) != 100ms) return 69;
     if (hdmi_watch_probe_due(1, {800, 600})) return 70;
     if (hdmi_watch_probe_due(1, {1920, 1080})) return 71;
     if (hdmi_watch_probe_due(1, {2560, 1440})) return 72;
@@ -40,7 +40,9 @@ int main() {
     if (hdmi_watch_probe_due(1, {1920, 1080}, false)) return 79;
     if (hdmi_watch_interval(1, {1920, 1080}, false) != 1s) return 80;
     if (hdmi_watch_interval(1, {800, 600}, false) != 1s) return 81;
-    if (hdmi_watch_probe_due(0, {640, 480}, false)) return 82;
+    if (!hdmi_watch_probe_due(-1, {640, 480}, false)) return 82;
+    if (hdmi_watch_probe_due(1, {640, 480}, false)) return 122;
+    if (hdmi_watch_probe_due(-1, {1920, 1080}, false)) return 123;
     if (!csi_timing_present({1920, 1080})) return 82;
     if (!csi_timing_present({0, 0}, {1920, 1080})) return 83;
     if (csi_timing_present({0, 0}, {0, 0})) return 84;
@@ -226,6 +228,22 @@ int main() {
             {1920, 1080}, {1920, 1080}, {0, 0}, {1920, 1080}, false))
         return 89;
 
+    /* Two silent-probe samples bound the wait after the encoder went stale. */
+    if (next_hdmi_blank_rearm_samples(false, 3) != 0)
+        return 104;
+    if (next_hdmi_blank_rearm_samples(true, 0) != 1)
+        return 105;
+    if (next_hdmi_blank_rearm_samples(true, 1) != 2)
+        return 106;
+    if (next_hdmi_blank_rearm_samples(true, 2) != 2)
+        return 107;
+    if (hdmi_blank_rearm_ready(1, false))
+        return 108;
+    if (!hdmi_blank_rearm_ready(2, false))
+        return 109;
+    if (hdmi_blank_rearm_ready(2, true))
+        return 110;
+
     /* CSI half-rate lock: 1080p60→30 is the stuck LT6911/CSIBDG case. */
     if (!csi_half_rate_locked(60, 30))
         return 91;
@@ -265,6 +283,37 @@ int main() {
         return 108;
     if (csi_half_rate_rearm_ready(4, true))
         return 109;
+
+    if (!is_pcie_bootstrap_resolution({640, 480}))
+        return 111;
+    if (!is_pcie_bootstrap_resolution({720, 480}))
+        return 112;
+    if (is_pcie_bootstrap_resolution({1920, 1080}))
+        return 113;
+    if (is_pcie_bootstrap_resolution({1280, 720}))
+        return 114;
+    if (pick_initial_vi_resolution(true, {1920, 1080}, {}, {}) !=
+        InputResolution{1920, 1080})
+        return 115;
+    if (pick_initial_vi_resolution(true, {}, {1920, 1080}, {1280, 720}) !=
+        InputResolution{1920, 1080})
+        return 116;
+    if (pick_initial_vi_resolution(true, {}, {}, {1920, 1080}) !=
+        InputResolution{1920, 1080})
+        return 117;
+    if (pick_initial_vi_resolution(true, {}, {}, {640, 480}) !=
+        InputResolution{640, 480})
+        return 118;
+    if (pick_initial_vi_resolution(true, {}, {}, {}) !=
+        InputResolution{640, 480})
+        return 119;
+    if (pick_initial_vi_resolution(false, {}, {}, {}) !=
+        InputResolution{1920, 1080})
+        return 120;
+    if (hdmi_watch_interval(-1, {640, 480}, false) != 300ms)
+        return 124;
+    if (hdmi_watch_interval(-1, {1920, 1080}, false) != 1s)
+        return 125;
 
     return 0;
 }

@@ -3,6 +3,7 @@
 #include <vector>
 
 extern "C" int render_no_signal_nv21(uint8_t *, int, int, int);
+extern "C" int render_no_signal_nv21_for_output(uint8_t *, int, int, int, int, int);
 extern "C" int no_signal_h264(int, int, const uint8_t **, size_t *);
 
 int main()
@@ -55,6 +56,31 @@ int main()
 		std::vector<uint8_t> frame(image_size);
 		if (render_no_signal_nv21(frame.data(), image_size, width, height) != image_size)
 			return 17;
+	}
+	{
+		/* A 640x480 receiver can probe while the encoded placeholder stays
+		 * 1920x1080. Keep the 1080p artwork layout through VPSS scaling. */
+		constexpr int output_w = 1920, output_h = 1080;
+		constexpr int input_w = 640, input_h = 480;
+		std::vector<uint8_t> output(output_w * output_h * 3 / 2);
+		std::vector<uint8_t> input(input_w * input_h * 3 / 2);
+		if (render_no_signal_nv21(output.data(), output.size(), output_w, output_h) < 0 ||
+		    render_no_signal_nv21_for_output(input.data(), input.size(),
+			input_w, input_h, output_w, output_h) < 0)
+			return 18;
+		unsigned long error = 0, samples = 0;
+		for (int y = 0; y < input_h; y += 8) {
+			for (int x = 0; x < input_w; x += 8) {
+				const int expected = output[(y * output_h / input_h) * output_w +
+				                            x * output_w / input_w];
+				const int actual = input[y * input_w + x];
+				error += static_cast<unsigned>(expected > actual
+					? expected - actual : actual - expected);
+				samples++;
+			}
+		}
+		if (error > samples * 3)
+			return 19;
 	}
 	return 0;
 }

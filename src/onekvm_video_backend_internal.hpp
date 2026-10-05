@@ -34,29 +34,34 @@ ONEKVM_VIDEO_INTERNAL inline constexpr size_t kVENCBufferSize = 1024 * 1024;
 ONEKVM_VIDEO_INTERNAL inline constexpr size_t kJPEGBufferSize = 2 * 1024 * 1024;
 ONEKVM_VIDEO_INTERNAL inline constexpr int kRecoveryFailureThreshold = 3;
 ONEKVM_VIDEO_INTERNAL inline constexpr auto kRecoveryInterval = std::chrono::seconds(5);
+ONEKVM_VIDEO_INTERNAL inline constexpr auto kHDMIBlankRetryInterval =
+    std::chrono::seconds(6);
 ONEKVM_VIDEO_INTERNAL inline constexpr auto kHDMIChangeIdleWindow = std::chrono::milliseconds(500);
 ONEKVM_VIDEO_INTERNAL inline constexpr auto kHDMIChangeProbeInterval = std::chrono::seconds(2);
 /* Dead VI after a false grow: probe HDMI more often so a later 1080 can
    rebuild CSIBDG without waiting on the live 2s interval. */
 ONEKVM_VIDEO_INTERNAL inline constexpr auto kHDMIFollowProbeInterval =
-    std::chrono::milliseconds(500);
+    std::chrono::milliseconds(100);
 /* HDMI 800→1080 changes CSI output before the video loop runs.  A dedicated
    watcher must see HDMI timing while the source is still 800, including when
    no WebRTC consumer is attached. */
 ONEKVM_VIDEO_INTERNAL inline constexpr auto kHDMIChangeGrowProbeInterval =
     std::chrono::milliseconds(100);
 ONEKVM_VIDEO_INTERNAL inline constexpr auto kSignalProbeInterval = std::chrono::seconds(10);
-ONEKVM_VIDEO_INTERNAL inline constexpr auto kNoSignalProbeInterval = std::chrono::seconds(1);
+ONEKVM_VIDEO_INTERNAL inline constexpr auto kNoSignalProbeInterval =
+    std::chrono::milliseconds(100);
 static_assert(onekvm::hdmi_watch_interval(1, {800, 600}) ==
-    std::chrono::duration_cast<std::chrono::milliseconds>(kNoSignalProbeInterval));
+    std::chrono::milliseconds(1000));
 static_assert(onekvm::hdmi_watch_interval(1, {1920, 1080}) ==
-    std::chrono::duration_cast<std::chrono::milliseconds>(kNoSignalProbeInterval));
+    std::chrono::milliseconds(1000));
 static_assert(onekvm::hdmi_watch_interval(1, {1920, 1080}, false) ==
-    std::chrono::duration_cast<std::chrono::milliseconds>(kNoSignalProbeInterval));
+    std::chrono::milliseconds(1000));
 static_assert(!onekvm::hdmi_watch_probe_due(1, {1920, 1080}, false));
 static_assert(!onekvm::hdmi_watch_probe_due(1, {800, 600}, true));
 static_assert(onekvm::hdmi_watch_probe_due(0, {640, 480}, true));
-static_assert(!onekvm::hdmi_watch_probe_due(0, {640, 480}, false));
+static_assert(onekvm::hdmi_watch_probe_due(0, {640, 480}, false));
+static_assert(onekvm::hdmi_watch_probe_due(-1, {640, 480}, false));
+static_assert(!onekvm::hdmi_watch_probe_due(-1, {1920, 1080}, false));
 static_assert(onekvm::csi_half_rate_locked(60, 30));
 static_assert(!onekvm::csi_half_rate_locked(60, 59));
 static_assert(!onekvm::csi_half_rate_locked(30, 30));
@@ -71,30 +76,48 @@ ONEKVM_VIDEO_INTERNAL inline constexpr auto kRecentFrameSignalWindow = std::chro
    picture jump.  Wait out a short GetStream stall first. */
 ONEKVM_VIDEO_INTERNAL inline constexpr auto kVencLiveRecentWindow =
     std::chrono::milliseconds(1500);
+/* After a short VENC stall, only two entirely blank read-only bridge timings
+   may start HDMI recovery. A transient encoder pause keeps the full grace. */
+ONEKVM_VIDEO_INTERNAL inline constexpr auto kPcieBlankProbeDelay =
+    std::chrono::milliseconds(250);
 /* A newly resumed VPSS→VENC path may take longer than the normal live-AU
    staleness window to emit its first packet. 1.5 s is too short: the packet
    path then treats "no AU yet" as no HDMI, probes LT6911 80ee, and stalls
    low-clock CSI before it finishes locking. */
 ONEKVM_VIDEO_INTERNAL inline constexpr auto kVencFirstAuWindow =
     std::chrono::milliseconds(5000);
-/* A full PCIe HDMI reset restarts the LT6911UXC MCU.  Let its firmware
-   reacquire HDMI and restore CSI before inspecting the timing or applying
-   the host-side CSI arm sequence.  Otherwise open_source follows the reset
-   with another startup pulse while the BIOS source is still negotiating. */
-ONEKVM_VIDEO_INTERNAL inline constexpr auto kPcieHDMIResetRecoverySettle =
-    std::chrono::milliseconds(2500);
+/* Give the LT6911UXC MCU time to restart before probing, then keep the
+   previous bounded recovery window if it has not published a new timing. */
+ONEKVM_VIDEO_INTERNAL inline constexpr auto kPcieHDMIResetEarliestProbe =
+    std::chrono::milliseconds(1000);
+ONEKVM_VIDEO_INTERNAL inline constexpr auto kPcieHDMIResetProbeWindow =
+    std::chrono::milliseconds(3500);
+ONEKVM_VIDEO_INTERNAL inline constexpr auto kPcieHDMIPassiveProbeWindow =
+    std::chrono::milliseconds(2000);
 ONEKVM_VIDEO_INTERNAL inline constexpr auto kInitialResolutionSampleDelay = std::chrono::milliseconds(20);
+/* D283 timing measurement is asynchronous.  A single 20 ms pair can still
+   read 0x0 on a splitter even though the bridge starts emitting 1080p shortly
+   afterwards.  Poll only before CSI/VI start, when opening 80ee cannot stall
+   a live low-clock stream. */
+/* D283 on a splitter often stays 0x0 for well over 750 ms after the PCIe
+   HDMI reset settle.  2.5 s is still before CSI/VI start, so 80ee cannot
+   stall a live low-clock stream. */
+ONEKVM_VIDEO_INTERNAL inline constexpr auto kInitialResolutionProbeWindow =
+    std::chrono::milliseconds(2500);
 
 struct ONEKVM_VIDEO_INTERNAL Source {
     std::mutex mutex;
     int channel = -1;
     bool initialized = false;
+    bool preserved_locked_csi = false;
     bool frame_pending = false;
     uint64_t frame_token = 0;
     onekvm_video_source_config_v1 config{};
     std::vector<uint8_t> no_signal_frame;
     int no_signal_width = 0;
     int no_signal_height = 0;
+    int no_signal_art_width = 0;
+    int no_signal_art_height = 0;
     int failures = 0;
     std::chrono::steady_clock::time_point last_recovery{};
     std::chrono::steady_clock::time_point last_hdmi_probe{};
@@ -102,6 +125,14 @@ struct ONEKVM_VIDEO_INTERNAL Source {
     std::atomic<uint64_t> last_capture_ns{0};
     std::atomic<uint64_t> last_signal_probe_ns{0};
     std::atomic<int> cached_signal{-1};
+    /* After a loss, only a fresh HDMI timing probe may resume live packets.
+       Reopening VI can otherwise publish old VENC AUs as live video. */
+    std::atomic<bool> awaiting_hdmi_timing{false};
+    onekvm::InputResolution hdmi_resume_candidate{};
+    unsigned hdmi_resume_samples = 0;
+    unsigned bound_resume_packets = 0;
+    uint64_t bound_resume_first_ns = 0;
+    bool bound_resume_need_key = false;
     std::atomic<int> last_vi_int_cnt{0};
     std::atomic<uint64_t> last_vi_int_change_ns{0};
     std::atomic_flag signal_probe_running = ATOMIC_FLAG_INIT;
@@ -117,9 +148,12 @@ struct ONEKVM_VIDEO_INTERNAL Source {
        bound stream is in the placeholder path so recovery can issue a real
        HPD reset instead of waiting forever for a geometry sample. */
     unsigned hdmi_blank_rearm_samples = 0;
-    /* A full PCIe HPD reset is expensive. Do it once per continuous blank
-       period; clear the latch only after timing becomes non-zero again. */
+    unsigned early_blank_samples = 0;
+    /* Keep the first reset short of a storm; retry with a cooldown if the
+       source remains blank, cycling bootstrap geometries. */
     bool hdmi_blank_rearm_attempted = false;
+    unsigned hdmi_blank_reset_count = 0;
+    std::atomic<bool> hdmi_waiting_for_signal{false};
     unsigned csi_half_rate_samples = 0;
     bool csi_half_rate_rearmed = false;
     int csi_half_rate_target = 0;
@@ -185,12 +219,15 @@ ONEKVM_VIDEO_INTERNAL int maybe_rebuild_for_hdmi_change(
     Source *source, char *error, uint32_t error_capacity);
 ONEKVM_VIDEO_INTERNAL int maybe_rebuild_for_hdmi_change_now(
     Source *source, char *error, uint32_t error_capacity);
+/* Caller holds source->mutex; only probe after VENC has stopped producing. */
+ONEKVM_VIDEO_INTERNAL bool pcie_hdmi_blank_after_stall(Source *source);
 /* Caller holds encoder and source mutexes. 1 = rebuilt, 0 = no change, -1 = failed. */
 ONEKVM_VIDEO_INTERNAL int maybe_rearm_csi_half_rate(
     Encoder *encoder, Source *source, char *error, uint32_t error_capacity);
 ONEKVM_VIDEO_INTERNAL int ensure_no_signal_nv21(
     Source *source, int width, int height,
-    char *error, uint32_t error_capacity);
+    char *error, uint32_t error_capacity,
+    int art_width = 0, int art_height = 0);
 ONEKVM_VIDEO_INTERNAL int no_signal_frame(
     Source *source, onekvm_video_frame_v1 *frame,
     char *error, uint32_t error_capacity);

@@ -85,7 +85,7 @@ Userspace MMF libraries are built from official Sophgo sources, pinned as one
 | Sensor list (LT6911) | [`sophgo/SensorSupportList`](https://github.com/sophgo/SensorSupportList) `sg200x-dev` | `f064b02ba8a82746f3e87a2c5bb3bd683ff95db0` |
 | `cvi_mpi` build-time osdrv | [`sophgo/osdrv`](https://github.com/sophgo/osdrv) `sg200x-dev` | `aa542c41df94f7bc656cb740f6622a5dca7dc403` |
 | Video codec firmware | [`sophgo/ramdisk`](https://github.com/sophgo/ramdisk) | `1ec8fcb63a358c17c369bac38eb42dc16f30a3bb` |
-| Video kernel modules | workspace `osdrv-sg200x` (Sophgo osdrv plus NanoKVM patches, including 6.18 API) | recipe `onekvm-video-soph-mmf-modules` |
+| Video kernel modules | workspace `osdrv-sg200x` (NanoKVM adaptation and Linux 6.18 support maintained in source) | recipe `onekvm-video-soph-mmf-modules` |
 
 Kernel modules include `soph_vcodec.ko`, `soph_jpeg.ko`, `soph_vi.ko`, and
 `soph_vpss.ko`. Bind-thread teardown and 6.18 compatibility live in that
@@ -167,8 +167,9 @@ The shared library exports exactly two entry points:
 Interfaces are in `include/onekvm/video_backend_v1.h` and
 `include/onekvm/crypto_backend_v1.h`. Both are versioned. Hardware crypto is
 not advertised for concurrent H.265 sessions; Core uses software AES-GCM
-there. First CryptoDMA `ETIMEDOUT` disables offload for the rest of the
-process.
+there. A CryptoDMA `ETIMEDOUT` falls back only for the current batch. Core
+automatically probes recovery with exponential backoff capped at 30 seconds;
+offload is not permanently disabled for the process lifetime.
 
 ## No-signal assets
 

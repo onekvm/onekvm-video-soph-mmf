@@ -4,7 +4,8 @@
   "transport": "native",
   "driver": "soph-mmf",
   "library": "/usr/lib/onekvm/video-backends/soph-mmf.so",
-  "capabilities": ["video", "hid", "msd", "srtp-tx-offload"],
+  "capabilities": ["video", "hid", "msd", "srtp-tx-offload", "temperature"],
+  "temperature_millidegrees_path": "/sys/class/thermal/thermal_zone0/temp",
   "video_codecs": ["auto", "h264", "h265", "mjpeg"],
   "video_bitrate_kbps": {"minimum": 100, "maximum": 10000, "step": 100, "default": 5000},
   "video_formats": [

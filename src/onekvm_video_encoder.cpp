@@ -500,9 +500,9 @@ int32_t encoder_prepare(void *opaque, char *error, uint32_t error_capacity) {
 
 int bind_encoder_to_source_locked(Encoder *encoder, Source *source,
                                   char *error, uint32_t error_capacity) {
-    if (!source->initialized || source->frame_pending || encoder->codec_type == 0) {
+    if (!source->initialized || source->frame_pending) {
         set_error(error, error_capacity,
-                  "bound encoding requires an idle source and H.264/H.265 encoder");
+                  "bound encoding requires an idle initialized source");
         return -1;
     }
     const auto [width, height] = source_output_size(source);
@@ -518,6 +518,18 @@ int bind_encoder_to_source_locked(Encoder *encoder, Source *source,
         encoder, width, height, error, error_capacity);
     if (configure_result != 0)
         return configure_result;
+    /* JPEG is a logical bound stream rather than a SYS_Bind producer.  Keep
+       the JPEG VENC alive, borrow the depth-1 VPSS output in
+       encoder_read_packet(), and return a complete hardware JPEG for every
+       read.  This lets a persistent MJPEG consumer coexist with the primary
+       VPSS->H.26x binding without sending H.26x through the manual path. */
+    if (encoder->codec_type == 0) {
+        encoder->source_bound = true;
+        encoder->bound_source = source;
+        encoder->reset_source = source;
+        ensure_hdmi_watch(source);
+        return 0;
+    }
     /* Core binds every iteration. Placeholder keeps VPSS→VENC bound and
        only switches the VPSS input to user frames. */
     if (encoder->placeholder_frames && encoder->bound_source == source) {
@@ -543,10 +555,20 @@ int bind_encoder_to_source_locked(Encoder *encoder, Source *source,
     encoder->prepared_size = 0;
     encoder->prepared_pts_ns = 0;
     encoder->bound_since_ns = monotonic_ns();
+    if (source->awaiting_hdmi_timing.load(std::memory_order_relaxed)) {
+        source->bound_resume_packets = 0;
+        source->bound_resume_first_ns = 0;
+        source->bound_resume_need_key = false;
+    }
     /* cached_signal starts at -1. The 1080p watcher probes LT6911 at 1 Hz
        whenever it is not 1; that 80ee access stalls CSI during the first-AU
-       wait. Assume live until VENC actually goes stale. */
-    if (source->cached_signal.load(std::memory_order_relaxed) < 1)
+       wait. Assume live until VENC actually goes stale — except on the PCIe
+       640/720x480 bootstrap, where skipping I2C leaves WebRTC locked to a
+       640 SPS until the placeholder path finally probes HDMI. */
+    if (!source->awaiting_hdmi_timing.load(std::memory_order_relaxed) &&
+        source->cached_signal.load(std::memory_order_relaxed) < 1 &&
+        !onekvm::is_pcie_bootstrap_resolution(
+            source->input_resolution.current()))
         source->cached_signal.store(1, std::memory_order_relaxed);
     ensure_hdmi_watch(source);
     return 0;
@@ -606,6 +628,12 @@ int encode_bound_placeholder(Encoder *encoder, Source *source,
     const bool entering = !encoder->placeholder_frames;
     encoder->placeholder_frames = true;
     if (entering) {
+        source->awaiting_hdmi_timing.store(true, std::memory_order_relaxed);
+        source->hdmi_resume_candidate = {};
+        source->hdmi_resume_samples = 0;
+        source->bound_resume_packets = 0;
+        source->bound_resume_first_ns = 0;
+        source->bound_resume_need_key = false;
         encoder->placeholder_need_key = true;
         encoder->placeholder_idr_tries = 0;
         encoder->placeholder_logged = false;
@@ -627,7 +655,10 @@ int encode_bound_placeholder(Encoder *encoder, Source *source,
         width = encoder->width;
         height = encoder->height;
     }
-    if (ensure_no_signal_nv21(source, width, height, error, error_capacity) != 0)
+    /* VPSS accepts frames at its input size. Preserve the artwork's output
+       proportions when the no-signal receiver probes a different size. */
+    if (ensure_no_signal_nv21(source, width, height, error, error_capacity,
+                              encoder->width, encoder->height) != 0)
         return -1;
     {
         std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
@@ -723,11 +754,26 @@ int32_t fill_bound_live_packet(Encoder *encoder, Source *source,
                                const uint8_t *output_data, int result,
                                bool key_frame, bool mark_hdmi) {
     if (mark_hdmi) {
+        source->early_blank_samples = 0;
         source->last_frame_ns.store(monotonic_ns(), std::memory_order_relaxed);
+        /* A real encoded frame completes the previous recovery. Keep the
+           cooldown only while HDMI is still missing; otherwise the next
+           independent mode change waits behind the old reset. */
+        source->last_recovery = {};
         /* A live AU is enough to keep the decoder fed. Do not read
            /proc/cvitek/vi here: that dump stalls the 60 fps path. HDMI
            loss is detected when VENC goes stale, not per packet. */
-        source->cached_signal.store(1, std::memory_order_relaxed);
+        const int previous_signal = source->cached_signal.exchange(
+            1, std::memory_order_relaxed);
+        if (previous_signal != 1) {
+            /* A proven live AU begins a new HDMI episode. The watcher skips
+               I2C while live, so it cannot clear the one-reset-per-loss
+               latch from a nonblank timing sample. */
+            source->hdmi_blank_rearm_samples = 0;
+            source->hdmi_blank_rearm_attempted = false;
+            source->hdmi_blank_reset_count = 0;
+            source->hdmi_waiting_for_signal = false;
+        }
         source->failures = 0;
     }
     packet->data = output_data;
@@ -757,6 +803,41 @@ int32_t fill_bound_empty_packet(Encoder *encoder, onekvm_video_packet_v1 *packet
     return 0;
 }
 
+bool bound_packet_is_live(Encoder *encoder, Source *source, bool key_frame) {
+    if (source->awaiting_hdmi_timing.load(std::memory_order_relaxed)) {
+        const uint64_t now = monotonic_ns();
+        const uint64_t last = mmf::h26x_reader_last_packet_ns(encoder->channel);
+        if (last < encoder->bound_since_ns)
+            return false;
+        if (source->bound_resume_packets == 0)
+            source->bound_resume_first_ns = now;
+        if (++source->bound_resume_packets < 3 ||
+            now - source->bound_resume_first_ns < 30000000ull)
+            return false;
+        /* A single stale AU can survive VI reopen. Several newly produced
+           AUs prove capture has resumed; start the decoder on a fresh IDR. */
+        source->awaiting_hdmi_timing.store(false, std::memory_order_relaxed);
+        source->cached_signal.store(1, std::memory_order_relaxed);
+        /* This path marks the stream live before fill_bound_live_packet(),
+           so its previous_signal check cannot clear the blank-recovery
+           latch. A later mode change needs a new blank-recovery episode. */
+        source->hdmi_blank_rearm_samples = 0;
+        source->hdmi_blank_rearm_attempted = false;
+        source->hdmi_blank_reset_count = 0;
+        source->hdmi_waiting_for_signal = false;
+        source->bound_resume_need_key = true;
+        mmf::h26x_reader_force_idr(encoder->channel);
+        std::fprintf(stderr, "OneKVM: bound HDMI frames confirmed\n");
+        return false;
+    }
+    if (source->bound_resume_need_key) {
+        if (!key_frame)
+            return false;
+        source->bound_resume_need_key = false;
+    }
+    return true;
+}
+
 int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
                             char *error, uint32_t error_capacity) {
     auto *encoder = static_cast<Encoder *>(opaque);
@@ -767,12 +848,104 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
     }
     std::unique_lock<std::mutex> lock(encoder->mutex);
     Source *source = encoder->bound_source;
-    if (source == nullptr || encoder->codec_type == 0) {
+    if (source == nullptr) {
         set_error(error, error_capacity, "encoder is not bound to a source");
         return -1;
     }
     std::unique_lock<std::mutex> source_lock(source->mutex);
     invalidate_stale_encoder(encoder);
+    if (encoder->codec_type == 0) {
+        const auto [width, height] = source_output_size(source);
+        if (!encoder->initialized || !encoder->source_bound ||
+            encoder->width != width || encoder->height != height) {
+            const int configure_result = configure_encoder(
+                encoder, width, height, error, error_capacity);
+            if (configure_result != 0)
+                return configure_result;
+            encoder->source_bound = true;
+            encoder->bound_source = source;
+            encoder->reset_source = source;
+        }
+
+        packet->data = nullptr;
+        packet->data_size = 0;
+        packet->codec = ONEKVM_VIDEO_CODEC_MJPEG;
+        packet->key_frame = 1;
+        packet->pts_ns = monotonic_ns();
+        if (source->out_of_range.load(std::memory_order_relaxed) ||
+            source->cached_signal.load(std::memory_order_relaxed) == 0)
+            return 0;
+
+        void *frame_data = nullptr;
+        int frame_length = 0;
+        int frame_width = 0;
+        int frame_height = 0;
+        int frame_format = 0;
+        int jpeg_size = 0;
+        const uint64_t capture_start_ns = monotonic_ns();
+        {
+            std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
+            const int capture_result = mmf::acquire_capture_frame_timeout(
+                source->channel, &frame_data, &frame_length, &frame_width,
+                &frame_height, &frame_format, 100);
+            if (capture_result != 0 || frame_data == nullptr || frame_length <= 0)
+                return 0;
+
+            const uint64_t capture_ns = monotonic_ns() - capture_start_ns;
+            if (capture_ns < 1000000000ull) {
+                source->last_capture_ns.store(
+                    capture_ns, std::memory_order_relaxed);
+                encoder->last_capture_ns.store(
+                    capture_ns, std::memory_order_relaxed);
+            }
+            packet->pts_ns = monotonic_ns();
+            if (frame_width == width && frame_height == height &&
+                frame_format == kMMFNV21) {
+                const uint64_t encode_start_ns = monotonic_ns();
+                const int submit_result = mmf::submit_jpeg_frame_timeout(
+                    encoder->channel, static_cast<uint8_t *>(frame_data),
+                    frame_width, frame_height, kMMFNV21,
+                    jpeg_quality(encoder->config.quality_factor), 250);
+                if (submit_result == 0) {
+                    if (encoder->output.size() < kJPEGBufferSize)
+                        encoder->output.resize(kJPEGBufferSize);
+                    jpeg_size = mmf::read_jpeg_packet_timeout(
+                        encoder->channel, encoder->output.data(),
+                        static_cast<int>(encoder->output.size()), 250);
+                    if (jpeg_size > 0) {
+                        if (mmf::release_jpeg_packet(encoder->channel) != 0)
+                            jpeg_size = -1;
+                        const uint64_t encode_ns = monotonic_ns() - encode_start_ns;
+                        if (encode_ns < 1000000000ull)
+                            encoder->last_encode_ns.store(
+                                encode_ns, std::memory_order_relaxed);
+                    }
+                } else {
+                    jpeg_size = -1;
+                }
+            } else {
+                jpeg_size = -1;
+            }
+            mmf::release_capture_frame(source->channel);
+        }
+        if (jpeg_size < 0) {
+            /* A timed-out JPEG leaves the vendor channel with a pending frame.
+               Recreate it on the next read instead of returning EBUSY forever. */
+            close_encoder(encoder);
+            encoder->bound_source = source;
+            encoder->reset_source = source;
+            set_error(error, error_capacity, "read bound MMF JPEG frame failed");
+            return -1;
+        }
+        if (jpeg_size == 0)
+            return 0;
+        encoder->output.resize(static_cast<size_t>(jpeg_size));
+        packet->data = encoder->output.data();
+        packet->data_size = static_cast<uint64_t>(jpeg_size);
+        source->last_frame_ns.store(packet->pts_ns, std::memory_order_relaxed);
+        source->cached_signal.store(1, std::memory_order_relaxed);
+        return 0;
+    }
     if (!encoder->initialized ||
         (!encoder->source_bound && !encoder->placeholder_frames)) {
         if (bind_encoder_to_source_locked(encoder, source, error, error_capacity) != 0)
@@ -846,9 +1019,11 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
         /* A drained AU is live video. Do not throw it away because the HDMI
            watcher has not yet published cached_signal, and do not read
            /proc/cvitek/vi on this path. */
-        if (result > 0)
+        if (result > 0 && bound_packet_is_live(encoder, source, key_frame))
             return fill_bound_live_packet(
                 encoder, source, packet, output_data, result, key_frame, true);
+        if (result > 0)
+            return fill_bound_empty_packet(encoder, packet);
 
         const uint64_t last_live = mmf::h26x_reader_last_packet_ns(encoder->channel);
         const uint64_t now = monotonic_ns();
@@ -879,12 +1054,30 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
             now >= last_live && now - last_live <= live_ns;
         const bool venc_stale = last_live != 0 &&
             now > last_live && now - last_live > live_ns;
+        /* PCIe mode changes leave both LT6911 timing counters blank before
+           the old 1.5 s VENC grace expires. Two silent reads let recovery
+           start sooner, while a merely busy encoder keeps the full grace. */
+        const uint64_t early_probe_ns = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                kPcieBlankProbeDelay).count());
+        if (!missing_signal && last_live != 0 && now > last_live &&
+            now - last_live >= early_probe_ns &&
+            pcie_hdmi_blank_after_stall(source)) {
+            source->cached_signal.store(0, std::memory_order_relaxed);
+            missing_signal = true;
+        }
 
         /* Between live access units the queue is often empty. The old path
            read /proc/cvitek/vi and slept 10 ms while holding both mutexes,
            which dropped Enc/actual_fps into the 30-50 range. Wait on the
            reader and leave HDMI rebuilds to the watcher. */
-        if (awaiting_first_au || live_recent) {
+        const bool awaiting_resume_packets =
+            source->awaiting_hdmi_timing.load(std::memory_order_relaxed) &&
+            source->bound_resume_packets > 0 &&
+            source->bound_resume_first_ns != 0 &&
+            now - source->bound_resume_first_ns < 500000000ull;
+        if ((!missing_signal && (awaiting_first_au || live_recent)) ||
+            awaiting_resume_packets) {
             const int ch = encoder->channel;
             source_lock.unlock();
             lock.unlock();
@@ -905,20 +1098,29 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
                 set_error(error, error_capacity, "read bound MMF frame failed: %d", result);
                 return -1;
             }
-            if (result > 0)
+            if (result > 0 && bound_packet_is_live(encoder, source, key_frame))
                 return fill_bound_live_packet(
                     encoder, source, packet, output_data, result, key_frame,
                     true);
             return fill_bound_empty_packet(encoder, packet);
         }
 
-        /* Still no AU, past the first-AU window. Do not maybe_rebuild: that
-           path reads VI FrameRate (0 with exclusive VENC as the only dest)
-           and probes LT6911, which is what stalled CSI on 107. Exclusive VI
-           also must not fall through to placeholder: unbinding the only dest
-           freezes CSI. Keep waiting and ask for an IDR. */
-        if (last_live == 0) {
+        /* Once the first-AU window expires, an exclusive VI stream with no
+           packet has not proved the optimistic HDMI-live cache. Let the
+           silent timing watcher attempt a software CSI/MMF rearm. Keep the
+           exclusive VI binding until recovery starts: switching it to the
+           placeholder path freezes the sole CSI destination. */
+        if (last_live == 0 && !awaiting_first_au) {
             if (mmf::h26x_bound_to_vi(encoder->channel)) {
+                source->cached_signal.store(0, std::memory_order_relaxed);
+                source->failures++;
+                const int rebuilt = maybe_rebuild_for_hdmi_change(
+                    source, error, error_capacity);
+                if (rebuilt != 0) {
+                    encoder->placeholder_frames = false;
+                    invalidate_stale_encoder(encoder);
+                    return -1;
+                }
                 mmf::h26x_reader_force_idr(encoder->channel);
                 const int codec = encoder->codec_type;
                 source_lock.unlock();
@@ -1035,6 +1237,12 @@ int32_t encoder_unbind_source(void *opaque, char *error, uint32_t error_capacity
         return -1;
     }
     std::lock_guard<std::mutex> lock(encoder->mutex);
+    if (encoder->codec_type == 0) {
+        encoder->source_bound = false;
+        encoder->bound_source = nullptr;
+        encoder->reset_source = nullptr;
+        return 0;
+    }
     if (!encoder->source_bound && encoder->bound_source == nullptr) {
         std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
         mmf::park_unbound_vpss_channels();
@@ -1401,10 +1609,6 @@ int32_t encoder_allocate(
         return ONEKVM_VIDEO_RESOURCE_INVALID;
     }
     const int type = codec_type(request->config.codec);
-    if (type == 0 && request->input_mode == ONEKVM_VIDEO_ENCODER_INPUT_BOUND) {
-        set_error(error, error_capacity, "bound JPEG allocation is unsupported");
-        return ONEKVM_VIDEO_RESOURCE_UNSUPPORTED;
-    }
 
     std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
     if (mmf::g_runtime.reference_count == 0) {

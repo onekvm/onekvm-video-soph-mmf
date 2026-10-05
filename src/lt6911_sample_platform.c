@@ -6,10 +6,36 @@
 
 extern void onekvm_lt6911_get_active_size(CVI_U32 *width, CVI_U32 *height);
 
-static void cleanup_vi(SAMPLE_VI_CONFIG_S *pstViConfig)
+static void cleanup_sensor_callbacks(SAMPLE_VI_CONFIG_S *pstViConfig)
 {
-	SAMPLE_COMM_VI_DestroyIsp(pstViConfig);
-	SAMPLE_COMM_VI_DestroyVi(pstViConfig);
+#if USE_USER_SEN_DRIVER
+	CVI_S32 i;
+
+	for (i = 0; i < pstViConfig->s32WorkingViNum; ++i) {
+		CVI_S32 dev = pstViConfig->as32WorkingViId[i];
+		VI_PIPE pipe = pstViConfig->astViInfo[dev].stPipeInfo.aPipe[0];
+
+		if (pipe >= 0 && pipe < VI_MAX_PIPE_NUM)
+			(void)SAMPLE_COMM_ISP_Sensor_UnRegiter_callback(pipe);
+	}
+#else
+	(void)pstViConfig;
+#endif
+}
+
+static void cleanup_vi(SAMPLE_VI_CONFIG_S *pstViConfig,
+	CVI_BOOL sensor_attempted, CVI_BOOL device_started,
+	CVI_BOOL isp_started)
+{
+	/* DestroyVi assumes SetDevAttr/EnableDev completed.  Calling it after an
+	 * earlier sensor-callback failure opens and closes an otherwise untouched
+	 * /dev/vi, whose release path unprepares the CSI clock a second time. */
+	if (isp_started)
+		SAMPLE_COMM_VI_DestroyIsp(pstViConfig);
+	else if (sensor_attempted)
+		cleanup_sensor_callbacks(pstViConfig);
+	if (device_started)
+		SAMPLE_COMM_VI_DestroyVi(pstViConfig);
 	SAMPLE_COMM_SYS_Exit();
 }
 
@@ -49,6 +75,9 @@ CVI_S32 SAMPLE_PLAT_VI_INIT(SAMPLE_VI_CONFIG_S *pstViConfig)
 	CVI_S32 s32Ret;
 	CVI_S32 i;
 	CVI_S32 j;
+	CVI_BOOL sensor_attempted = CVI_FALSE;
+	CVI_BOOL device_started = CVI_FALSE;
+	CVI_BOOL isp_started = CVI_FALSE;
 
 	if (pstViConfig == CVI_NULL)
 		return CVI_FAILURE;
@@ -66,6 +95,7 @@ CVI_S32 SAMPLE_PLAT_VI_INIT(SAMPLE_VI_CONFIG_S *pstViConfig)
 	onekvm_lt6911_get_active_size(&stSize.u32Width, &stSize.u32Height);
 
 #if USE_USER_SEN_DRIVER
+	sensor_attempted = CVI_TRUE;
 	s32Ret = SAMPLE_COMM_VI_StartSensor(pstViConfig);
 	if (s32Ret != CVI_SUCCESS)
 		goto error;
@@ -76,6 +106,7 @@ CVI_S32 SAMPLE_PLAT_VI_INIT(SAMPLE_VI_CONFIG_S *pstViConfig)
 		s32Ret = SAMPLE_COMM_VI_StartDev(&pstViConfig->astViInfo[dev]);
 		if (s32Ret != CVI_SUCCESS)
 			goto error;
+		device_started = CVI_TRUE;
 	}
 
 #if USE_USER_SEN_DRIVER
@@ -148,6 +179,7 @@ CVI_S32 SAMPLE_PLAT_VI_INIT(SAMPLE_VI_CONFIG_S *pstViConfig)
 	s32Ret = SAMPLE_COMM_VI_CreateIsp(pstViConfig);
 	if (s32Ret != CVI_SUCCESS)
 		goto error;
+	isp_started = CVI_TRUE;
 
 	s32Ret = SAMPLE_COMM_VI_StartViChn(pstViConfig);
 	if (s32Ret != CVI_SUCCESS)
@@ -156,6 +188,6 @@ CVI_S32 SAMPLE_PLAT_VI_INIT(SAMPLE_VI_CONFIG_S *pstViConfig)
 	return CVI_SUCCESS;
 
 error:
-	cleanup_vi(pstViConfig);
+	cleanup_vi(pstViConfig, sensor_attempted, device_started, isp_started);
 	return s32Ret;
 }

@@ -106,6 +106,7 @@ CryptoDMA hard-locks the SG2002, so Core uses software AES-GCM for H.265
 sessions.
 
 Completion is a poll of `CRYPTODMA_WR_INT`. Do not `wait_event` on PLIC 59
-from the live DTB; that interrupt never fires. The first ioctl `ETIMEDOUT`
-disables offload for the rest of the process so the video thread does not
-stall at 1 FPS.
+from the live DTB; that interrupt never fires. An ioctl `ETIMEDOUT` falls back
+only for the current batch. Core probes recovery after 1, 2, 4, 8, 16, then
+30 seconds (capped), avoiding repeated waits on a failing engine without
+permanently disabling offload for the process lifetime.

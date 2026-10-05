@@ -155,8 +155,9 @@ The shared library exports exactly two entry points:
 Interfaces are in `include/onekvm/video_backend_v1.h` and
 `include/onekvm/crypto_backend_v1.h`. Both are versioned. Hardware crypto is
 not advertised for concurrent H.265 sessions; Core uses software AES-GCM
-there. First CryptoDMA `ETIMEDOUT` disables offload for the rest of the
-process.
+there. A CryptoDMA `ETIMEDOUT` falls back only for the current batch. Core
+automatically probes recovery with exponential backoff capped at 30 seconds;
+offload is not permanently disabled for the process lifetime.
 
 ## No-signal assets
 

@@ -86,4 +86,6 @@ KVM 主路是 **bound**：硬件把 VPSS 接到 VENC，Core 只 `encoder_read_pa
 **不**广告 `CONCURRENT_H265_VIDEO`：H.265 VENC 与 CryptoDMA 同时跑会锁死 SG2002，Core 对 H.265 会话走软件 AES-GCM。
 
 完成位是 `CRYPTODMA_WR_INT` 轮询，不要等活 DTB 上从不触发的 PLIC 59。
-第一次 ioctl `ETIMEDOUT` 后进程内禁用 offload，避免视频线程每帧空等 1 秒变成 1 FPS。
+单次 ioctl `ETIMEDOUT` 只让当前批次走软件。Core 使用 1、2、4、8、16、30 秒（封顶）
+指数退避自动探测恢复，避免视频线程连续等待故障硬件，同时不在进程生命周期内永久禁用
+offload。

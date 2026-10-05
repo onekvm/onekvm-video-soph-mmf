@@ -144,6 +144,9 @@ __attribute__((unused)) static void _list_vb_pool(void)
 
 static SAMPLE_VI_CONFIG_S g_stViConfig;
 static SAMPLE_INI_CFG_S g_stIniCfg;
+static bool g_stale_runtime_reclaimed;
+static bool g_vendor_system_started;
+static bool g_vendor_vi_started;
 CVI_S32 destroy_vpss_group(VPSS_GRP VpssGrp);
 
 static int stale_buffer_pools_all_free(void)
@@ -584,11 +587,21 @@ int reset_capture_channels(void)
 
 static void shutdown_vendor_system(void)
 {
-	if (g_stViConfig.s32WorkingViNum != 0) {
+	if (g_vendor_vi_started) {
 		SAMPLE_COMM_VI_DestroyIsp(&g_stViConfig);
-		SAMPLE_COMM_VI_DestroyVi(&g_stViConfig);
+		for (int i = 0; i < g_stViConfig.s32WorkingViNum; ++i) {
+			SAMPLE_VI_INFO_S *info = &g_stViConfig.astViInfo[
+				g_stViConfig.as32WorkingViId[i]];
+			(void)SAMPLE_COMM_VI_StopViChn(info);
+			(void)SAMPLE_COMM_VI_StopViPipe(info);
+			(void)SAMPLE_COMM_VI_StopDev(info);
+		}
+		g_vendor_vi_started = false;
 	}
-	SAMPLE_COMM_SYS_Exit();
+	if (g_vendor_system_started) {
+		SAMPLE_COMM_SYS_Exit();
+		g_vendor_system_started = false;
+	}
 }
 
 static void drain_vendor_vb(void)
@@ -634,12 +647,10 @@ static CVI_S32 initialize_vendor_system(SIZE_S stSize)
 	s32Ret = SAMPLE_COMM_SYS_Init(&stVbConf);
 	if (s32Ret != CVI_SUCCESS) {
 		SAMPLE_PRT("system init failed with %#x\n", s32Ret);
-		goto error;
+		return s32Ret;
 	}
+	g_vendor_system_started = true;
 
-	return s32Ret;
-error:
-	shutdown_vendor_system();
 	return s32Ret;
 }
 
@@ -892,26 +903,27 @@ static CVI_S32 initialize_runtime(void)
 	s32Ret = initialize_vendor_system(stPoolSize);
 	if (s32Ret != CVI_SUCCESS) {
 		SAMPLE_PRT("sys init failed. s32Ret: 0x%x !\n", s32Ret);
-		goto _need_exit_sys_and_deinit_vi;
+		return s32Ret;
 	}
 
 	s32Ret = SAMPLE_PLAT_VI_INIT(&stViConfig);
 	if (s32Ret != CVI_SUCCESS) {
+		/* SAMPLE_PLAT_VI_INIT owns its partial rollback, including SYS/VB.
+		 * Calling DestroyVi/SYS_Exit again here closes an uninitialized VI
+		 * generation and unprepares clk_csi_mac0_vip twice. */
+		g_vendor_system_started = false;
+		g_vendor_vi_started = false;
 		SAMPLE_PRT("vi init failed. s32Ret: 0x%x !\n", s32Ret);
 		SAMPLE_PRT("Please try to check if the camera is working.\n");
-		goto _need_exit_sys_and_deinit_vi;
+		return s32Ret;
 	}
+	g_vendor_vi_started = true;
 
 	g_runtime.vi_dma_running = true;
 	g_runtime.vi_chn_attr_valid =
 		CVI_VI_GetChnAttr(0, 0, &g_runtime.vi_chn_attr) == CVI_SUCCESS;
 	g_runtime.vi_size.u32Width = stSize.u32Width;
 	g_runtime.vi_size.u32Height = stSize.u32Height;
-
-	return s32Ret;
-
-_need_exit_sys_and_deinit_vi:
-	shutdown_vendor_system();
 
 	return s32Ret;
 }
@@ -937,6 +949,32 @@ static int find_unused_capture_channel() {
 	return -1;
 }
 
+int reclaim_stale_runtime(void)
+{
+	if (g_runtime.reference_count || g_stale_runtime_reclaimed)
+		return 0;
+	if (!soph_media_modules_ready()) {
+		printf("OneKVM MMF: soph_* modules not loaded yet\n");
+		return -1;
+	}
+
+	const int stale_pools = count_vendor_buffer_pools();
+	if (stale_pools > 0) {
+		/* Only a previous process can own state here.  Do this once per
+		 * process; retries after our own partial VI init must not destroy the
+		 * same device generation again.  Leave VB/VENC/VPSS reclaim in
+		 * initialize_runtime(): the vendor SYS mapping must be established
+		 * before raw VB exits invalidate and recreate it. */
+		if (release_stale_vendor_system() != CVI_SUCCESS) {
+			printf("try release stale sys failed\n");
+			return -1;
+		}
+		printf("released stale VI owner (%d VB pools pending)\n", stale_pools);
+	}
+	g_stale_runtime_reclaimed = true;
+	return 0;
+}
+
 int initialize(void)
 {
     if (g_runtime.reference_count) {
@@ -945,17 +983,8 @@ int initialize(void)
         return 0;
     }
 
-	if (!soph_media_modules_ready()) {
-		printf("OneKVM MMF: soph_* modules not loaded yet\n");
+	if (reclaim_stale_runtime() != 0)
 		return -1;
-	}
-
-	if (release_stale_vendor_system() != CVI_SUCCESS) {
-		printf("try release sys failed\n");
-		return -1;
-	} else {
-		printf("try release sys ok\n");
-	}
 
     if (initialize_runtime() != CVI_SUCCESS) {
         printf("OneKVM MMF init failed\n");
