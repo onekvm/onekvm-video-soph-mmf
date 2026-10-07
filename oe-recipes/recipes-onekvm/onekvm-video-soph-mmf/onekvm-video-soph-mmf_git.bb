@@ -4,7 +4,14 @@ LICENSE = "CLOSED"
 PV = "0.1.0+git"
 # The migration source pin only adds OE metadata to the old ef7ea2a2d2 tree.
 # Keep its installed version; bump PV and remove this when releasing new code.
-PKGV = "${PV}0+ef7ea2a2d2"
+ONEKVM_MMF_MIGRATION_PKGV = "${PV}0+ef7ea2a2d2"
+PKGV = "${ONEKVM_MMF_MIGRATION_PKGV}"
+
+python package_setup_pkgv:append() {
+    # OE appends an SCM suffix even to an explicit PKGV during packaging.
+    d.setVar("PKGV", d.getVar("ONEKVM_MMF_MIGRATION_PKGV"))
+}
+
 PR = "r64"
 OPKGBUILDCMD = "opkg-build -Z gzip"
 
