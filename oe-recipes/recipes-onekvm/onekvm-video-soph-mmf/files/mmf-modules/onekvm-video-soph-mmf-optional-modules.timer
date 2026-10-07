@@ -1,0 +1,12 @@
+[Unit]
+Description=Delay optional Sophgo MMF kernel modules until after capture modules
+After=onekvm-video-soph-mmf-modules.service
+
+[Timer]
+OnActiveSec=5s
+AccuracySec=1s
+Unit=onekvm-video-soph-mmf-optional-modules.service
+
+[Install]
+WantedBy=multi-user.target
+Alias=onekvm-device-nanokvm-mmf-optional-modules.timer

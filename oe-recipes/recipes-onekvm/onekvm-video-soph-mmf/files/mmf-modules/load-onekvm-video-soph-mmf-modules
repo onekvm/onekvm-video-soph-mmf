@@ -1,0 +1,50 @@
+#!/bin/sh
+
+set -eu
+
+log_step() {
+    IFS=' ' read -r boot_seconds _ </proc/uptime
+    printf 'onekvm-soph-mmf-modules: t=%ss %s\n' "$boot_seconds" "$*"
+}
+
+modules="\
+    soph_clock_cooling soph_sys soph_base soph_vcodec soph_jpeg \
+    soph_mipi_rx soph_snsr_i2c soph_vi soph_vpss \
+    soph_vc_driver"
+
+module_dir=/lib/modules/$(uname -r)/extra/onekvm/nanokvm
+test -d "$module_dir"
+# Image already ships modules.dep. Rewriting it on every boot walks the
+# overlay from a cold cache and serializes HDMI bring-up.
+if [ ! -e "/lib/modules/$(uname -r)/modules.dep" ]; then
+    log_step "depmod start"
+    depmod -a
+    log_step "depmod done"
+fi
+for module in $modules; do
+    if ! grep -q "^$module " /proc/modules; then
+        log_step "modprobe $module start"
+        if modprobe "$module"; then
+            log_step "modprobe $module done"
+        else
+            status=$?
+            log_step "modprobe $module failed status=$status"
+            exit "$status"
+        fi
+    fi
+done
+
+log_step "HDMI enable GPIO start"
+if [ -e /sys/class/gpio/export ]; then
+    hdmi_enable=/sys/class/gpio/gpio451
+    if [ ! -d "$hdmi_enable" ]; then
+        echo 451 > /sys/class/gpio/export
+    fi
+    echo out > "$hdmi_enable/direction"
+    echo 1 > "$hdmi_enable/value"
+fi
+log_step "HDMI enable GPIO done"
+
+log_step "HDMI prepare start"
+/usr/libexec/onekvm/prepare-device-nanokvm-hdmi
+log_step "HDMI prepare done"

@@ -1,0 +1,14 @@
+[Unit]
+Description=Load OneKVM Sophgo MMF kernel modules
+# soph_* live in the immutable rootfs. Start as soon as local-fs is up so
+# Core can attach video on the first try instead of waiting for notify.
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/onekvm/load-video-soph-mmf-modules
+RemainAfterExit=yes
+
+[Install]
+WantedBy=onekvm.service
+Alias=onekvm-device-nanokvm-mmf-modules.service
