@@ -1,0 +1,21 @@
+#!/bin/sh
+
+set -eu
+
+log_step() {
+    IFS=' ' read -r boot_seconds _ </proc/uptime
+    printf 'onekvm-soph-mmf-optional-modules: t=%ss %s\n' "$boot_seconds" "$*"
+}
+
+for module in soph_dwa soph_vo soph_rgn soph_ive; do
+    if ! grep -q "^$module " /proc/modules; then
+        log_step "modprobe $module start"
+        if modprobe "$module"; then
+            log_step "modprobe $module done"
+        else
+            status=$?
+            log_step "modprobe $module failed status=$status"
+            exit "$status"
+        fi
+    fi
+done

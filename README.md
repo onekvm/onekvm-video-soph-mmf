@@ -75,7 +75,7 @@ Userspace MMF libraries are built from official Sophgo sources, pinned as one
 | Sensor list (LT6911) | [`sophgo/SensorSupportList`](https://github.com/sophgo/SensorSupportList) `sg200x-dev` | `f064b02ba8a82746f3e87a2c5bb3bd683ff95db0` |
 | `cvi_mpi` build-time osdrv | [`sophgo/osdrv`](https://github.com/sophgo/osdrv) `sg200x-dev` | `aa542c41df94f7bc656cb740f6622a5dca7dc403` |
 | Video codec firmware | [`sophgo/ramdisk`](https://github.com/sophgo/ramdisk) | `1ec8fcb63a358c17c369bac38eb42dc16f30a3bb` |
-| Video kernel modules | workspace `osdrv-sg200x` (Sophgo osdrv plus NanoKVM patches) | recipe `onekvm-video-soph-mmf-modules` in `osdrv-sg200x/oe-recipes` |
+| Video kernel modules | workspace `osdrv-sg200x` (Sophgo osdrv plus NanoKVM patches), embedded build input | recipe `onekvm-video-soph-mmf-modules` in `oe-recipes` |
 
 Kernel modules include `soph_vcodec.ko`, `soph_jpeg.ko`, `soph_vi.ko`, and
 `soph_vpss.ko`. Bind-thread teardown and 5.15/6.18 compatibility live in that
@@ -108,12 +108,12 @@ and no-signal frames.
 
 ## Building for the device
 
-The backend and vendor runtime recipes live in this repository's
-[`oe-recipes`](oe-recipes/README.md) layer (`wrynose`, depends on OE-Core,
-`onekvm-bsp` and the `osdrv-sg200x` layer). `onekvm-distro/kas/components.lock` pins the layer and backend
+The backend, vendor runtime and kernel module recipes live in this repository's
+[`oe-recipes`](oe-recipes/README.md) layer (`wrynose`, depends on OE-Core and
+`onekvm-bsp`). `onekvm-distro/kas/components.lock` pins the layer and backend
 source together. The runtime keeps independent vendor source pins; kernel
-modules have their own recipe in `osdrv-sg200x/oe-recipes`; codec firmware
-remains in the distro BSP layer.
+modules use independently pinned osdrv sources as an embedded build input;
+codec firmware remains in the distro BSP layer.
 
 From `onekvm-distro`, with machine `onekvm-nanokvm`:
 

@@ -1,0 +1,12 @@
+[Unit]
+Description=Load optional Sophgo MMF kernel modules after the capture stack
+After=onekvm-video-soph-mmf-modules.service
+Wants=onekvm-video-soph-mmf-modules.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/onekvm/load-video-soph-mmf-optional-modules
+RemainAfterExit=yes
+
+[Install]
+Alias=onekvm-device-nanokvm-mmf-optional-modules.service

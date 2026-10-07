@@ -67,7 +67,7 @@ Sipeed SDK 里预编译的 MMF 组件。
 | LT6911 传感器列表 | [`sophgo/SensorSupportList`](https://github.com/sophgo/SensorSupportList) `sg200x-dev` | `f064b02ba8a82746f3e87a2c5bb3bd683ff95db0` |
 | 编译 `cvi_mpi` 用的 osdrv | [`sophgo/osdrv`](https://github.com/sophgo/osdrv) `sg200x-dev` | `aa542c41df94f7bc656cb740f6622a5dca7dc403` |
 | 视频编解码固件 | [`sophgo/ramdisk`](https://github.com/sophgo/ramdisk) | `1ec8fcb63a358c17c369bac38eb42dc16f30a3bb` |
-| 视频内核模块 | 工作区 `osdrv-sg200x`（Sophgo osdrv + NanoKVM 补丁） | `osdrv-sg200x/oe-recipes` 中的配方 `onekvm-video-soph-mmf-modules` |
+| 视频内核模块 | 工作区 `osdrv-sg200x`（Sophgo osdrv + NanoKVM 补丁），嵌入构建输入 | 本仓库 `oe-recipes` 中的配方 `onekvm-video-soph-mmf-modules` |
 
 OSDRV 模块包括 `soph_vcodec.ko`、`soph_jpeg.ko`、`soph_vi.ko`、`soph_vpss.ko`。
 bind 线程回收以及 5.15/6.18 兼容补丁在模块配方里，不在本仓库。运行中的 Linux
@@ -97,11 +97,11 @@ ctest --test-dir build/host --output-on-failure
 
 ## 为设备构建
 
-backend 和 vendor runtime 配方在本仓库的
+backend、vendor runtime 和内核模块配方在本仓库的
 [`oe-recipes`](oe-recipes/README.md) layer，支持 `wrynose`，依赖 OE-Core 和
-`onekvm-bsp` 和 `osdrv-sg200x` layer。`onekvm-distro/kas/components.lock` 同时锁定
-layer 与 backend 源码；runtime 保留独立的 vendor 源码版本。内核模块配方及附属
-打包文件归 `osdrv-sg200x/oe-recipes`，codec firmware 配方仍归 distro BSP。
+`onekvm-bsp`。`onekvm-distro/kas/components.lock` 同时锁定 layer 与 backend
+源码；runtime 保留独立的 vendor 源码版本。模块配方将独立锁定的 osdrv 源码作为
+MMF 的嵌入构建输入，不给 osdrv 单独建 layer；codec firmware 配方仍归 distro BSP。
 
 在 `onekvm-distro` 中，机型 `onekvm-nanokvm`：
 
