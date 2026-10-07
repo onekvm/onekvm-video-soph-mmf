@@ -2,6 +2,9 @@ SUMMARY = "Sophgo MMF native video backend for OneKVM"
 HOMEPAGE = "https://github.com/onekvm/onekvm-video-soph-mmf"
 LICENSE = "CLOSED"
 PV = "0.1.0+git"
+# The migration source pin only adds OE metadata to the old ef7ea2a2d2 tree.
+# Keep its installed version; bump PV and remove this when releasing new code.
+PKGV = "${PV}0+ef7ea2a2d2"
 PR = "r64"
 OPKGBUILDCMD = "opkg-build -Z gzip"
 
