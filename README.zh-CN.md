@@ -97,6 +97,12 @@ ctest --test-dir build/host --output-on-failure
 
 ## 为设备构建
 
+backend 和 vendor runtime 配方在本仓库的
+[`oe-recipes`](oe-recipes/README.md) layer，支持 `wrynose`，依赖 OE-Core 和
+`onekvm-bsp`。`onekvm-distro/kas/components.lock` 同时锁定 layer 与 backend
+源码；runtime 保留独立的 vendor 源码版本。内核模块和 codec firmware 配方仍归
+distro BSP。
+
 在 `onekvm-distro` 中，机型 `onekvm-nanokvm`：
 
 ```sh

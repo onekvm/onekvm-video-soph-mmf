@@ -108,6 +108,12 @@ and no-signal frames.
 
 ## Building for the device
 
+The backend and vendor runtime recipes live in this repository's
+[`oe-recipes`](oe-recipes/README.md) layer (`wrynose`, depends on OE-Core and
+`onekvm-bsp`). `onekvm-distro/kas/components.lock` pins the layer and backend
+source together. The runtime keeps independent vendor source pins; kernel
+modules and codec firmware remain in the distro BSP layer.
+
 From `onekvm-distro`, with machine `onekvm-nanokvm`:
 
 ```sh

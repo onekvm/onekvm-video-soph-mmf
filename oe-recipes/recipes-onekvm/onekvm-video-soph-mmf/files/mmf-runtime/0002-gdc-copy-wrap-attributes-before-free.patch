@@ -1,0 +1,32 @@
+From: OneKVM Project <223006751+lowtech-guy@users.noreply.github.com>
+Subject: [PATCH] gdc: copy wrap attributes before freeing the response
+
+gdc_get_chn_buf_wrap writes its response into cfg.  Do not free cfg before
+copying that response to the caller.
+
+Upstream-Status: Pending
+
+---
+ modules/gdc/src/cvi_gdc.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/modules/gdc/src/cvi_gdc.c b/modules/gdc/src/cvi_gdc.c
+index 790212a..e10ac39 100644
+--- a/modules/gdc/src/cvi_gdc.c
++++ b/modules/gdc/src/cvi_gdc.c
+@@ -348,11 +348,11 @@ CVI_S32 CVI_GDC_GetBufWrapAttr(GDC_HANDLE hHandle, const GDC_TASK_ATTR_S *pstTa
+ 
+ 	s32Ret = gdc_get_chn_buf_wrap(d->fd, cfg);
+ 
+-	free(cfg);
+-
+ 	if (s32Ret == CVI_SUCCESS)
+ 		memcpy(pstBufWrap, &cfg->stBufWrap, sizeof(*pstBufWrap));
+ 
++	free(cfg);
++
+ 	return s32Ret;
+ }
+ 
+-- 
+2.50.1

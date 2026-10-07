@@ -1,0 +1,33 @@
+From 7d86efc036234d74175db4551152134c44191aa6 Mon Sep 17 00:00:00 2001
+From: lowtech-guy <223006751+lowtech-guy@users.noreply.github.com>
+Date: Sun, 16 Aug 2026 14:28:00 +0800
+Subject: [PATCH] sys: accept OE link flags
+
+The sys module replaces the common LDFLAGS and links through the compiler
+driver. Provide a dedicated variable so the OpenEmbedded recipe can retain
+its GNU hash and hardening flags without passing compiler-driver options to
+the modules that invoke ld directly.
+
+Upstream-Status: Inappropriate [OpenEmbedded integration]
+
+Signed-off-by: lowtech-guy <223006751+lowtech-guy@users.noreply.github.com>
+---
+ modules/sys/Makefile | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/modules/sys/Makefile b/modules/sys/Makefile
+index 590300f..9b926d1 100644
+--- a/modules/sys/Makefile
++++ b/modules/sys/Makefile
+@@ -50,7 +50,7 @@ $(TARGET_A): $(OBJS)
+ 	@echo "$$AR_MRI" | $(AR) -M
+ 
+ $(TARGET_SO): $(OBJS)
+-	@$(CC) $(LDFLAGS) $(EXTRA_LDFLAGS) -o $(TARGET_SO) -Wl,--start-group $(OBJS) $(LIBS) -Wl,--end-group
++	@$(CC) $(LDFLAGS) $(EXTRA_LDFLAGS) $(ONEKVM_LDFLAGS) -o $(TARGET_SO) -Wl,--start-group $(OBJS) $(LIBS) -Wl,--end-group
+ 	@echo -e $(GREEN)[LINK]$(END)[$(notdir $(LD))] $(notdir $(TARGET_SO))
+ 
+ clean:
+-- 
+2.50.1
+

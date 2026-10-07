@@ -1,0 +1,44 @@
+From: OneKVM Project <223006751+lowtech-guy@users.noreply.github.com>
+Subject: [PATCH] isp tools: use Python 3 explicitly
+
+OpenEmbedded provides the host interpreter as python3 and intentionally does
+not add an ambiguous python command.
+
+Upstream-Status: Pending
+
+---
+ modules/isp/common/check_pqbinjson_integrity/run.sh      | 2 +-
+ modules/isp/common/toolJsonGenerator/generate_toolJson.sh | 4 ++--
+ 2 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/modules/isp/common/check_pqbinjson_integrity/run.sh b/modules/isp/common/check_pqbinjson_integrity/run.sh
+index 754fed0..e34c63e 100755
+--- a/modules/isp/common/check_pqbinjson_integrity/run.sh
++++ b/modules/isp/common/check_pqbinjson_integrity/run.sh
+@@ -14,5 +14,5 @@ HEADERLIST+=" ${MW_INCLUDE_PATH}/cvi_comm_sns.h"
+ ISP_JSON_STRUCTFILE="${ISP_BASE_PATH}/${CHIP_ID}/isp_bin/src/isp_json_struct.c"
+ APP=checkPqBinJsonIntegrity.py
+ cd ${CUR_PATH}
+-python ${APP} ${ISP_JSON_STRUCTFILE} ${HEADERLIST}
++python3 ${APP} ${ISP_JSON_STRUCTFILE} ${HEADERLIST}
+ 
+diff --git a/modules/isp/common/toolJsonGenerator/generate_toolJson.sh b/modules/isp/common/toolJsonGenerator/generate_toolJson.sh
+index 5ca1020..91994ae 100755
+--- a/modules/isp/common/toolJsonGenerator/generate_toolJson.sh
++++ b/modules/isp/common/toolJsonGenerator/generate_toolJson.sh
+@@ -64,11 +64,11 @@ sed -i 's/"ISP_BRANCH": ""/"ISP_BRANCH": "'"${ISP_BRANCH}"'"/g' ${DEVICE_FILE}
+ 
+ #generate pqtool_definition.json
+ cd ${CUR_PATH}
+-python hFile2json.py  $LEVELJSON $LAYOUTJSON $RPCJSON $HEADERLIST
++python3 hFile2json.py  $LEVELJSON $LAYOUTJSON $RPCJSON $HEADERLIST
+ git checkout ${DEVICE_FILE}
+ 
+ #check json file validity
+-cat ${OUTPUT} | python -m json.tool 1>/dev/null 2>json_error
++python3 -m json.tool ${OUTPUT} 1>/dev/null 2>json_error
+ error=$(cat json_error)
+ if [ ${#error} -eq 0 ]
+ then
+-- 
+2.50.1

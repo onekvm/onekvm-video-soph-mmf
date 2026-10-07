@@ -1,0 +1,27 @@
+From: OneKVM Project <223006751+lowtech-guy@users.noreply.github.com>
+Subject: [PATCH] vi: use a literal snprintf format
+
+name_list contains data, not format strings.  Passing it as the format is
+both unsafe and rejected by toolchains built with -Werror=format-security.
+
+Upstream-Status: Pending
+
+---
+ modules/vi/src/dump_register.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/modules/vi/src/dump_register.c b/modules/vi/src/dump_register.c
+index e29cd2d..703f29c 100644
+--- a/modules/vi/src/dump_register.c
++++ b/modules/vi/src/dump_register.c
+@@ -1679,7 +1679,7 @@ static int dump_hw_register(VI_PIPE ViPipe, FILE *fp)
+ 			// SET_REGISTER_COMMON(0x4, 0, shdw_sel); // reg_shdw_read_sel
+ 			SET_REGISTER_COMMON(0x8, 0, enable); // reg_dpc_enable
+ 
+-			snprintf(name, sizeof(name), name_list[i]);
++			snprintf(name, sizeof(name), "%s", name_list[i]);
+ 			FPRINTF_TBL(data_dpc);
+ 
+ 			free(data_dpc);
+-- 
+2.50.1
