@@ -1,0 +1,30 @@
+From: OneKVM Project <223006751+lowtech-guy@users.noreply.github.com>
+Subject: [PATCH] modules: allow a minimal directory list
+
+Some optional modules, notably audio, contain only vendor-toolchain-specific
+prebuilt objects.  Allow integrators to build the source-based modules they
+actually consume without changing the vendor default.
+
+Upstream-Status: Pending
+
+---
+ modules/Makefile | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/modules/Makefile b/modules/Makefile
+index f931c50..443d397 100644
+--- a/modules/Makefile
++++ b/modules/Makefile
+@@ -6,6 +6,10 @@ endif
+ 
+ SUB_DIRS = sys bin vi vo vpss rgn gdc audio mipi_tx venc vdec misc ive isp
+ 
++ifneq ($(ONEKVM_MODULE_DIRS),)
++SUB_DIRS := $(ONEKVM_MODULE_DIRS)
++endif
++
+ all:
+ 	@echo "########################################################################################################"
+ 	@echo "#"
+-- 
+2.50.1

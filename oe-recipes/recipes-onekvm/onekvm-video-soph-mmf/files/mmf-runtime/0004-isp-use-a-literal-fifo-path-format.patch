@@ -1,0 +1,27 @@
+From: OneKVM Project <223006751+lowtech-guy@users.noreply.github.com>
+Subject: [PATCH] isp: use a literal FIFO path format
+
+The environment value is a path, not a printf format string.  Copy it via a
+literal %s format so percent characters cannot be interpreted as directives.
+
+Upstream-Status: Pending
+
+---
+ modules/isp/cv181x/isp/src/cvi_isp.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/modules/isp/cv181x/isp/src/cvi_isp.c b/modules/isp/cv181x/isp/src/cvi_isp.c
+index 04e4098..0c83f18 100644
+--- a/modules/isp/cv181x/isp/src/cvi_isp.c
++++ b/modules/isp/cv181x/isp/src/cvi_isp.c
+@@ -105,7 +105,7 @@ static CVI_S32 parse_isp_fifo_path_from_environment(char *fifo_path, CVI_U32 pa
+ 		return CVI_FAILURE;
+ 	}
+ 
+-	snprintf(fifo_path, path_length, env);
++	snprintf(fifo_path, path_length, "%s", env);
+ 	return CVI_SUCCESS;
+ }
+ 
+-- 
+2.50.1
