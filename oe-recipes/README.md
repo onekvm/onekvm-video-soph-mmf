@@ -1,10 +1,13 @@
 # OpenEmbedded layer
 
 This layer supports the `wrynose` series and depends on OE-Core and
-`onekvm-bsp` from `onekvm-distro`. It provides the NanoKVM backend recipe
+`onekvm-bsp` from `onekvm-distro` and the `osdrv-sg200x` component layer.
+It provides the NanoKVM backend recipe
 `onekvm-video-soph-mmf` and the vendor userspace recipe
 `onekvm-video-soph-mmf-runtime`, including its build compatibility patches.
-The kernel module and codec firmware recipes remain in the distro BSP layer.
+The kernel module recipe and its packaging files live in
+`osdrv-sg200x/oe-recipes`. The codec firmware recipe remains in the distro BSP
+layer.
 
 Build through `onekvm-distro` with `make package mmf`. Its
 `kas/components.lock` selects this layer and supplies
