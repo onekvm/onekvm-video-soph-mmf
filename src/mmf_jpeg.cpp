@@ -100,7 +100,8 @@ int ensure_jpeg_staging_frame(int width, int height)
 
 void release_invalid_jpeg_stream(int channel)
 {
-	CVI_VENC_ReleaseStream(channel, &g_runtime.jpeg_stream);
+	if (CVI_VENC_ReleaseStream(channel, &g_runtime.jpeg_stream) != CVI_SUCCESS)
+        return;
 	g_runtime.jpeg_stream_held = false;
 	g_runtime.jpeg_stream.u32PackCount = 0;
 	g_runtime.jpeg_stream.pstPack = g_runtime.jpeg_packs;
@@ -117,6 +118,8 @@ int open_jpeg_encoder(int channel, int width, int height, int pixel_format,
 		quality > kMaxJpegQuality || g_runtime.reference_count == 0)
 		return -1;
 
+    if (g_runtime.jpeg_cleanup_pending && close_jpeg_encoder(channel) != 0)
+        return -EBUSY;
 	if (g_runtime.jpeg_initialized) {
 		if (g_runtime.jpeg_width != width || g_runtime.jpeg_height != height ||
 			g_runtime.jpeg_pixel_format != pixel_format) {
@@ -148,13 +151,36 @@ int open_jpeg_encoder(int channel, int width, int height, int pixel_format,
 
 int close_jpeg_encoder(int channel)
 {
-	if (!g_runtime.jpeg_initialized)
-		return 0;
+    g_runtime.jpeg_cleanup_pending = true;
+	if (!g_runtime.jpeg_initialized) {
+        if (g_runtime.jpeg_capture_channel >= 0 && g_runtime.jpeg_capture_owned)
+            release_capture_frame(g_runtime.jpeg_capture_channel);
+        const bool released = g_runtime.jpeg_capture_channel < 0 || !g_runtime.jpeg_capture_owned;
+        g_runtime.jpeg_cleanup_pending = !released;
+        return released ? 0 : -EIO;
+    }
 	if (channel < 0 || channel >= MMF_VENC_MAX_CHN)
 		return -1;
 
-	if (g_runtime.jpeg_stream_held)
-		release_jpeg_packet(channel);
+    /* SendFrame retains the vendor JPU lock until GetStream (or, with a
+       shared ES buffer, ReleaseStream). DestroyChn takes that same lock.
+       Drain submitted work before teardown, including QueryStatus errors
+       where no stream has yet been acquired. Keep the input alive if a
+       drain/release fails so the next cleanup can retry. The vendor JPEG
+       GetStream implementation controls its own hardware wait timeout. */
+    if (g_runtime.jpeg_frame_pending && !g_runtime.jpeg_stream_held) {
+        memset(g_runtime.jpeg_packs, 0, sizeof(g_runtime.jpeg_packs));
+        g_runtime.jpeg_stream.pstPack = g_runtime.jpeg_packs;
+        g_runtime.jpeg_stream.u32PackCount = MMF_VENC_INTERNAL_PACKS;
+        const CVI_S32 result = CVI_VENC_GetStream(
+            channel, &g_runtime.jpeg_stream, 250);
+        if (result != CVI_SUCCESS)
+            return result;
+        g_runtime.jpeg_frame_pending = false;
+        g_runtime.jpeg_stream_held = true;
+    }
+    if (g_runtime.jpeg_stream_held && release_jpeg_packet(channel) != 0)
+        return -EIO;
 
 	CVI_S32 first_error = CVI_SUCCESS;
 	CVI_S32 result = CVI_VENC_StopRecvFrame(channel);
@@ -166,6 +192,13 @@ int close_jpeg_encoder(int channel)
 	result = CVI_VENC_DestroyChn(channel);
 	if (result != CVI_SUCCESS && first_error == CVI_SUCCESS)
 		first_error = result;
+    // Keep the input VB and staging storage alive if hardware teardown failed.
+    if (result != CVI_SUCCESS)
+        return result;
+    g_runtime.jpeg_frame_pending = false;
+    g_runtime.jpeg_stream_held = false;
+    if (g_runtime.jpeg_capture_channel >= 0 && g_runtime.jpeg_capture_owned)
+        release_capture_frame(g_runtime.jpeg_capture_channel);
 
 	if (g_runtime.jpeg_staging_frame != nullptr)
 		free_frame(g_runtime.jpeg_staging_frame);
@@ -182,14 +215,21 @@ int close_jpeg_encoder(int channel)
 	g_runtime.jpeg_quality = 0;
 	g_runtime.jpeg_staging_frame = nullptr;
 	g_runtime.jpeg_staging_pool_id = -1;
-	return first_error;
+    // Destroy succeeded; preceding stop/reset warnings do not retain hardware.
+    if (first_error != CVI_SUCCESS)
+        SAMPLE_PRT("JPEG stopped with prior cleanup warning %#x\n", first_error);
+    const bool released = g_runtime.jpeg_capture_channel < 0 || !g_runtime.jpeg_capture_owned;
+    g_runtime.jpeg_cleanup_pending = !released;
+    return released ? 0 : -EIO;
 }
 
-int submit_jpeg_frame_timeout(int channel, uint8_t *data, int width, int height,
-	int pixel_format, int quality, int timeout_ms)
+static int prepare_jpeg_frame(int channel, int width, int height,
+    int pixel_format, int quality)
 {
-	if (data == nullptr || pixel_format != PIXEL_FORMAT_NV21)
+	if (pixel_format != PIXEL_FORMAT_NV21)
 		return -1;
+    if (g_runtime.jpeg_cleanup_pending && close_jpeg_encoder(channel) != 0)
+        return -EBUSY;
 	if (!g_runtime.jpeg_initialized || g_runtime.jpeg_width != width ||
 		g_runtime.jpeg_height != height ||
 		g_runtime.jpeg_pixel_format != pixel_format) {
@@ -206,9 +246,50 @@ int submit_jpeg_frame_timeout(int channel, uint8_t *data, int width, int height,
 	}
 	if (g_runtime.jpeg_frame_pending || g_runtime.jpeg_stream_held)
 		return -EBUSY;
+    return CVI_SUCCESS;
+}
+
+int submit_jpeg_capture_frame_timeout(int channel, int capture_channel,
+    int quality, int timeout_ms)
+{
+    if (capture_channel < 0 || capture_channel >= MMF_VI_MAX_CHN ||
+        !g_runtime.vi_chn_is_inited[capture_channel])
+        return -1;
+    VIDEO_FRAME_INFO_S *frame = &g_runtime.vi_frame[capture_channel];
+    if (frame->stVFrame.u64PhyAddr[0] == 0)
+        return -1;
+    const int prepared = prepare_jpeg_frame(channel,
+        frame->stVFrame.u32Width, frame->stVFrame.u32Height,
+        frame->stVFrame.enPixelFormat, quality);
+    if (prepared != CVI_SUCCESS)
+        return prepared;
+    const CVI_S32 result = CVI_VENC_SendFrame(channel, frame, timeout_ms);
+    if (result == CVI_SUCCESS)
+        g_runtime.jpeg_frame_pending = true;
+    return result;
+}
+
+int submit_jpeg_frame_timeout(int channel, uint8_t *data, int width, int height,
+    int pixel_format, int quality, int timeout_ms)
+{
+    if (data == nullptr)
+        return -1;
+    const int prepared = prepare_jpeg_frame(
+        channel, width, height, pixel_format, quality);
+    if (prepared != CVI_SUCCESS)
+        return prepared;
 
 	VIDEO_FRAME_INFO_S *send_frame = find_capture_frame(
 		data, width, height, pixel_format);
+	if (send_frame != nullptr) {
+        for (int ch = 0; ch < MMF_VI_MAX_CHN; ++ch) {
+            if (send_frame == &g_runtime.vi_frame[ch]) {
+                g_runtime.jpeg_capture_channel = ch;
+                g_runtime.jpeg_capture_owned = false;
+                break;
+            }
+        }
+    }
 	if (send_frame == nullptr) {
 		if (ensure_jpeg_staging_frame(width, height) != CVI_SUCCESS)
 			return -1;
@@ -301,6 +382,11 @@ int read_jpeg_packet_timeout(int channel, uint8_t *destination, int capacity,
 		}
 		total += size;
 	}
+
+    if (total == 0) {
+        release_invalid_jpeg_stream(channel);
+        return -1;
+    }
 	return static_cast<int>(total);
 }
 

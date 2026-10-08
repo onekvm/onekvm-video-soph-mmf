@@ -89,11 +89,11 @@ static int normalized_gop(int gop, int fps)
     return std::max(1, fps);
 }
 
-void close_encoder(Encoder *encoder) {
+int close_encoder(Encoder *encoder) {
     if (!encoder->initialized) {
-        return;
+        return 0;
     }
-    std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
+    MmfControlLock global_lock;
     const bool live = encoder->mmf_generation ==
         g_mmf_generation.load(std::memory_order_acquire);
     if (live && encoder->packet_borrowed && encoder->codec_type != 0) {
@@ -106,7 +106,8 @@ void close_encoder(Encoder *encoder) {
        sequence across this wrapper can strand the vendor bind worker. */
     if (live) {
         if (encoder->codec_type == 0) {
-            mmf::close_jpeg_encoder(encoder->channel);
+            if (mmf::close_jpeg_encoder(encoder->channel) != 0)
+                return -1;
         } else {
             mmf::close_h26x_encoder(encoder->channel);
         }
@@ -134,6 +135,7 @@ void close_encoder(Encoder *encoder) {
     encoder->mmf_generation = 0;
     encoder->bound_source = nullptr;
     encoder->reset_source = nullptr;
+    return 0;
 }
 
 void invalidate_stale_encoder(Encoder *encoder) {
@@ -187,7 +189,10 @@ int configure_encoder(Encoder *encoder, int width, int height,
     if (encoder->initialized && encoder->width == width && encoder->height == height) {
         return 0;
     }
-    close_encoder(encoder);
+    if (close_encoder(encoder) != 0) {
+        set_error(error, error_capacity, "encoder cleanup is still pending");
+        return ONEKVM_VIDEO_RESOURCE_BUSY;
+    }
     size_t frame_size = 0;
     if (!nv21_size(width, height, &frame_size)) {
         set_error(error, error_capacity, "invalid encoder frame size %dx%d",
@@ -219,7 +224,7 @@ int configure_encoder(Encoder *encoder, int width, int height,
     int result = 0;
     int channel = kJPEGChannel;
     {
-        std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
+        MmfControlLock global_lock;
         if (encoder->codec_type == 0) {
             channel = kJPEGChannel;
             const uint64_t generation =
@@ -378,7 +383,10 @@ int32_t encoder_reset(void *opaque, const onekvm_video_encoder_config_v1 *config
             (source_width != encoder->width || source_height != encoder->height);
     }
     if (source_geometry_changed) {
-        close_encoder(encoder);
+        if (close_encoder(encoder) != 0) {
+            set_error(error, error_capacity, "encoder cleanup is still pending");
+            return ONEKVM_VIDEO_RESOURCE_BUSY;
+        }
         encoder->config = next;
         encoder->codec_type = next_codec;
         encoder->request_keyframe = true;
@@ -405,11 +413,16 @@ int32_t encoder_reset(void *opaque, const onekvm_video_encoder_config_v1 *config
         encoder->codec_type = next_codec;
         return 0;
     }
-    close_encoder(encoder);
+    if (close_encoder(encoder) != 0) {
+        set_error(error, error_capacity, "encoder cleanup is still pending");
+        return ONEKVM_VIDEO_RESOURCE_BUSY;
+    }
     encoder->config = next;
     encoder->codec_type = next_codec;
     encoder->request_keyframe = false;
     encoder->output.clear();
+    encoder->jpeg_packet_size = 0;
+    encoder->jpeg_output_pool.reset();
     return 0;
 }
 
@@ -494,12 +507,13 @@ int32_t encoder_prepare(void *opaque, char *error, uint32_t error_capacity) {
     if (!encoder->initialized || encoder->codec_type == 0) {
         return 0;
     }
-    std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
+    MmfControlLock global_lock;
     return prepare_venc_packet(encoder, error, error_capacity);
 }
 
 int bind_encoder_to_source_locked(Encoder *encoder, Source *source,
                                   char *error, uint32_t error_capacity) {
+    retry_source_frame_release(source);
     if (!source->initialized || source->frame_pending) {
         set_error(error, error_capacity,
                   "bound encoding requires an idle initialized source");
@@ -541,7 +555,7 @@ int bind_encoder_to_source_locked(Encoder *encoder, Source *source,
         return 0;
     }
 
-    std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
+    MmfControlLock global_lock;
     const int result = mmf::bind_h26x_to_capture(encoder->channel, 0, source->channel);
     if (result != 0) {
         set_error(error, error_capacity, "bind VPSS directly to VENC failed: %d", result);
@@ -661,7 +675,7 @@ int encode_bound_placeholder(Encoder *encoder, Source *source,
                               encoder->width, encoder->height) != 0)
         return -1;
     {
-        std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
+        MmfControlLock global_lock;
         if (mmf::h26x_bound_to_vi(encoder->channel) &&
             mmf::rebind_h26x_to_vpss(encoder->channel) != 0) {
             set_error(error, error_capacity,
@@ -700,7 +714,7 @@ int encode_bound_placeholder(Encoder *encoder, Source *source,
             }
         }
         mmf::h26x_reader_force_idr(ch);
-        std::lock_guard<std::recursive_mutex> submit_lock(g_mmf_mutex);
+        MmfControlLock submit_lock;
         (void)mmf::submit_vpss_nv21(
             source->no_signal_frame.data(), width, height);
     }
@@ -855,6 +869,12 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
     std::unique_lock<std::mutex> source_lock(source->mutex);
     invalidate_stale_encoder(encoder);
     if (encoder->codec_type == 0) {
+        std::lock_guard<std::recursive_mutex> transaction(g_mmf_transaction_mutex);
+        retry_source_frame_release(source);
+        if (!source->initialized || source->frame_pending) {
+            set_error(error, error_capacity, "JPEG source unavailable or frame already borrowed");
+            return ONEKVM_VIDEO_RESOURCE_BUSY;
+        }
         const auto [width, height] = source_output_size(source);
         if (!encoder->initialized || !encoder->source_bound ||
             encoder->width != width || encoder->height != height) {
@@ -876,19 +896,36 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
             source->cached_signal.load(std::memory_order_relaxed) == 0)
             return 0;
 
-        void *frame_data = nullptr;
-        int frame_length = 0;
+        encoder->jpeg_packet_size = 0;
+        try {
+            if (!encoder->jpeg_output_pool)
+                encoder->jpeg_output_pool =
+                    std::make_shared<onekvm::PacketBufferPool>(kJPEGBufferSize);
+            if (encoder->output.size() != kJPEGBufferSize)
+                encoder->output = encoder->jpeg_output_pool->take();
+        } catch (const std::bad_alloc &) {
+            set_error(error, error_capacity, "allocate JPEG output: out of memory");
+            return ONEKVM_VIDEO_RESOURCE_NO_MEMORY;
+        }
         int frame_width = 0;
         int frame_height = 0;
         int frame_format = 0;
         int jpeg_size = 0;
+        const int capture_channel = source->channel;
+        {
+            MmfControlLock control;
+            if (mmf::resume_vi_dma() != 0 || mmf::resume_vpss_channel(capture_channel) != 0)
+                return 0;
+        }
+        // The transaction keeps source/channel/VB alive while controls wait.
+        // Completion must not reacquire source: a control may hold it awaiting us.
+        source_lock.unlock();
         const uint64_t capture_start_ns = monotonic_ns();
         {
-            std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
-            const int capture_result = mmf::acquire_capture_frame_timeout(
-                source->channel, &frame_data, &frame_length, &frame_width,
+            const int capture_result = mmf::read_capture_frame_for_encoder_timeout(
+                capture_channel, &frame_width,
                 &frame_height, &frame_format, 100);
-            if (capture_result != 0 || frame_data == nullptr || frame_length <= 0)
+            if (capture_result != 0)
                 return 0;
 
             const uint64_t capture_ns = monotonic_ns() - capture_start_ns;
@@ -902,13 +939,10 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
             if (frame_width == width && frame_height == height &&
                 frame_format == kMMFNV21) {
                 const uint64_t encode_start_ns = monotonic_ns();
-                const int submit_result = mmf::submit_jpeg_frame_timeout(
-                    encoder->channel, static_cast<uint8_t *>(frame_data),
-                    frame_width, frame_height, kMMFNV21,
+                const int submit_result = mmf::submit_jpeg_capture_frame_timeout(
+                    encoder->channel, capture_channel,
                     jpeg_quality(encoder->config.quality_factor), 250);
                 if (submit_result == 0) {
-                    if (encoder->output.size() < kJPEGBufferSize)
-                        encoder->output.resize(kJPEGBufferSize);
                     jpeg_size = mmf::read_jpeg_packet_timeout(
                         encoder->channel, encoder->output.data(),
                         static_cast<int>(encoder->output.size()), 250);
@@ -926,11 +960,17 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
             } else {
                 jpeg_size = -1;
             }
-            mmf::release_capture_frame(source->channel);
+            if (jpeg_size >= 0)
+                mmf::release_capture_frame(capture_channel);
         }
         if (jpeg_size < 0) {
             /* A timed-out JPEG leaves the vendor channel with a pending frame.
                Recreate it on the next read instead of returning EBUSY forever. */
+            // Destroy pending hardware work before returning its physical input.
+            if (mmf::close_jpeg_encoder(encoder->channel) != 0) {
+                set_error(error, error_capacity, "JPEG cleanup failed; input frame retained");
+                return -1;
+            }
             close_encoder(encoder);
             encoder->bound_source = source;
             encoder->reset_source = source;
@@ -939,11 +979,13 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
         }
         if (jpeg_size == 0)
             return 0;
-        encoder->output.resize(static_cast<size_t>(jpeg_size));
+        encoder->jpeg_packet_size = static_cast<size_t>(jpeg_size);
         packet->data = encoder->output.data();
         packet->data_size = static_cast<uint64_t>(jpeg_size);
         source->last_frame_ns.store(packet->pts_ns, std::memory_order_relaxed);
-        source->cached_signal.store(1, std::memory_order_relaxed);
+        int unknown_signal = -1;
+        source->cached_signal.compare_exchange_strong(
+            unknown_signal, 1, std::memory_order_relaxed);
         return 0;
     }
     if (!encoder->initialized ||
@@ -956,8 +998,8 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
     uint64_t output_pts_ns = monotonic_ns();
     int result = 0;
     {
-        std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
         if (encoder->packet_borrowed) {
+            std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
             if (mmf::release_h26x_packet(encoder->channel) != 0) {
                 set_error(error, error_capacity, "release previous bound packet failed");
                 return -1;
@@ -975,7 +1017,6 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
         }
     }
     {
-        std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
         if (encoder->request_keyframe) {
             /* Only mark the reader. CVI_VENC_RequestIDR shares the channel
                ioctl lock with GetStream and must stay off the video loop. */
@@ -1171,7 +1212,7 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
         encoder->placeholder_logged = false;
         encoder->request_keyframe = true;
         {
-            std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
+            MmfControlLock global_lock;
             (void)mmf::resume_vi_dma();
             (void)mmf::bind_h26x_to_capture(encoder->channel, 0, source->channel);
         }
@@ -1200,7 +1241,7 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
     if (rebuilt != 0) {
         encoder->placeholder_frames = false;
         {
-            std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
+            MmfControlLock global_lock;
             (void)mmf::resume_vi_dma();
         }
         invalidate_stale_encoder(encoder);
@@ -1244,7 +1285,7 @@ int32_t encoder_unbind_source(void *opaque, char *error, uint32_t error_capacity
         return 0;
     }
     if (!encoder->source_bound && encoder->bound_source == nullptr) {
-        std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
+        MmfControlLock global_lock;
         mmf::park_unbound_vpss_channels();
         (void)mmf::pause_vi_dma();
         return 0;
@@ -1260,7 +1301,7 @@ int32_t encoder_unbind_source(void *opaque, char *error, uint32_t error_capacity
        lock. Final Stop/Unbind/Destroy ordering belongs to close_h26x_encoder(). */
     const bool live = encoder->initialized && encoder->source_bound &&
         encoder->mmf_generation == g_mmf_generation.load(std::memory_order_acquire);
-    std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
+    MmfControlLock global_lock;
     if (live && mmf::park_h26x_capture(encoder->channel) != 0) {
         set_error(error, error_capacity, "park VPSS/VENC capture failed");
         return -1;
@@ -1311,7 +1352,7 @@ int32_t encoder_encode(void *opaque, const onekvm_video_frame_v1 *frame,
     uint64_t output_pts_ns = frame->pts_ns;
     const uint8_t *output_data = nullptr;
     {
-        std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
+        MmfControlLock global_lock;
         if (encoder->codec_type == 0) {
             /* JPEG uses a borrowed VI/VB frame without copying it. Keep the
                Encode call synchronous so the pipeline cannot return that
@@ -1322,6 +1363,7 @@ int32_t encoder_encode(void *opaque, const onekvm_video_frame_v1 *frame,
                 frame->width, frame->height, kMMFNV21,
                 jpeg_quality(encoder->config.quality_factor));
             if (push_result != 0) {
+                (void)mmf::close_jpeg_encoder(encoder->channel);
                 set_error(error, error_capacity, "submit MMF JPEG frame failed: %d",
                           push_result);
                 return -1;
@@ -1329,7 +1371,13 @@ int32_t encoder_encode(void *opaque, const onekvm_video_frame_v1 *frame,
             result = mmf::read_jpeg_packet(encoder->channel, encoder->output.data(),
                                           static_cast<int>(encoder->output.size()));
             if (result > 0 && mmf::release_jpeg_packet(encoder->channel) != 0) {
+                (void)mmf::close_jpeg_encoder(encoder->channel);
                 set_error(error, error_capacity, "release MMF JPEG frame failed");
+                return -1;
+            }
+            if (result <= 0) {
+                (void)mmf::close_jpeg_encoder(encoder->channel);
+                set_error(error, error_capacity, "read MMF JPEG frame failed");
                 return -1;
             }
             if (result > 0) {
@@ -1505,6 +1553,8 @@ uint32_t encoder_codec(void *opaque) {
 namespace {
 struct TakenPacket {
     std::vector<uint8_t> buf;
+    std::shared_ptr<onekvm::PacketBufferPool> pool;
+    std::shared_ptr<onekvm::EncodedPacketPool> h26x_pool;
 };
 } // namespace
 
@@ -1522,17 +1572,35 @@ int32_t encoder_take_packet(void *opaque, uint8_t **data, uint32_t *size, void *
     std::lock_guard<std::mutex> lock(encoder->mutex);
     if (encoder->output.empty())
         return 0;
-    auto *taken = new TakenPacket;
+    auto *taken = new (std::nothrow) TakenPacket;
+    if (taken == nullptr)
+        return ONEKVM_VIDEO_RESOURCE_NO_MEMORY;
+    const size_t packet_size = encoder->codec_type == 0 && encoder->source_bound
+        ? encoder->jpeg_packet_size : encoder->output.size();
+    if (packet_size == 0 || packet_size > encoder->output.size()) {
+        delete taken;
+        return 0;
+    }
+    taken->pool = encoder->codec_type == 0 && encoder->source_bound
+        ? encoder->jpeg_output_pool : nullptr;
+    if (encoder->codec_type != 0 && encoder->source_bound)
+        taken->h26x_pool = mmf::h26x_packet_pool(encoder->channel);
     taken->buf.swap(encoder->output);
     *data = taken->buf.data();
-    *size = static_cast<uint32_t>(taken->buf.size());
+    *size = static_cast<uint32_t>(packet_size);
+    encoder->jpeg_packet_size = 0;
     *owner = taken;
     return 0;
 }
 
 void encoder_free_taken_packet(void *owner)
 {
-    delete static_cast<TakenPacket *>(owner);
+    auto *packet = static_cast<TakenPacket *>(owner);
+    if (packet != nullptr && packet->pool)
+        packet->pool->put(std::move(packet->buf));
+    else if (packet != nullptr && packet->h26x_pool)
+        packet->h26x_pool->put(std::move(packet->buf));
+    delete packet;
 }
 
 void encoder_release_packet(void *opaque) {
@@ -1541,6 +1609,13 @@ void encoder_release_packet(void *opaque) {
     std::lock_guard<std::mutex> lock(encoder->mutex);
     if (!encoder->initialized || encoder->codec_type == 0)
         return;
+    if (encoder->source_bound && !encoder->packet_borrowed) {
+        if (encoder->mmf_generation != g_mmf_generation.load(std::memory_order_acquire)) {
+            encoder->prepared_size = 0;
+            encoder->prepared_pts_ns = 0;
+        }
+        return;
+    }
     std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
     if (encoder->mmf_generation != g_mmf_generation.load(std::memory_order_acquire)) {
         encoder->packet_borrowed = false;
@@ -1565,7 +1640,7 @@ int32_t encoder_resources(onekvm_video_encoder_resources_v1 *resources,
         set_error(error, error_capacity, "invalid encoder resources output");
         return ONEKVM_VIDEO_RESOURCE_INVALID;
     }
-    std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
+    MmfControlLock global_lock;
     resources->policy_h26x_capacity = 1;
     resources->policy_jpeg_capacity = 1;
     resources->active_h26x = 0;
@@ -1610,10 +1685,15 @@ int32_t encoder_allocate(
     }
     const int type = codec_type(request->config.codec);
 
-    std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
+    MmfControlLock global_lock;
     if (mmf::g_runtime.reference_count == 0) {
         set_error(error, error_capacity, "MMF runtime is not initialized");
         return ONEKVM_VIDEO_RESOURCE_UNINITIALIZED;
+    }
+    if (type == 0 && mmf::g_runtime.jpeg_capture_channel >= 0 &&
+        mmf::close_jpeg_encoder(kJPEGChannel) != 0) {
+        set_error(error, error_capacity, "JPEG input cleanup is still pending");
+        return ONEKVM_VIDEO_RESOURCE_BUSY;
     }
     if ((type == 0 && mmf::g_runtime.jpeg_initialized) ||
         (type != 0 && mmf::g_runtime.h26x_encoder_active)) {
@@ -1679,6 +1759,14 @@ void encoder_destroy(void *opaque) {
     {
         std::lock_guard<std::mutex> lock(encoder->mutex);
         close_encoder(encoder);
+        // A failed JPEG cleanup stays quarantined in runtime after this owner
+        // is deleted. Never leave the owner table pointing at freed memory.
+        MmfControlLock global_lock;
+        if (encoder->channel >= 0 && encoder->channel <= kLastVENCChannel &&
+            g_encoder_owners[encoder->channel] == encoder) {
+            g_encoder_owners[encoder->channel] = nullptr;
+            g_encoder_owner_generations[encoder->channel] = 0;
+        }
     }
     delete encoder;
 }

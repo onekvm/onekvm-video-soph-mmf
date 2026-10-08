@@ -114,6 +114,7 @@ struct BufferPool {
 
 struct RuntimeState {
 	int reference_count;
+    bool teardown_failed = false;
 	bool vi_is_inited;
 	bool vi_chn_is_inited[MMF_VI_MAX_CHN];
 	bool vi_chn_running[MMF_VI_MAX_CHN];
@@ -129,13 +130,19 @@ struct RuntimeState {
 	const uint8_t *vpss_user_nv21_source = nullptr;
 	uint8_t vpss_user_prepared_mask = 0;
 	VIDEO_FRAME_INFO_S vi_frame[MMF_VI_MAX_CHN];
+    bool capture_frame_held[MMF_VI_MAX_CHN]{};
+    bool capture_release_pending[MMF_VI_MAX_CHN]{};
 	CaptureMapping vi_mappings[MMF_VI_MAX_CHN][MMF_VI_MAP_CACHE_SIZE];
 	uint8_t vi_map_next[MMF_VI_MAX_CHN];
 	VB_CONFIG_S vb_conf;
 
 	bool jpeg_initialized;
+    bool jpeg_cleanup_pending = false;
 	bool jpeg_frame_pending;
 	bool jpeg_stream_held;
+    // Physical VPSS frame retained until JPEG completes or is destroyed.
+    int jpeg_capture_channel = -1;
+    bool jpeg_capture_owned = false;
 	VENC_STREAM_S jpeg_stream;
 	VENC_PACK_S jpeg_packs[MMF_VENC_INTERNAL_PACKS];
 	int jpeg_width;

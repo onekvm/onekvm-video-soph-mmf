@@ -10,6 +10,7 @@ namespace onekvm::video_backend {
  * tear that context down, so serialize every MMF operation across sources and
  * encoders. Recursive locking keeps the existing small helper boundaries. */
 std::recursive_mutex g_mmf_mutex;
+std::recursive_mutex g_mmf_transaction_mutex;
 std::atomic<uint64_t> g_mmf_generation{1};
 
 void set_error(char *error, uint32_t capacity, const char *format, ...) {
@@ -316,16 +317,24 @@ void release_source_frame(Source *source) {
     if (!source->frame_pending || source->channel < 0) {
         return;
     }
-    std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
-    mmf::release_capture_frame(source->channel);
-    source->frame_pending = false;
+    MmfControlLock global_lock;
+    source->frame_release_pending = true;
+    if (mmf::release_capture_frame(source->channel) == 0) {
+        source->frame_pending = false;
+        source->frame_release_pending = false;
+    }
 }
 
-void close_source(Source *source) {
+void retry_source_frame_release(Source *source) {
+    if (source->frame_release_pending)
+        release_source_frame(source);
+}
+
+int close_source(Source *source) {
     if (!source->initialized) {
-        return;
+        return 0;
     }
-    std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
+    MmfControlLock global_lock;
     release_source_frame(source);
     /* mmf::shutdown() owns the complete dependency-ordered teardown: bound VENC
        consumers are stopped before their VPSS/VI producers.  Removing the VI
@@ -333,15 +342,19 @@ void close_source(Source *source) {
        draining its stream, which can fill the 12-pack queue and drop the
        cached SPS/PPS needed by reconnecting H.264 decoders.  It also made the
        later global teardown destroy the same VI resources twice. */
-    mmf::shutdown();
+    if (mmf::shutdown() != 0)
+        return -1;
     g_mmf_generation.fetch_add(1, std::memory_order_acq_rel);
     source->channel = -1;
+    source->frame_pending = false;
+    source->frame_release_pending = false;
     source->initialized = false;
     source->capture_width = 0;
     source->capture_height = 0;
     source->capture_live.store(false, std::memory_order_relaxed);
     source->preserved_locked_csi = false;
     source->no_signal_frame.clear();
+    return 0;
 }
 
 int open_source(Source *source, const onekvm_video_source_config_v1 *config,
@@ -355,7 +368,7 @@ int open_source(Source *source, const onekvm_video_source_config_v1 *config,
         set_error(error, error_capacity, "invalid source configuration");
         return -1;
     }
-    std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
+    MmfControlLock global_lock;
     const int requested_fps = config->fps > 0 ? static_cast<int>(config->fps) : 60;
     onekvm::InputResolution locked_csi{};
     onekvm::InputResolution locked_hdmi{};
@@ -507,7 +520,7 @@ int reopen_source_for_input(Source *source, onekvm::InputResolution input,
                             bool *did_pcie_reset = nullptr) {
     const onekvm_video_source_config_v1 config = source->config;
     const auto previous_input = source->input_resolution.current();
-    std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
+    MmfControlLock global_lock;
     bool fresh_timing = false;
     bool source_closed = false;
     const bool full_pcie_reset = force_pcie_reset && blank_reset_count > 0;
@@ -522,7 +535,10 @@ int reopen_source_for_input(Source *source, onekvm::InputResolution input,
         !full_pcie_reset && !source->hdmi_blank_rearm_attempted;
     if (passive_probe) {
         const auto started = std::chrono::steady_clock::now();
-        close_source(source);
+        if (close_source(source) != 0) {
+            set_error(error, error_capacity, "stop old MMF source failed");
+            return -1;
+        }
         source_closed = true;
         /* Match 139's restart path: compare new timings with the geometry
            actually used by the old capture, not the watcher's next guess. */
@@ -600,8 +616,10 @@ int reopen_source_for_input(Source *source, onekvm::InputResolution input,
             onekvm::supported_output_resolution(held_output)
         ? &held_output : nullptr;
     source->pending_receiver = input;
-    if (!source_closed)
-        close_source(source);
+    if (!source_closed && close_source(source) != 0) {
+        set_error(error, error_capacity, "stop old MMF source failed");
+        return -1;
+    }
     /* A reappearing HDMI timing may have the same geometry as the one that
        stalled. Its active-size counter alone does not prove CSI is armed. */
     const bool rearm_same_mode = force_pcie_reset && fresh_timing &&
@@ -1088,7 +1106,7 @@ int32_t source_reset(void *opaque, const onekvm_video_source_config_v1 *config,
         static_cast<int>(source->input_resolution.current().width),
         static_cast<int>(source->input_resolution.current().height),
         width, height);
-    std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
+    MmfControlLock global_lock;
     int result = mmf::reset_capture_channel(
         source->channel, width, height, kMMFNV21, fps);
     if (result != 0) {
@@ -1177,6 +1195,7 @@ int32_t source_read(void *opaque, onekvm_video_frame_v1 *frame,
         set_error(error, error_capacity, "source is not initialized");
         return -1;
     }
+    retry_source_frame_release(source);
     if (source->frame_pending) {
         set_error(error, error_capacity, "previous source frame was not released");
         return -1;
@@ -1187,7 +1206,7 @@ int32_t source_read(void *opaque, onekvm_video_frame_v1 *frame,
     int width = 0;
     int height = 0;
     int format = 0;
-    std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
+    MmfControlLock global_lock;
     const uint64_t capture_start_ns = monotonic_ns();
     int result = mmf::acquire_capture_frame(source->channel, &data, &length, &width, &height, &format);
     if (result == 0 && data != nullptr && length > 0) {

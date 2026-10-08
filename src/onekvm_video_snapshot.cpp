@@ -64,6 +64,7 @@ int32_t source_snapshot(
         set_error(error, error_capacity, "snapshot source is not initialized");
         return ONEKVM_VIDEO_RESOURCE_UNINITIALIZED;
     }
+    retry_source_frame_release(source);
     if (source->frame_pending) {
         set_error(error, error_capacity, "snapshot source frame is already borrowed");
         return ONEKVM_VIDEO_RESOURCE_BUSY;
@@ -96,7 +97,7 @@ int32_t source_snapshot(
         return ONEKVM_VIDEO_RESOURCE_UNSUPPORTED;
     }
 
-    std::lock_guard<std::recursive_mutex> global_lock(g_mmf_mutex);
+    MmfControlLock global_lock;
     const int channel = source->channel;
     if (channel < 0 || channel >= MMF_VI_MAX_CHN ||
         !mmf::g_runtime.vi_chn_is_inited[channel]) {
@@ -139,14 +140,12 @@ int32_t source_snapshot(
         return ONEKVM_VIDEO_RESOURCE_INTERNAL;
     }
 
-    void *frame_data = nullptr;
-    int frame_length = 0;
     int frame_width = 0;
     int frame_height = 0;
     int frame_format = 0;
     const int capture_timeout = remaining_ms(deadline);
     int capture_result = capture_timeout == 0 ? -1 :
-        mmf::acquire_capture_frame_timeout(channel, &frame_data, &frame_length,
+        mmf::acquire_capture_frame_for_encoder_timeout(channel,
             &frame_width, &frame_height, &frame_format, capture_timeout);
     if (capture_result != 0) {
         const bool timed_out = remaining_ms(deadline) == 0;
@@ -181,8 +180,7 @@ int32_t source_snapshot(
     const uint64_t capture_pts_ns = monotonic_ns();
     status = ONEKVM_VIDEO_RESOURCE_INTERNAL;
     do {
-        if (frame_data == nullptr || frame_length <= 0 ||
-            frame_width != expected_width || frame_height != expected_height ||
+        if (frame_width != expected_width || frame_height != expected_height ||
             frame_format != kMMFNV21) {
             set_error(error, error_capacity,
                 "snapshot frame shape changed during capture");
@@ -191,9 +189,8 @@ int32_t source_snapshot(
         }
         const int encode_timeout = remaining_ms(deadline);
         if (encode_timeout == 0 ||
-            mmf::submit_jpeg_frame_timeout(encoder->channel,
-                static_cast<uint8_t *>(frame_data), frame_width, frame_height,
-                kMMFNV21, snapshot_jpeg_quality(request->quality_factor),
+            mmf::submit_jpeg_capture_frame_timeout(encoder->channel, channel,
+                snapshot_jpeg_quality(request->quality_factor),
                 encode_timeout) != 0) {
             set_error(error, error_capacity, "snapshot JPEG submission failed");
             status = encode_timeout == 0 ? ONEKVM_VIDEO_RESOURCE_TIMEOUT
@@ -233,7 +230,6 @@ int32_t source_snapshot(
     /* Stop/reset/destroy JPEG before returning the VPSS block so hardware can
        no longer reference the borrowed frame. */
     encoder_destroy(encoder_opaque);
-    mmf::release_capture_frame(channel);
     if (idle_h26x_channel >= 0) {
         if (mmf::finish_idle_h26x_drain(idle_h26x_channel) != 0) {
             set_error(error, error_capacity,

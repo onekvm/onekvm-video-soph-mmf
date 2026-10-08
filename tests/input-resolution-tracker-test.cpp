@@ -310,7 +310,7 @@ int main() {
     if (pick_initial_vi_resolution(false, {}, {}, {}) !=
         InputResolution{1920, 1080})
         return 120;
-    if (hdmi_watch_interval(-1, {640, 480}, false) != 300ms)
+    if (hdmi_watch_interval(-1, {640, 480}, false) != 100ms)
         return 124;
     if (hdmi_watch_interval(-1, {1920, 1080}, false) != 1s)
         return 125;

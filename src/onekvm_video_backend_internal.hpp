@@ -4,6 +4,7 @@
 
 #include "input_resolution_tracker.hpp"
 #include "mmf.hpp"
+#include "packet-buffer-pool.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -16,6 +17,7 @@
 #include <cstdio>
 #include <cstring>
 #include <mutex>
+#include <memory>
 #include <new>
 #include <string>
 #include <thread>
@@ -111,6 +113,7 @@ struct ONEKVM_VIDEO_INTERNAL Source {
     bool initialized = false;
     bool preserved_locked_csi = false;
     bool frame_pending = false;
+    bool frame_release_pending = false;
     uint64_t frame_token = 0;
     onekvm_video_source_config_v1 config{};
     std::vector<uint8_t> no_signal_frame;
@@ -189,6 +192,8 @@ struct ONEKVM_VIDEO_INTERNAL Encoder {
     uint64_t prepared_pts_ns = 0;
     uint64_t bound_since_ns = 0;
     std::vector<uint8_t> output;
+    std::shared_ptr<onekvm::PacketBufferPool> jpeg_output_pool;
+    size_t jpeg_packet_size = 0;
     uint64_t mmf_generation = 0;
     Source *bound_source = nullptr;
     /* Keep the source handle across UnbindVideoSource so encoder_reset can
@@ -206,12 +211,26 @@ struct ONEKVM_VIDEO_INTERNAL Encoder {
 };
 
 extern ONEKVM_VIDEO_INTERNAL std::recursive_mutex g_mmf_mutex;
+extern ONEKVM_VIDEO_INTERNAL std::recursive_mutex g_mmf_transaction_mutex;
 extern ONEKVM_VIDEO_INTERNAL std::atomic<uint64_t> g_mmf_generation;
+
+// Hardware control waits for in-flight software capture/JPEG operations before
+// taking the global metadata lock. JPEG completion never needs the source lock.
+class ONEKVM_VIDEO_INTERNAL MmfControlLock {
+public:
+    MmfControlLock()
+        : transaction_(g_mmf_transaction_mutex), global_(g_mmf_mutex) {}
+private:
+    std::lock_guard<std::recursive_mutex> transaction_;
+    std::lock_guard<std::recursive_mutex> global_;
+};
 
 ONEKVM_VIDEO_INTERNAL void set_error(
     char *error, uint32_t capacity, const char *format, ...);
 ONEKVM_VIDEO_INTERNAL std::pair<int, int> resolution_size(int resolution);
 ONEKVM_VIDEO_INTERNAL std::pair<int, int> source_output_size(const Source *source);
+ONEKVM_VIDEO_INTERNAL void release_source_frame(Source *source);
+ONEKVM_VIDEO_INTERNAL void retry_source_frame_release(Source *source);
 ONEKVM_VIDEO_INTERNAL uint64_t monotonic_ns();
 ONEKVM_VIDEO_INTERNAL bool nv21_size(int width, int height, size_t *size);
 /* Caller must hold source->mutex. 1 = rebuilt, 0 = no change, -1 = failed. */

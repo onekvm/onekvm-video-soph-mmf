@@ -82,7 +82,7 @@ int32_t edid_get(onekvm_video_edid_blob_v1 *edid, char *error, uint32_t error_ca
         set_error(error, error_capacity, "invalid EDID buffer");
         return -1;
     }
-    std::lock_guard<std::recursive_mutex> lock(g_mmf_mutex);
+    MmfControlLock lock;
     if (lt6911_edid_read(edid->data, kEDIDBytes) != 0) {
         set_error(error, error_capacity, "read HDMI EDID");
         return -1;
@@ -110,7 +110,7 @@ int32_t edid_set(const onekvm_video_edid_blob_v1 *edid,
         set_error(error, error_capacity, "EDID is read-only on this capture chip");
         return -1;
     }
-    std::lock_guard<std::recursive_mutex> lock(g_mmf_mutex);
+    MmfControlLock lock;
     if (info.board == NanoKVMBoard::PCIe && pcie_hdmi_reset() != 0) {
         set_error(error, error_capacity, "reset PCIe HDMI before EDID write");
         return -1;

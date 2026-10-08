@@ -928,16 +928,17 @@ static CVI_S32 initialize_runtime(void)
 	return s32Ret;
 }
 
-static void destroy_runtime(void)
+static int destroy_runtime(void)
 {
 	/* Bound H.26x channels consume VPSS output directly. Disconnect and stop
 	 * those workers before destroying their producer channels during an HDMI
 	 * input-size rebuild. */
 	close_all_h26x_encoders();
-	close_jpeg_encoder(0);
-	close_all_capture_channels();
+    if (close_jpeg_encoder(0) != 0 || close_all_capture_channels() != 0)
+        return -1;
 	stop_capture_pipeline();
 	shutdown_vendor_system();
+    return 0;
 }
 
 static int find_unused_capture_channel() {
@@ -977,6 +978,12 @@ int reclaim_stale_runtime(void)
 
 int initialize(void)
 {
+    if (g_runtime.teardown_failed) {
+        if (destroy_runtime() != 0)
+            return -EBUSY;
+        g_runtime.reference_count = 0;
+        g_runtime.teardown_failed = false;
+    }
     if (g_runtime.reference_count) {
 		g_runtime.reference_count ++;
         // printf("OneKVM MMF already inited(cnt:%d)\n", g_runtime.reference_count);
@@ -1014,8 +1021,12 @@ int shutdown(void) {
 		return 0;
 
 	printf("OneKVM MMF runtime stopped.\n");
-	destroy_runtime();
-	return 0;
+    if (destroy_runtime() != 0) {
+        g_runtime.reference_count = 1;
+        g_runtime.teardown_failed = true;
+        return -1;
+    }
+    return 0;
 }
 
 int find_free_capture_channel(void) {

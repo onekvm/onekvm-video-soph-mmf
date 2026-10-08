@@ -451,6 +451,14 @@ int close_capture_channel(int ch) {
 	if (g_runtime.vi_chn_is_inited[ch] == false) {
 		return 0;
 	}
+    // A failed JPEG teardown must never be followed by freeing its input pool.
+    if (g_runtime.jpeg_capture_channel >= 0 && close_jpeg_encoder(0) != 0)
+        return -EBUSY;
+    if (g_runtime.capture_frame_held[ch]) {
+        release_capture_frame(ch);
+        if (g_runtime.capture_frame_held[ch])
+            return -EBUSY;
+    }
 
 	CVI_S32 s32Ret = CVI_SUCCESS;
 	/* Teardown needs the scaler and VI DMA enabled; DisableChn while idle
@@ -481,7 +489,8 @@ int close_capture_channel(int ch) {
 int close_all_capture_channels() {
 	for (int i = 0; i < MMF_VI_MAX_CHN; i++) {
 		if (g_runtime.vi_chn_is_inited[i] == true) {
-			close_capture_channel(i);
+			if (close_capture_channel(i) != 0)
+                return -1;
 		}
 	}
 	return 0;
@@ -600,9 +609,48 @@ int reset_capture_channel(int ch, int width, int height, int format, int fps)
 {
 	const int out_ch = vpss_phy_channel(width);
 	if (ch != out_ch)
-		close_capture_channel(ch);
-	close_capture_channel(out_ch);
+		if (close_capture_channel(ch) != 0)
+            return -1;
+	if (close_capture_channel(out_ch) != 0)
+        return -1;
 	return open_capture_channel(out_ch, width, height, format, fps);
+}
+
+int acquire_capture_frame_for_encoder_timeout(int ch, int *width,
+    int *height, int *format, int timeout_ms) {
+    if (ch < 0 || ch >= MMF_VI_MAX_CHN || width == nullptr || height == nullptr || format == nullptr)
+        return -EINVAL;
+    if (resume_vi_dma() != 0 || resume_vpss_channel(ch) != 0)
+        return -1;
+    return read_capture_frame_for_encoder_timeout(ch, width, height, format, timeout_ms);
+}
+
+int read_capture_frame_for_encoder_timeout(int ch, int *width,
+    int *height, int *format, int timeout_ms) {
+    if (ch < 0 || ch >= MMF_VI_MAX_CHN ||
+        !g_runtime.vi_chn_is_inited[ch] || width == nullptr ||
+        height == nullptr || format == nullptr)
+        return -1;
+    if (g_runtime.jpeg_capture_channel >= 0 && close_jpeg_encoder(0) != 0)
+        return -EBUSY;
+    if (g_runtime.capture_release_pending[ch] && release_capture_frame(ch) != 0)
+        return -EBUSY;
+    if (g_runtime.capture_frame_held[ch])
+        return -EBUSY;
+    VIDEO_FRAME_INFO_S *frame = &g_runtime.vi_frame[ch];
+    if (CVI_VPSS_GetChnFrame(0, ch, frame, timeout_ms) != 0)
+        return -1;
+    // JPEG reads physical VB addresses. Mapping/invalidation is only needed
+    // when a CPU consumer actually accesses the captured pixels.
+    for (auto &address : frame->stVFrame.pu8VirAddr)
+        address = nullptr;
+    g_runtime.jpeg_capture_channel = ch;
+    g_runtime.jpeg_capture_owned = true;
+    g_runtime.capture_frame_held[ch] = true;
+    *width = frame->stVFrame.u32Width;
+    *height = frame->stVFrame.u32Height;
+    *format = frame->stVFrame.enPixelFormat;
+    return 0;
 }
 
 int acquire_capture_frame_timeout(int ch, void **data, int *len, int *width,
@@ -615,6 +663,12 @@ int acquire_capture_frame_timeout(int ch, void **data, int *len, int *width,
         // printf("vi ch %d not open\n", ch);
         return -1;
     }
+    if (g_runtime.jpeg_capture_channel >= 0 && close_jpeg_encoder(0) != 0)
+        return -EBUSY;
+    if (g_runtime.capture_release_pending[ch] && release_capture_frame(ch) != 0)
+        return -EBUSY;
+    if (g_runtime.capture_frame_held[ch])
+        return -EBUSY;
     if (data == NULL || len == NULL || width == NULL || height == NULL || format == NULL) {
         printf("invalid param\n");
         return -1;
@@ -627,15 +681,17 @@ int acquire_capture_frame_timeout(int ch, void **data, int *len, int *width,
 		return -1;
 	VIDEO_FRAME_INFO_S *frame = &g_runtime.vi_frame[ch];
 	if (CVI_VPSS_GetChnFrame(0, ch, frame, timeout_ms) == 0) {
+        g_runtime.capture_frame_held[ch] = true;
         int image_size = frame->stVFrame.u32Length[0]
                         + frame->stVFrame.u32Length[1]
 				        + frame->stVFrame.u32Length[2];
 		CVI_VOID *vir_addr = map_capture_frame(ch, frame->stVFrame.u64PhyAddr[0], image_size);
 		if (vir_addr == NULL) {
-			CVI_VPSS_ReleaseChnFrame(0, ch, frame);
+			release_capture_frame(ch);
 			return -1;
 		}
         CVI_SYS_IonInvalidateCache(frame->stVFrame.u64PhyAddr[0], vir_addr, image_size);
+        g_runtime.capture_frame_held[ch] = true;
 
 		frame->stVFrame.pu8VirAddr[0] = (CVI_U8 *)vir_addr;
 		// printf("width: %d, height: %d, total_buf_length: %d, phy:%#lx  vir:%p\n",
@@ -657,14 +713,38 @@ int acquire_capture_frame(int ch, void **data, int *len, int *width, int *height
 	return acquire_capture_frame_timeout(ch, data, len, width, height, format, 1000);
 }
 
-void release_capture_frame(int ch) {
-	if (ch < 0 || ch >= MMF_VI_MAX_CHN || !g_runtime.vi_chn_is_inited[ch])
-		return;
-	VIDEO_FRAME_INFO_S *frame = &g_runtime.vi_frame[ch];
-	if (CVI_VPSS_ReleaseChnFrame(0, ch, frame) != 0) {
-		SAMPLE_PRT("CVI_VI_ReleaseChnFrame NG\n");
-	}
-	frame->stVFrame.pu8VirAddr[0] = NULL;
+int release_capture_frame(int ch) {
+    if (ch < 0 || ch >= MMF_VI_MAX_CHN || !g_runtime.vi_chn_is_inited[ch])
+        return -EINVAL;
+    if (!g_runtime.capture_frame_held[ch]) {
+        g_runtime.capture_release_pending[ch] = false;
+        return 0;
+    }
+    // The caller has relinquished its view. Keep the vendor descriptor until
+    // both JPEG teardown and VPSS release succeed, and retry before acquiring.
+    g_runtime.capture_release_pending[ch] = true;
+    if (g_runtime.jpeg_capture_channel == ch &&
+        (g_runtime.jpeg_frame_pending || g_runtime.jpeg_stream_held)) {
+        if (close_jpeg_encoder(0) != 0)
+            return -EIO;
+        if (!g_runtime.capture_frame_held[ch]) {
+            g_runtime.capture_release_pending[ch] = false;
+            return 0;
+        }
+    }
+    VIDEO_FRAME_INFO_S *frame = &g_runtime.vi_frame[ch];
+    if (CVI_VPSS_ReleaseChnFrame(0, ch, frame) != 0) {
+        SAMPLE_PRT("CVI_VPSS_ReleaseChnFrame NG\n");
+        return -EIO;
+    }
+    if (g_runtime.jpeg_capture_channel == ch) {
+        g_runtime.jpeg_capture_channel = -1;
+        g_runtime.jpeg_capture_owned = false;
+    }
+    g_runtime.capture_frame_held[ch] = false;
+    g_runtime.capture_release_pending[ch] = false;
+    frame->stVFrame.pu8VirAddr[0] = nullptr;
+    return 0;
 }
 
 static void release_vpss_user_frames()

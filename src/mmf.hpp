@@ -4,7 +4,10 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <vector>
+
+namespace onekvm { class EncodedPacketPool; }
 
 extern "C" {
 struct onekvm_lt6911_input_timing {
@@ -157,7 +160,13 @@ void set_capture_flip(int ch, bool en);
 int acquire_capture_frame(int ch, void **data, int *len, int *width, int *height, int *format);
 int acquire_capture_frame_timeout(int ch, void **data, int *len, int *width,
 	int *height, int *format, int timeout_ms);
-void release_capture_frame(int ch);
+// Hardware consumers borrow the VB descriptor without touching CPU pixels.
+int acquire_capture_frame_for_encoder_timeout(int ch, int *width,
+    int *height, int *format, int timeout_ms);
+// Caller has resumed the producer and holds the runtime transaction lease.
+int read_capture_frame_for_encoder_timeout(int ch, int *width,
+    int *height, int *format, int timeout_ms);
+int release_capture_frame(int ch);
 
 // venc
 int open_jpeg_encoder(int ch, int w, int h, int format, int quality);
@@ -165,6 +174,8 @@ int close_jpeg_encoder(int ch);
 int submit_jpeg_frame(int ch, uint8_t *data, int w, int h, int format, int quality);
 int submit_jpeg_frame_timeout(int ch, uint8_t *data, int w, int h,
 	int format, int quality, int timeout_ms);
+int submit_jpeg_capture_frame_timeout(int ch, int capture_ch,
+    int quality, int timeout_ms);
 int read_jpeg_packet(int ch, uint8_t *dst, int capacity);
 int read_jpeg_packet_timeout(int ch, uint8_t *dst, int capacity, int timeout_ms);
 int release_jpeg_packet(int ch);
@@ -180,9 +191,10 @@ int read_latest_h26x_packet(int ch, uint8_t *dst, int capacity);
 int read_latest_h26x_packet_nowait(int ch, uint8_t *dst, int capacity);
 // Release every access unit already queued without waiting for a new one.
 int drain_h26x_packets(int ch, uint8_t *scratch, int capacity);
-void start_h26x_reader(int ch, bool request_idr = true);
+int start_h26x_reader(int ch, bool request_idr = true);
 void stop_h26x_reader(int ch);
 int take_ready_h26x_into(int ch, std::vector<uint8_t> *dst, bool *key_frame);
+std::shared_ptr<onekvm::EncodedPacketPool> h26x_packet_pool(int ch);
 int read_manual_h26x_frame(int ch, uint8_t *dst, int capacity, int timeout_ms);
 int take_ready_h26x_packet(int ch, uint8_t *dst, int capacity,
 	bool *key_frame = nullptr);

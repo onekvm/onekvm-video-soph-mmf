@@ -54,9 +54,21 @@ HDMI 源
 
 像素是 VI VB → VPSS VB → VENC，硬件绑定，没有用户态 NV21 `memcpy`。
 `GetStream` 必须在 `ReleaseStream` 前把压缩 AU 拷出驱动缓冲，这是唯一必要的码流拷贝。
-Core 的 `take_ready` 仍会把压缩 AU 拷到 staging。
+reader 先检查所有 pack 的长度、偏移和容量，再把 AU 直接拷进可复用 vector；
+队列、`take_ready_h26x_into` 与 `encoder_take_packet` 逐级移动所有权，不再经过独立 scratch。
+Core 的 `Bytes::from_owner` 持有该缓冲，发送完成后由 `encoder_free_taken_packet` 归还
+reader 的共享池。池最多保留 3 个、每个 capacity 不超过 1 MiB 的缓冲；队列仍最多 16 个 AU。
+归还后的 vector 保留有效长度，下一次只按实际包长 resize，不能每帧清零整个 1 MiB。
+已取走的包可以比编码器活得更久，因此归还必须持有池的 shared owner，不能访问已销毁的编码器。
 
-Core / `wait_ready_h26x_packet` 不要用 `std::condition_variable::wait_for`（musl/riscv64 会立刻返回），也不要 `FUTEX_WAIT_PRIVATE`（会丢唤醒，16 槽 reader 打满后变成 VENC 60 / Core 1 FPS）。现行等待是 deadline 内 1 ms `sleep_for` 轮询，保留 40 ms 超时和 stop 检查。`notify` 仍可 `FUTEX_WAKE`，但取包路径没有对应的 wait。
+Core / `wait_ready_h26x_packet` 不要用 `std::condition_variable::wait_for`（musl/riscv64 会立刻返回），也不要 `FUTEX_WAIT_PRIVATE`（会丢唤醒，16 槽 reader 打满后变成 VENC 60 / Core 1 FPS）。现行等待使用 eventfd + poll，保留 deadline、40 ms 超时和 stop 检查；只有 eventfd 创建失败时才回退 1 ms 轮询。
+
+MMF 资源策略仍为一路 H264/H265 加一路 JPEG。双 H264、双 H265 的第二次独立分配
+返回 `RESOURCE_BUSY`；两个客户端订阅同一主码流属于分发测试，不能当成双硬件编码。
+缓冲复用和事件等待保持 H264、H265、H264 + JPEG 的帧率与编码参数，不改变压缩码率。
+性能测量须区分 MMF ABI 与网络分发：单 H26x CPU 未测到明确增益，混合编码的 H264
+取包等待缩短；Core 分发和 VNC 调度的收益不能归因于硬件编码变快。JPEG 改为 fd
+事件等待的独立候选没有测到明显收益，未保留。JPEG 的事务门禁和长等待锁范围见下文。
 
 ## VENC reader
 
@@ -189,18 +201,57 @@ VI 公共池固定 **2** 块（fill + consume）。第三块 UYVY 会多一场�
 
 ## 受管截图
 
-截图走 v1 ABI 的可选 `source_snapshot`：复用已有 source/VPSS，申请受管 JPEG encoder，把 JPEG 复制到调用者缓冲区后释放。
+截图走 v1 ABI 的可选 `source_snapshot`：复用已有 source/VPSS，申请受管 JPEG encoder，直接提交 VPSS VB 物理帧，把 JPEG 复制到调用者缓冲区后释放。截图不映射或 invalidate 整幅 NV21。
 Core 只做鉴权和成品 JPEG 转发。扩展不得创建第二个 MMF source，也不得在绑定串流路径调用 `source_read`。
 显式截图尺寸必须匹配当前输出，不能为采样重设实时流分辨率。
 
 绑定 VPSS 输出保持 `Depth=1`，供低频截图获取最新完成帧。vendor 的满队列处理会释放旧帧、保留新帧；空闲时 DisableChn 清空队列。
-帧必须保持借用直到 JPEG stream 已释放；失败时先 Stop/Destroy JPEG，再归还 VPSS 帧。原本暂停的 VPSS 在截图结束后恢复暂停。
-请求期限覆盖取帧和 JPEG 送帧/读流，最长 1000 ms；结果 PTS 是 backend 单调时钟观察时刻，不是曝光时间。
+帧必须保持借用直到 JPEG stream 已释放；失败时先排掉已提交结果、ReleaseStream，再 Stop/Destroy JPEG 和归还 VPSS 帧。原本暂停的 VPSS 在截图结束后恢复暂停。
+请求期限覆盖取帧和 JPEG 查询/送帧，最长配置 1000 ms；vendor JPEG GetStream 忽略传入 timeout，实际硬件等待由驱动控制，不能视为严格的调用时限。结果 PTS 是 backend 单调时钟观察时刻，不是曝光时间。
 
 已确认无信号或 `out_of_range` 时立即返回 `UNSUPPORTED`，不要用占位图制造 JPEG，也不要在占位 `SendFrame` 还握着 source 锁时去 `GetChnFrame`。
 
 当前 policy 允许一路 H.26x 与一路 JPEG，不能据此断言芯片只能一路 H.26x。
 `BACKGROUND` 用途不自动抢占实时 encoder；KVM 空闲也不表示 encoder 已销毁。后台合成需要 Core 的显式所有权交接。
+
+## MJPEG 与 VNC
+
+VNC 订阅 Core 的常驻逻辑绑定 JPEG encoder，复用同一 source 和 VPSS ch1，
+不逐帧截图，也不从 WebRTC H.264 解码。JPEG 客户端接收原生 encoding 21 或
+Tight JPEG；Core 将压缩包写入共享 ring，VNC 借用 ring 槽并直接写 socket。
+仅 RGB 客户端需要像素解码和脏块检测，兼容路径最多 15 FPS。
+
+- JPEG 硬件输入借用 VPSS VB descriptor/物理地址，不映射或 invalidate 整幅
+  NV21。CPU 读取像素时才使用原有映射接口。VB 必须保持借用直到 JPEG 完成；
+  错误路径先排流、释放 stream 和停止 JPEG 通道，再归还帧，不能为缩短锁等待提前释放 VB。
+- 流式 JPEG 的 2 MiB 压缩输出缓冲通过共享池回收，池最多缓存三个空闲缓冲。
+  vector 的可写长度与实际 JPEG 包长分别保存，不能逐帧缩短再清零整个缓冲。
+  已交出的包可比 encoder 活得更久，包的 owner 必须持有 pool，避免 reset/close
+  后回收访问已析构对象。驱动到 backend、Core 到 ring 仍有压缩码流复制。
+- JPEG 数据事务由 `g_mmf_transaction_mutex` 独占。锁顺序为 encoder →
+  source → transaction → global；控制操作取得 transaction 后才取得 global。
+  bound JPEG 配置和恢复 VPSS 后释放 source，取帧、编码等待和归还只持
+  transaction；事务完成不重新取得 source，避免控制线程等待事务时死锁。
+  shutdown、重建、截图和手动编码都受同一事务门禁保护。
+- VPSS GetFrame 成功立即登记 held；映射失败也走统一归还。Destroy 或
+  Release 失败时保留描述符、VB 和待释放状态，下一次读取/截图/绑定先重试。
+  手动 JPEG 借用的 raw 帧须等 `source_release` 后归还，不能由 JPEG teardown
+  提前回收仍由 CPU 使用的帧。未完成清理时禁止销毁 capture pool/SYS。
+- vendor JPU 在 SendFrame 成功后持锁，GetStream/ReleaseStream 才解锁，
+  DestroyChn 会再次取得同一锁。QueryStatus/GetStream 失败后不能直接销毁：
+  先尝试排掉已提交结果，未完成则保留 runtime 的 cleanup_pending，禁止同尺寸
+  快捷复用旧通道或修改编码器配置。删除 ABI owner 时清除 owner 指针，硬件隔离
+  状态继续留在 runtime。真实硬件超时的 vendor 取流错误分支存在遗漏解锁，
+  此时保留资源可避免过早释放，但不能承诺无需驱动修复即可恢复。
+- H26x bound owned 包已由唯一 reader 归还 vendor stream，ABI release 的
+  软件清理不取得 global；borrowed/manual 包仍按硬件所有权释放。坏包、空包
+  和分配失败后保留未归还 stream，排空并请求 IDR，恢复时跳过依赖旧参考链的帧。
+- Core 的 MJPEG 帧尺寸取本帧 JPEG SOF，不使用 HDMI 输入尺寸或取包后再查的
+  当前尺寸；输出缩放和切换中的旧帧都必须携带匹配的元数据。读取帧头不解码像素。
+- 主编码器的实际 codec 在安装、reset 和所有权恢复时缓存。MJPEG/status 的
+  codec 查询不得等待 H.26x 的阻塞取帧锁。
+- 关闭 WebRTC 会话与释放主 H.26x 硬件通道不是同一动作；JPEG 仍依赖现有
+  VI/VPSS 采集。不能绕过 Core 的需求管理和后端拆卸顺序，直接销毁主通道。
 
 ## 帧率、通道与 carveout
 
@@ -219,3 +270,17 @@ Core 只做鉴权和成品 JPEG 转发。扩展不得创建第二个 MMF source�
 单次 `ETIMEDOUT` 只让当前批次走软件；Core 以 1、2、4、8、16、30 秒（封顶）
 指数退避自动探测恢复。不要因一次瞬态超时在进程生命周期内永久禁用 offload。
 不要给 crypto backend 打 `CONCURRENT_H265_VIDEO`：H.265 VENC 和 CryptoDMA 同时跑会锁死 SG2002，Core 对 H.265 会话改用软件 AES-GCM。
+
+## WebSocket 分发
+
+Core 为同一 AU、相同元数据的订阅者只序列化一次 OKVF 消息，共用不可变
+`Bytes`。每个客户端有独立的 64 条消息队列，正常消费者保留连续 AU；落后
+越过队列后请求 IDR，并等待关键帧再发送。不能从任意最新 P 帧继续。
+双客户端仍分别传输码流，不减少网络副本数。共享全局 sequence 可能混入
+JPEG，不能把其跳号直接记为 H26x 丢帧；验证须保存各客户端码流实际解码。
+
+VNC 前台由 frame/audio/eventfd 和 socket 事件唤醒，空闲轮询上限 20ms。
+Native/Tight JPEG 每客户端保留一个在途 owner，通过非阻塞 sendmsg 分段发送；
+超过 2 秒仍未写完关闭对应客户端。在途消息期间推迟同连接的库回复和音频，
+PCM 最多延期 500ms，超过预算关闭该客户端。resize 等全部在途 JPEG 完成或
+超时，仍可能被慢客户端拖延最多 2 秒；Raw/ZRLE 库发送仍为同步。

@@ -18,6 +18,12 @@ function(onekvm_enable_warnings target)
 endfunction()
 
 if(BUILD_TESTING)
+    add_executable(packet_buffer_pool_test tests/packet-buffer-pool-test.cpp)
+    target_include_directories(packet_buffer_pool_test PRIVATE include)
+    target_compile_features(packet_buffer_pool_test PRIVATE cxx_std_17)
+    onekvm_enable_warnings(packet_buffer_pool_test)
+    add_test(NAME packet-buffer-pool COMMAND packet_buffer_pool_test)
+
     add_executable(snapshot_admission_test tests/snapshot-admission-test.cpp)
     target_include_directories(snapshot_admission_test PRIVATE include)
     target_compile_features(snapshot_admission_test PRIVATE cxx_std_17)
