@@ -110,3 +110,16 @@ from the live DTB; that interrupt never fires. An ioctl `ETIMEDOUT` falls back
 only for the current batch. Core probes recovery after 1, 2, 4, 8, 16, then
 30 seconds (capped), avoiding repeated waits on a failing engine without
 permanently disabling offload for the process lifetime.
+
+### Encoded stream colour information
+
+`ENCODER_COLOR_INFO` (bit 14) advertises the optional `encoder_color_info` tail.
+The sized `onekvm_video_color_info_v1` returns encoded bits per component and
+range: unknown (0), limited (1), full (2), explicitly unspecified (3).
+MMF configures 8-bit NV21 input. It queries vendor VUI after channel creation and
+before bind/StartRecvFrame, then publishes atomic cached metadata. Failed VUI
+queries remain unknown. For H.264/H.265, an absent video-signal tag infers
+`video_full_range_flag=0` by the codec specification, so the effective range is limited.
+Queries do not capture frames, access I2C/proc or wait for VENC. Close/rebuild
+clears stale values. Old Core ignores the appended tail; new Core reports unknown
+for old backends without inferring values from codec names.

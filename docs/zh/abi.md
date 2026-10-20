@@ -31,6 +31,8 @@
 | `EDID` | `edid_capabilities` / `edid_get` / `edid_set`，不需要 source handle |
 | `ENCODER_ALLOCATION` | `encoder_resources` / `encoder_allocate` / `encoder_allocation` |
 | `SOURCE_SNAPSHOT` | `source_snapshot` |
+| `BOUND_ENCODED_TIME` | 绑定 H.26x packet 的 `pts_ns` 为编码出包的 `CLOCK_MONOTONIC` 纳秒时间；0 未测得 |
+| `ENCODER_COLOR_INFO` | `encoder_color_info` 返回实际编码分量位深和范围，只读缓存 |
 
 未实现 `INTERRUPT_READ`（`source_interrupt` 为 `nullptr`）。status/SSE 路径不得 `GetFrame`、`GetStream` 或 dump procfs。
 
@@ -89,3 +91,14 @@ KVM 主路是 **bound**：硬件把 VPSS 接到 VENC，Core 只 `encoder_read_pa
 单次 ioctl `ETIMEDOUT` 只让当前批次走软件。Core 使用 1、2、4、8、16、30 秒（封顶）
 指数退避自动探测恢复，避免视频线程连续等待故障硬件，同时不在进程生命周期内永久禁用
 offload。
+
+### 编码流色彩信息
+
+声明 `ENCODER_COLOR_INFO`（bit 14），在 API 表尾实现 `encoder_color_info`。
+返回带 `struct_size` 的 `onekvm_video_color_info_v1`：位深为每个编码分量的位数；
+范围区分未知（0）、有限（1）、全范围（2）和明确未标注（3）。
+MMF 当前编码输入为 8-bit NV21；创建硬件通道后、绑定/StartRecvFrame 前只读 VUI，
+缓存有效范围。H.264/H.265 缺少 video-signal 标记时，按规范将
+`video_full_range_flag` 推定为 0，返回有限范围；VUI 查询失败仍返回未知。
+回调仅读取原子缓存，不取帧、不读 I2C/proc、不等待 VENC；关闭/重建清理旧缓存。
+旧 Core 忽略新增表尾，旧后端在新 Core 中显示未知，不按 codec 名称补猜。

@@ -17,7 +17,7 @@ constexpr const char *kDevicePath = "/dev/onekvm-crypto-offload";
 constexpr uint32_t kKernelABIVersion = 1;
 constexpr uint32_t kAuthTagSize = 16;
 constexpr uint32_t kMaxBatch = 128;
-constexpr uint32_t kMaxInput = 1024 * 1024;
+constexpr uint32_t kMaxInput = 20 * 1024;
 constexpr uint32_t kPayloadAlignment = 16;
 
 struct KernelKeyConfig {
@@ -68,9 +68,29 @@ constexpr IoctlRequest kEncrypt =
 constexpr IoctlRequest kEncryptBatch =
     static_cast<IoctlRequest>(_IOWR(0xb7, 0x03, KernelBatchRequest));
 
+struct KernelPrimitiveKey {
+    uint32_t version, algorithm, key_size, reserved;
+    uint8_t key[64];
+};
+struct KernelPrimitiveRequest {
+    uint32_t version, flags;
+    uint64_t src, dst;
+    uint32_t size, capacity;
+    uint8_t iv[16];
+};
+static_assert(sizeof(KernelPrimitiveKey) == 80, "unexpected primitive key layout");
+static_assert(sizeof(KernelPrimitiveRequest) == 48, "unexpected primitive request layout");
+constexpr uint32_t kMaxPrimitiveInput = 20 * 1024;
+constexpr IoctlRequest kGetCaps = static_cast<IoctlRequest>(_IOR(0xb7, 0x04, uint32_t));
+constexpr IoctlRequest kPrimitiveSetKey =
+    static_cast<IoctlRequest>(_IOW(0xb7, 0x05, KernelPrimitiveKey));
+constexpr IoctlRequest kPrimitiveRun =
+    static_cast<IoctlRequest>(_IOWR(0xb7, 0x06, KernelPrimitiveRequest));
+
 struct Session {
     int fd = -1;
     uint32_t auth_tag_size = kAuthTagSize;
+    uint32_t primitive = 0;
 };
 
 void set_error(char *error, uint32_t capacity, const char *operation, int code) {
@@ -222,11 +242,79 @@ void session_destroy(void *opaque) {
     delete session;
 }
 
+int32_t primitive_create(uint32_t algorithm, const uint8_t *key,
+                         uint32_t key_size, void **result,
+                         char *error, uint32_t error_capacity) {
+    if (result != nullptr) *result = nullptr;
+    const bool ctr = algorithm == ONEKVM_CRYPTO_ALGORITHM_AES_CTR;
+    const bool hmac = algorithm == ONEKVM_CRYPTO_ALGORITHM_HMAC_SHA1;
+    if (result == nullptr || (key_size && key == nullptr) || (!ctr && !hmac) ||
+        (ctr && key_size != 16 && key_size != 24 && key_size != 32) ||
+        (hmac && key_size > 64)) {
+        set_error(error, error_capacity, "invalid primitive session", EINVAL);
+        return -EINVAL;
+    }
+    auto *session = new (std::nothrow) Session();
+    if (!session) return -ENOMEM;
+    session->primitive = algorithm;
+    session->fd = ::open(kDevicePath, O_RDWR | O_CLOEXEC);
+    if (session->fd < 0) {
+        const auto code = fail_errno(error, error_capacity, "open crypto device");
+        delete session;
+        return code;
+    }
+    KernelPrimitiveKey config{};
+    config.version = kKernelABIVersion;
+    config.algorithm = algorithm;
+    config.key_size = key_size;
+    if (key_size) std::memcpy(config.key, key, key_size);
+    const int result_code = ::ioctl(session->fd, kPrimitiveSetKey, &config);
+    const int saved_errno = errno;
+    // Volatile writes keep key erasure observable across optimization.
+    volatile uint8_t *wipe = config.key;
+    for (size_t i = 0; i < sizeof(config.key); ++i) wipe[i] = 0;
+    if (result_code != 0) {
+        errno = saved_errno;
+        const auto code = fail_errno(error, error_capacity, "set primitive key");
+        session_destroy(session);
+        return code;
+    }
+    *result = session;
+    return 0;
+}
+
+int32_t primitive_run(void *opaque, onekvm_crypto_primitive_request_v1 *request,
+                      char *error, uint32_t error_capacity) {
+    auto *session = static_cast<Session *>(opaque);
+    if (!session || !session->primitive || !request ||
+        request->struct_size < sizeof(*request)) return -EINVAL;
+    request->output_size = 0;
+    const bool ctr = session->primitive == ONEKVM_CRYPTO_ALGORITHM_AES_CTR;
+    const uint32_t output = ctr ? request->src_size : 20;
+    if (request->flags || request->src_size > kMaxPrimitiveInput ||
+        (request->src_size && !request->src_ptr) || !request->dst_ptr ||
+        request->dst_capacity < output || request->iv_size != (ctr ? 16u : 0u)) {
+        set_error(error, error_capacity, "invalid primitive request", EINVAL);
+        return -EINVAL;
+    }
+    KernelPrimitiveRequest kernel{};
+    kernel.version = kKernelABIVersion;
+    kernel.src = request->src_ptr;
+    kernel.dst = request->dst_ptr;
+    kernel.size = request->src_size;
+    kernel.capacity = request->dst_capacity;
+    if (ctr) std::memcpy(kernel.iv, request->iv, sizeof(kernel.iv));
+    if (::ioctl(session->fd, kPrimitiveRun, &kernel) != 0)
+        return fail_errno(error, error_capacity, "crypto primitive offload");
+    request->output_size = output;
+    return 0;
+}
+
 const onekvm_crypto_backend_v1 kBackend = {
     sizeof(onekvm_crypto_backend_v1),
     ONEKVM_CRYPTO_BACKEND_ABI_V1,
     "soph-mmf",
-    "nanokvm CryptoDMA AES-GCM",
+    "nanokvm CryptoDMA",
     // Do not advertise CONCURRENT_H265_VIDEO. SG2002 currently hard-locks
     // under concurrent H.265 VENC and CryptoDMA load, so Core must use its
     // generic AES-GCM path for H.265 sessions.
@@ -240,6 +328,10 @@ const onekvm_crypto_backend_v1 kBackend = {
     session_seal,
     session_seal_batch,
     session_destroy,
+    primitive_create,
+    primitive_run,
+    kMaxPrimitiveInput,
+    0,
 };
 
 } // namespace
@@ -251,6 +343,22 @@ extern "C" ONEKVM_CRYPTO_EXPORT int32_t onekvm_crypto_backend_query(
     *backend_api = nullptr;
     if (requested_abi != ONEKVM_CRYPTO_BACKEND_ABI_V1)
         return -EINVAL;
-    *backend_api = &kBackend;
+    // Query once per DSO load; old kernels return ENOTTY and keep the v1
+    // GCM prefix available. Do not claim H.265 safety from algorithm support.
+    static const onekvm_crypto_backend_v1 backend = [] {
+        auto api = kBackend;
+        const int fd = ::open(kDevicePath, O_RDWR | O_CLOEXEC);
+        if (fd >= 0) {
+            uint32_t caps = 0;
+            if (::ioctl(fd, kGetCaps, &caps) == 0) {
+                if (caps & 1u) api.features |= ONEKVM_CRYPTO_FEATURE_AES_CTR;
+                if (caps & 2u) api.features |= ONEKVM_CRYPTO_FEATURE_HMAC_SHA1;
+                if (caps & 4u) api.features |= ONEKVM_CRYPTO_FEATURE_CONCURRENT_H265_VIDEO;
+            }
+            ::close(fd);
+        }
+        return api;
+    }();
+    *backend_api = &backend;
     return 0;
 }
