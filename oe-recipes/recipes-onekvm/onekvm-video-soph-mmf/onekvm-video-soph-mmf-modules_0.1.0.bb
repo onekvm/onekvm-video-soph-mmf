@@ -20,7 +20,7 @@ SRC_URI = " \
     file://onekvm-video-soph-mmf-optional-modules.timer \
     file://onekvm-video-soph-mmf-modules.conf \
 "
-SRCREV = "0f4152f3255a4670eacef56db2ba564022c7180c"
+SRCREV = "958ab375eb5ed40b73acd857b56dd4710ab4dc90"
 BB_GIT_SHALLOW = "1"
 BB_GIT_SHALLOW_DEPTH = "1"
 B = "${WORKDIR}/build"
@@ -154,7 +154,7 @@ FILES:${PN} += " \
     ${nonarch_libdir}/modprobe.d \
     ${nonarch_libdir}/modules-load.d \
 "
-RDEPENDS:${PN} += "kmod i2c-tools onekvm-machine-nanokvm onekvm-core (>= 0.1.0-r49) onekvm-device-nanokvm-kernel-module-video-decoder"
+RDEPENDS:${PN} += "kmod i2c-tools onekvm-machine-nanokvm (>= 0.1.0-r5) onekvm-core (>= 0.1.0-r49) onekvm-device-nanokvm-kernel-module-video-decoder"
 RPROVIDES:${PN} += "onekvm-device-nanokvm-mmf-modules"
 RREPLACES:${PN} += "onekvm-device-nanokvm-mmf-modules"
 RCONFLICTS:${PN} += "onekvm-device-nanokvm-mmf-modules"
