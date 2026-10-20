@@ -1,0 +1,177 @@
+#!/bin/sh
+# Verify the audited NanoKVM PCIe LT6911UXC image before video uses the bus.
+# The five pages differ from the original by NOR 1-to-0 writes only. A match
+# leaves the bridge running. A programmable mismatch is written and the bridge
+# is reset so the new image is loaded before onekvm starts.
+set -eu
+
+log() { echo "lt6911uxc-firmware: $*"; }
+
+magic=$(devmem 0x8FFF0000 32 2>/dev/null || true)
+variant=$(devmem 0x8FFF0010 32 2>/dev/null || true)
+case $magic in
+  0x44454C4F|0x44454c4f) ;;
+  *) log "OLED mailbox absent; skip"; exit 0 ;;
+esac
+case $variant in
+  0x1|0x00000001|1) ;;
+  *) log "variant $variant is not PCIe; skip"; exit 0 ;;
+esac
+
+I2C=/usr/sbin/i2ctransfer
+if [ ! -x "$I2C" ] || [ ! -c /dev/i2c-4 ]; then
+  log "i2c-4 is not available"
+  exit 1
+fi
+if [ "$(systemctl is-active onekvm.service 2>/dev/null || true)" = active ]; then
+  log "onekvm.service is active; refusing to touch the bridge"
+  exit 1
+fi
+
+wr() { "$I2C" -y -f 4 w2@0x2b "$1" "$2" >/dev/null; }
+bank() { wr 0xff "$1"; }
+reset_fifo() { bank 0x80; wr 0x5a 0x84; sleep 0.001; wr 0x5a 0x80; }
+close_flash() { bank 0x80; wr 0xee 0x00; }
+trap close_flash EXIT
+open_flash() {
+  bank 0x80
+  wr 0xee 0x01
+  reset_fifo
+  read_page 0 >/dev/null
+}
+
+read_page() {
+  page=$1
+  bank 0x80
+  wr 0x5e 0x5f
+  wr 0x5a 0xa0
+  wr 0x5a 0x80
+  wr 0x5b "$(printf '0x%02x' $(((page >> 16) & 255)))"
+  wr 0x5c "$(printf '0x%02x' $(((page >> 8) & 255)))"
+  wr 0x5d "$(printf '0x%02x' $((page & 255)))"
+  wr 0x5a 0x90
+  sleep 0.005
+  wr 0x5a 0x80
+  wr 0x58 0x21
+  "$I2C" -y -f 4 w1@0x2b 0x5f r32
+}
+
+ack_status() {
+  bank 0x81
+  status=$("$I2C" -y -f 4 w1@0x2b 0x08 r1)
+  status=${status##*0x}
+  if [ "$status" != "ee" ] && [ "$status" != "EE" ]; then
+    log "$1: flash status 0x$status"
+    return 1
+  fi
+  wr 0x08 0xae
+  wr 0x08 0xee
+}
+
+program_page() {
+  page=$1
+  shift
+  payload="0x59"
+  for byte in "$@"; do
+    payload="$payload 0x$byte"
+  done
+  bank 0x80
+  wr 0x5e 0xdf
+  wr 0x5a 0x20
+  wr 0x5a 0x00
+  wr 0x58 0x21
+  # shellcheck disable=SC2086
+  "$I2C" -y -f 4 w33@0x2b $payload >/dev/null
+  wr 0x5b "$(printf '0x%02x' $(((page >> 16) & 255)))"
+  wr 0x5c "$(printf '0x%02x' $(((page >> 8) & 255)))"
+  wr 0x5d "$(printf '0x%02x' $((page & 255)))"
+  wr 0x5e 0xc0
+  wr 0x5a 0x90
+  wr 0x5a 0x80
+  sleep 0.010
+  reset_fifo
+  ack_status "program 0x$(printf '%05x' "$page")"
+}
+
+reload_bridge() {
+  devmem 0x030010f8 32 3 >/dev/null
+  ddr=$(devmem 0x03021004 32)
+  dr=$(devmem 0x03021000 32)
+  ddr=${ddr#0x}
+  dr=${dr#0x}
+  devmem 0x03021004 32 $((0x$ddr | 8)) >/dev/null
+  devmem 0x03021000 32 $((0x$dr & ~8)) >/dev/null
+  sleep 1
+  devmem 0x03021000 32 $((0x$dr | 8)) >/dev/null
+  sleep 1
+}
+
+normalize() {
+  printf '%s\n' "$1" | tr 'A-F' 'a-f' | tr '\n' ' ' | sed 's/0x//g; s/  */ /g; s/^ //; s/ $//'
+}
+
+expect_1a60="22 12 52 a6 7f 24 7e 00 12 54 de 90 b0 02 e0 44 08 f0 12 1f 84 90 02 7b e0 70 03 02 1b c9 7f 32"
+expect_1a80="7e 00 12 54 de 90 b0 04 e0 44 20 f0 12 57 30 90 b0 04 e0 54 df f0 7f 24 7e 00 12 54 de 12 57 30"
+expect_1ae0="c3 f9 f8 d3 12 17 c4 40 0a 7f 14 7e 00 12 54 de 12 57 30 90 b0 a2 e0 ff 20 e4 06 20 e0 03 30 e5"
+expect_2040="04 7e 00 12 54 de 90 b0 9b e0 ff 7e 00 64 80 70 50 90 b0 9c e0 70 4a 90 00 31 e0 fd 25 e0 24 4c"
+expect_5800="64 ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff"
+
+pages="1a60 1a80 1ae0 2040 5800"
+mismatch=0
+programmable=1
+open_flash
+for name in $pages; do
+  eval "expect=\$expect_$name"
+  got=$(normalize "$(read_page "0x$name")")
+  expect_n=$(normalize "$expect")
+  if [ "$got" = "$expect_n" ]; then
+    continue
+  fi
+  mismatch=1
+  set -- $got
+  for exp in $expect_n; do
+    cur=$1
+    shift
+    if [ $((0x$cur & 0x$exp)) -ne $((0x$exp)) ]; then
+      programmable=0
+    fi
+  done
+  log "page 0x$name differs"
+done
+
+if [ "$mismatch" -eq 0 ]; then
+  log "stage6 image already present"
+  exit 0
+fi
+if [ "$programmable" -eq 0 ]; then
+  log "image differs and needs an erase; left unchanged"
+  exit 0
+fi
+
+log "programming stage6 pages"
+bank 0x80
+wr 0x5e 0xdf
+wr 0x58 0x00
+wr 0x59 0x51
+wr 0x5a 0x10
+wr 0x5a 0x00
+wr 0x58 0x21
+wr 0x5a 0x80
+reset_fifo
+reset_fifo
+ack_status "prepare"
+for name in $pages; do
+  eval "expect=\$expect_$name"
+  # shellcheck disable=SC2086
+  program_page "0x$name" $expect
+  got=$(normalize "$(read_page "0x$name")")
+  if [ "$got" != "$(normalize "$expect")" ]; then
+    log "verify failed at 0x$name"
+    exit 1
+  fi
+done
+log "pages verified; releasing flash and resetting the bridge"
+trap - EXIT
+close_flash
+reload_bridge
+log "stage6 image installed"

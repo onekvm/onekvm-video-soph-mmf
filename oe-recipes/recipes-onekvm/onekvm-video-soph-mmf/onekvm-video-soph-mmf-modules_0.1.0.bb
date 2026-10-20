@@ -15,6 +15,7 @@ SRC_URI = " \
     file://99-onekvm-vdec.rules \
     file://link-onekvm-vdec \
     file://onekvm-video-soph-mmf-modules.service \
+    file://lt6911uxc-pcie-firmware-sync \
     file://onekvm-video-soph-mmf-optional-modules.service \
     file://onekvm-video-soph-mmf-optional-modules.timer \
     file://onekvm-video-soph-mmf-modules.conf \
@@ -98,6 +99,8 @@ do_install() {
 
     install -Dm0755 "${UNPACKDIR}/load-onekvm-video-soph-mmf-modules" \
         "${D}${libexecdir}/onekvm/load-video-soph-mmf-modules"
+    install -Dm0755 "${UNPACKDIR}/lt6911uxc-pcie-firmware-sync" \
+        "${D}${libexecdir}/onekvm/capture-chip-init.d/10-lt6911uxc-pcie-firmware"
     install -Dm0755 "${UNPACKDIR}/load-onekvm-video-soph-mmf-optional-modules" \
         "${D}${libexecdir}/onekvm/load-video-soph-mmf-optional-modules"
     ln -s load-video-soph-mmf-modules \
@@ -128,6 +131,7 @@ do_install() {
 }
 
 pkg_postinst:${PN}() {
+    rm -f $D${sysconfdir}/systemd/system/onekvm.service.wants/onekvm-lt6911uxc-firmware.service
     rm -f $D${systemd_system_unitdir}/onekvm.service.d/20-onekvm-device-nanokvm-mmf.conf
     rm -f $D${sysconfdir}/systemd/system/onekvm-device-nanokvm-mmf-modules.service
     rm -f $D${sysconfdir}/systemd/system/local-fs.target.wants/onekvm-device-nanokvm-mmf-modules.service
@@ -150,7 +154,7 @@ FILES:${PN} += " \
     ${nonarch_libdir}/modprobe.d \
     ${nonarch_libdir}/modules-load.d \
 "
-RDEPENDS:${PN} += "kmod onekvm-core (>= 0.1.0-r49) onekvm-device-nanokvm-kernel-module-video-decoder"
+RDEPENDS:${PN} += "kmod i2c-tools onekvm-machine-nanokvm onekvm-core (>= 0.1.0-r49) onekvm-device-nanokvm-kernel-module-video-decoder"
 RPROVIDES:${PN} += "onekvm-device-nanokvm-mmf-modules"
 RREPLACES:${PN} += "onekvm-device-nanokvm-mmf-modules"
 RCONFLICTS:${PN} += "onekvm-device-nanokvm-mmf-modules"

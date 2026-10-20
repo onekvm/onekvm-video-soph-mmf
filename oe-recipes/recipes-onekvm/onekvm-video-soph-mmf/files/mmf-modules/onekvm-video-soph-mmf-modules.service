@@ -2,7 +2,8 @@
 Description=Load OneKVM Sophgo MMF kernel modules
 # soph_* live in the immutable rootfs. Start as soon as local-fs is up so
 # Core can attach video on the first try instead of waiting for notify.
-After=local-fs.target
+Requires=onekvm-capture-chip-init.service
+After=local-fs.target onekvm-capture-chip-init.service
 
 [Service]
 Type=oneshot
