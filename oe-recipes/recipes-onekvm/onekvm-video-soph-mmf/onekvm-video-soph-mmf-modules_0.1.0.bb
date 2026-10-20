@@ -1,7 +1,7 @@
 SUMMARY = "Sophgo SG2002 multimedia kernel modules"
 HOMEPAGE = "https://github.com/onekvm/osdrv-sg200x"
 LICENSE = "CLOSED"
-PR = "r32"
+PR = "r33"
 
 FILESEXTRAPATHS:prepend := "${THISDIR}/files/mmf-modules:"
 
@@ -11,6 +11,9 @@ SRC_URI = " \
     file://load-onekvm-video-soph-mmf-modules \
     file://load-onekvm-video-soph-mmf-optional-modules \
     file://prepare-onekvm-device-nanokvm-hdmi.c \
+    file://v4l2-decode-smoke.c \
+    file://99-onekvm-vdec.rules \
+    file://link-onekvm-vdec \
     file://onekvm-video-soph-mmf-modules.service \
     file://onekvm-video-soph-mmf-optional-modules.service \
     file://onekvm-video-soph-mmf-optional-modules.timer \
@@ -71,6 +74,13 @@ do_compile() {
         ${LDFLAGS} \
         "${UNPACKDIR}/prepare-onekvm-device-nanokvm-hdmi.c" \
         -o "${B}/prepare-device-nanokvm-hdmi"
+
+    # This is an on-device smoke-test helper, not a shipped debug target.
+    # The recipe keeps module debug data for OE's split package, but retaining
+    # compiler DWARF here embeds the temporary build directory and fails the
+    # reproducible-package buildpaths QA check.
+    ${CC} ${CFLAGS} ${CPPFLAGS} -g0 ${LDFLAGS} \
+        "${UNPACKDIR}/v4l2-decode-smoke.c" -o "${B}/v4l2-decode-smoke"
 }
 do_compile[lockfiles] = "${TMPDIR}/onekvm-nanokvm-kernel-module.lock"
 
@@ -96,6 +106,12 @@ do_install() {
         "${D}${libexecdir}/onekvm/load-device-nanokvm-mmf-optional-modules"
     install -Dm0755 "${B}/prepare-device-nanokvm-hdmi" \
         "${D}${libexecdir}/onekvm/prepare-device-nanokvm-hdmi"
+    install -Dm0755 "${B}/v4l2-decode-smoke" \
+        "${D}${libexecdir}/onekvm/v4l2-decode-smoke"
+    install -Dm0755 "${UNPACKDIR}/link-onekvm-vdec" \
+        "${D}${libexecdir}/onekvm/link-onekvm-vdec"
+    install -Dm0644 "${UNPACKDIR}/99-onekvm-vdec.rules" \
+        "${D}${sysconfdir}/udev/rules.d/99-onekvm-vdec.rules"
     install -Dm0644 "${UNPACKDIR}/onekvm-video-soph-mmf-modules.service" \
         "${D}${systemd_system_unitdir}/onekvm-video-soph-mmf-modules.service"
     install -Dm0644 "${UNPACKDIR}/onekvm-video-soph-mmf-optional-modules.service" \
@@ -118,6 +134,9 @@ pkg_postinst:${PN}() {
     rm -f $D${sysconfdir}/systemd/system/onekvm.service.wants/onekvm-device-nanokvm-mmf-modules.service
     if [ -z "$D" ]; then
         systemctl daemon-reload >/dev/null 2>&1 || true
+        udevadm control --reload-rules >/dev/null 2>&1 || true
+        udevadm trigger --subsystem-match=video4linux >/dev/null 2>&1 || true
+        ${libexecdir}/onekvm/link-onekvm-vdec >/dev/null 2>&1 || true
     fi
 }
 
@@ -126,11 +145,12 @@ SYSTEMD_AUTO_ENABLE:${PN} = "enable"
 FILES:${PN} += " \
     ${nonarch_base_libdir}/modules/*/extra/onekvm/nanokvm \
     ${libexecdir}/onekvm \
+    ${sysconfdir}/udev/rules.d/99-onekvm-vdec.rules \
     ${systemd_system_unitdir} \
     ${nonarch_libdir}/modprobe.d \
     ${nonarch_libdir}/modules-load.d \
 "
-RDEPENDS:${PN} += "kmod onekvm-core (>= 0.1.0-r49)"
+RDEPENDS:${PN} += "kmod onekvm-core (>= 0.1.0-r49) onekvm-device-nanokvm-kernel-module-video-decoder"
 RPROVIDES:${PN} += "onekvm-device-nanokvm-mmf-modules"
 RREPLACES:${PN} += "onekvm-device-nanokvm-mmf-modules"
 RCONFLICTS:${PN} += "onekvm-device-nanokvm-mmf-modules"

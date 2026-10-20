@@ -34,6 +34,14 @@ for module in $modules; do
     fi
 done
 
+# The image normally has no running udev daemon. Keep a stable public V4L2
+# endpoint even when the kernel allocates a different video minor number.
+if /usr/libexec/onekvm/link-onekvm-vdec; then
+    log_step "decoder alias ready"
+else
+    log_step "decoder alias unavailable"
+fi
+
 log_step "HDMI enable GPIO start"
 if [ -e /sys/class/gpio/export ]; then
     hdmi_enable=/sys/class/gpio/gpio451
@@ -44,6 +52,13 @@ if [ -e /sys/class/gpio/export ]; then
     echo 1 > "$hdmi_enable/value"
 fi
 log_step "HDMI enable GPIO done"
+
+log_step "LT6911 I2C pinmux start"
+# PWR_WAKEUP0 = IIC4_SCL, PWR_BUTTON1 = IIC4_SDA. OE U-Boot now does
+# this too; repeat it so a rootfs boot still reaches the bridge.
+devmem 0x03001090 32 0x5
+devmem 0x03001098 32 0x5
+log_step "LT6911 I2C pinmux done"
 
 log_step "HDMI prepare start"
 /usr/libexec/onekvm/prepare-device-nanokvm-hdmi

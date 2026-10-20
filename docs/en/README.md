@@ -13,6 +13,7 @@ The default kernel is **Linux 6.18**
 |----------|---------|
 | [video-pipeline.md](../zh/video-pipeline.md) (Chinese) | Cube HDMI capture, bound H.264, teardown, CSIBDG, placeholder, snapshots. Read this first when changing video. |
 | [abi.md](abi.md) | Video/crypto ABI, feature bits, leases, snapshots |
+| [v4l2-decoder.md](v4l2-decoder.md) | Experimental V4L2 decoder, events, buffers and hardware resource constraints |
 | [no-signal.md](no-signal.md) | No-signal NV21 assets |
 | [overview.md](overview.md) | Features, resolution budget, 6.18 kernel, OE build, host tests |
 | [../../AGENTS.md](../../AGENTS.md) | Agent hard constraints (`CLAUDE.md` is a symlink) |

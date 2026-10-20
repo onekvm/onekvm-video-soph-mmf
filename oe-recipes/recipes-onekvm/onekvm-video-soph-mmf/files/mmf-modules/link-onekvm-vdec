@@ -1,0 +1,18 @@
+#!/bin/sh
+
+set -eu
+
+alias=/dev/onekvm-vdec
+for sys_node in /sys/class/video4linux/video*; do
+	[ -r "$sys_node/name" ] || continue
+	case "$(cat "$sys_node/name")" in
+		*" decoder")
+			video_node=/dev/$(basename "$sys_node")
+			[ -e "$video_node" ] || continue
+			ln -sfn "$video_node" "$alias"
+			exit 0
+			;;
+	esac
+done
+
+exit 1

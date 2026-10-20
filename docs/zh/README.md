@@ -11,6 +11,7 @@
 |------|------|
 | [video-pipeline.md](video-pipeline.md) | Cube HDMI 采集、绑定 H.264、释放、CSIBDG、占位、截图。改视频先读。 |
 | [abi.md](abi.md) | 动态库导出的视频/加密 ABI、特性位、租约与截图约定 |
+| [v4l2-decoder.md](v4l2-decoder.md) | 实验性 V4L2 解码接口、事件、缓冲和硬件资源边界 |
 | [no-signal.md](no-signal.md) | 无信号 NV21 资源 |
 | [overview.md](overview.md) | 功能、分辨率预算、6.18 内核、OE 构建与主机测试 |
 | [../../AGENTS.md](../../AGENTS.md) | 给代理的硬约束（`CLAUDE.md` 软链到此） |
