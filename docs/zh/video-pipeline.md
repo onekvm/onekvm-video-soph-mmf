@@ -76,6 +76,20 @@ MMF 资源策略仍为一路 H264/H265 加一路 JPEG。双 H264、双 H265 的�
 队满时不能等消费者，否则约 50 ms 的停顿就会把背压传回 VPSS 并触发 `VENC waitq is full`。
 reader 必须立刻丢掉陈旧链、在两次 `GetStream` 之间请求一次新 IDR，并继续排空硬件流。
 
+无消费者时保留唯一 reader 排空晚到的 AU。空队列后等待驱动 fd 和独立的控制
+eventfd，500 ms 只作空闲 watchdog；恢复消费者和停止必须显式唤醒控制 fd。
+清除旧事件后、进入 poll 前重查 discard/stop，避免丢失恢复通知。活流取包仍保留
+40 ms watchdog；不能通过停止 VI、销毁绑定 worker 或增加第二个 GetStream 所有者
+降低空闲 CPU。
+
+内核绑定 worker 的输入队列用 `SEMA_WAIT(vb_jobs.sem)`（`down_interruptible`）
+等待新帧，空闲时没有定时超时，也不计入 load average。新帧入队和
+`venc_stop_bind_thread()` 都必须 post 该信号量；醒来后先检查中断、停止和通道
+状态，再取输入帧。收到中断时退出并完成 `thread_exited`，不能重试形成忙循环。
+普通和异步 H.26x handler 遵循同一规则。公开 API 的 `SEMA_TIMEWAIT` 保留超时语义。
+旧的 `down_timeout` 输入等待会处于 D 状态并给 load 持续贡献约 1，因此排查时
+仍要核对线程状态和等待栈，不能仅凭 load ≥ 1 判断编码器繁忙。
+
 `SetChnAttr`（含改 FPS）和 `RequestIDR` 只能在 reader 线程、两次 `GetStream` 之间做。
 HTTP 或其他线程不能对活通道直接调这些 ioctl，否则会和 `GetStream` 抢 `EnterVcodecLock`。
 VPSS/VENC 延迟 proc 只在等下一包或队满时读，不要挡 `GetStream`。reader 最多 2 Hz 读
@@ -126,7 +140,7 @@ CSI 桥是 **精确匹配**：宽度大于设定（GT）或小于设定（LS）�
 - 不要只信 HDMI I2C，也不要只信 CSI 当前宽。只信 HDMI 会在 MIPI 仍是 1920 时把 VI 配成 800；只信 CSI 会在 800→1080 时把接收端留在 800。
 - CSI 已是合法模式时，忽略 I2C 垃圾 OOR 读数。
 
-HDMI 输入不是固定模式白名单：接受 `320×200` 到 `2880×1620` 范围内、不超过 5 MP 的偶数尺寸，并按 **5 MP @ 30 FPS**（150M pixel/s）吞吐预算判定。4K 时序仍会被识别，但无论帧率均报告 `out_of_range`，不得用于重建 VI。
+HDMI 输入不是固定模式白名单：接受 `320×200` 到 `2880×1620` 范围内、不超过 5 MP 的偶数尺寸。用户设置的 FPS 是输出上限，不能当成实测 HDMI 刷新率来拒绝合法输入；启动、保留 CSI 锁定、模式恢复与越界分类都先按有效帧率判定。输出受 **5 MP @ 30 FPS**（150M pixel/s）吞吐预算约束，超过 1920×1080 的画幅最高 30 FPS。4K 时序仍会被识别，但无论帧率均报告 `out_of_range`，不得用于重建 VI。
 
 ## HDMI 探测与 LT6911
 
@@ -160,7 +174,7 @@ MMF 初始化失败的回滚按所有权执行：`SAMPLE_PLAT_VI_INIT()` 负责�
 
 `StartRecvFrame` 发生在 1.5 s live grace 里。无 HDMI 时 WAVE4 随后把静帧编成 P/skip，reader 若仍在等「自然第一帧 IDR」会把 `RequestIDR` 合并掉，WebRTC 拿不到可解码的 AU。进入占位后必须 `h26x_reader_force_idr`（清队含残留关键帧，并在 reader 线程发 ioctl），且在匹配当前 VENC 宽高的 IDR 到达前不要把 AU 交给 Core。H.264 再按 SPS 尺寸丢掉残留 CSI 包。
 
-超过几何范围或 150M pixel/s 吞吐预算的 HDMI 模式仍在 status 中提供 `hdmi_error=out_of_range` 和实测 `input_width/height`，UI 显示「不支持的分辨率」；绑定视频同样走 VPSS 上游静帧。
+超过几何范围的 HDMI 模式仍在 status 中提供 `hdmi_error=out_of_range` 和实测 `input_width/height`，UI 显示「不支持的分辨率」；绑定视频同样走 VPSS 上游静帧。合法的 2560×1440 输入配合 60 FPS 设置时自动限制到 30 FPS，不能因此显示越界占位。
 
 VI `FrameRate` 列开机约 1 秒是 0，不能单靠这一列判无信号。已经收到过 AU 后，判定输入消失仍要等 VENC 最近一包超过存活窗口（当前 1.5 s）；新绑定或从空闲恢复后使用独立的 5 秒首帧窗口，避免慢锁定被误判成无信号并触发 LT6911 恢复。
 
@@ -189,6 +203,11 @@ VI `FrameRate` 列开机约 1 秒是 0，不能单靠这一列判无信号。已
 该生命周期由 MMF 和匹配驱动处理，Core/systemd 不做模块重载或清池 workaround。
 
 ## 延迟
+
+绑定 H.26x 的编码出包时间在唯一 reader 完成 `read_h26x_packet_into` 后采样
+`CLOCK_MONOTONIC`，在入队前与 AU 一起保存，随后原样作为 ABI packet `pts_ns`
+交给 Core（`BOUND_ENCODED_TIME` 特性位）。它包含 vendor 取包/复制完成之前的
+观察误差，但保留后端队列、Core 环和发送队列的等待，不能在消费队列时重打戳。
 
 绑定路径没有 `acquire_capture_frame`。VENC pack `u64PTS` 是编码完成时刻，不能当采集起点。
 
@@ -256,8 +275,12 @@ Tight JPEG；Core 将压缩包写入共享 ring，VNC 借用 ring 槽并直接�
 ## 帧率、通道与 carveout
 
 - 采集一律走 phy chn 1（`sc_v1`，最大输出宽 2880）。phy chn 0（`sc_d`，最大 1920）上 1:1 2560 会 tile，NV21 全 0。HDMI 1080→1440 同一 PID 不换通道。
-- VPSS 与 VENC 使用相同目标帧率，不再人为保持 60/30 FPS floor。720p 高刷时 `input_fps`/`TarFr` 可到 120。
-- Core 绑定路径的 RTP 时戳用 `1/目标FPS`，不要用墙钟间隔。
+- watcher 通过 `CVI_VI_QueryChnStatus` 读取 vendor 共享内存中已缓存的输入 FPS，两次稳定样本后更新帧率转换；它只是复制统计，不读 `/proc/cvitek/vi`、不取帧、不访问 LT6911。不能用用户设置覆盖缓存的输入帧率，也不能为测量 FPS 在活动流上打开 `80ee`。
+- VPSS 的源帧率使用上述采集 FPS，目标帧率取用户上限、输入帧率及输入／输出像素预算的最小值，实际丢帧发生在编码前。VENC 的源与目标都使用转换后的有效 FPS，不再额外施加 60/30 FPS floor。把 VPSS 两端都填成目标值会关闭转换，仅改 VENC 的标称目标也不能保证实际降帧。720p 高刷时 `input_fps`/`TarFr` 可到 120。
+- Core 只改 FPS 时走编码器实时更新；后端须同时更新 VPSS 的目标 FPS 和 source 中保存的用户上限，不能只更新 VENC，也无需重建采集通道。
+- 配置 GOP 为 0 时按输出帧率取 5 秒的帧数。显式 GOP 保持不变。丢包和队列溢出仍立即请求 IDR。新观众不请求 IDR，也不为他保存整段 GOP。环只留约 1 秒（64 个 AU）；上一张 IDR 还在环里就从那里接着读，已经被盖掉就丢掉 P 帧，等到下一张计划中的 IDR。
+- JPEG 码流缓冲按宽×高的一半分配，下限 512 KiB，上限 2 MiB（与用户态返回缓冲相同），并按 1 KiB 对齐。`u32BufSize` 留 0 会让驱动分配 9 MiB。
+- Core 绑定路径的 RTP 时戳用 `1/有效FPS`，不要用墙钟间隔。MMF 在 packet 的可选 `duration_ns` 尾字段报告帧率限制后的标称时长；旧调用者仍可传基础大小，后端不能越界写尾字段。
 - VPSS 和 VENC 都按输入、输出两端较严格的像素率限制帧率，避免小输入放大到 1620p 时 scaler 仍跑 60 FPS。
 - 显式最大输入/输出为 **2880×1620@30**（4.67 MP、约 140 Mpixel/s），使用 **64 MiB** 视频 carveout：高于 2560×1440 时 VI 公共池两块 UYVY，VPSS 私有池仍三块。
 - 720p@120 需要源真出 1280×720@120（CEA VIC 47）；Cube 默认 EDID 不含该模式。
@@ -276,8 +299,20 @@ Tight JPEG；Core 将压缩包写入共享 ring，VNC 借用 ring 槽并直接�
 Core 为同一 AU、相同元数据的订阅者只序列化一次 OKVF 消息，共用不可变
 `Bytes`。每个客户端有独立的 64 条消息队列，正常消费者保留连续 AU；落后
 越过队列后请求 IDR，并等待关键帧再发送。不能从任意最新 P 帧继续。
-双客户端仍分别传输码流，不减少网络副本数。共享全局 sequence 可能混入
-JPEG，不能把其跳号直接记为 H26x 丢帧；验证须保存各客户端码流实际解码。
+OKVF 的 sequence 只为主视频 AU 递增，由分发锁内的独立计数器生成；音频和
+独立 JPEG 编码不能占用这个序号。浏览器用跳号判断参考链是否断裂，混用媒体
+全局序号会误丢 P 帧并持续请求 IDR，降低编码和播放帧率。旧扩展媒体全局序号
+仍可能混入音频/JPEG，不能直接记为 H26x 丢帧。双客户端仍分别传输码流，
+不减少网络副本数；验证须保存各客户端码流实际解码。
+
+浏览器 JMuxer 的 duration 单位为整数毫秒，会逐包截断小数。客户端转换
+OKVF 的微秒时长时必须累计不足一毫秒的余量，以交替的整数毫秒保持总时长；
+不能把 60 FPS 的每包 16.667 ms 都变成 16 ms，否则每秒少 40 ms，MSE
+反复追空缓冲。短暂 waiting 保留已显示的最后一帧；持续缓冲才显示缓冲提示，
+emptied 或真实断开仍按新连接/连接错误处理。
+帧率采样在 emptied 时清除旧播放源的计数和采样基线；不能把新源的
+totalVideoFrames 与上一个源累积的回调数比较。rVFC 回调可能合并，降级
+计数使用 metadata.presentedFrames，不按回调次数计算显示帧率。
 
 VNC 前台由 frame/audio/eventfd 和 socket 事件唤醒，空闲轮询上限 20ms。
 Native/Tight JPEG 每客户端保留一个在途 owner，通过非阻塞 sendmsg 分段发送；

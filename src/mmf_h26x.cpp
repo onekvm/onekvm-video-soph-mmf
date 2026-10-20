@@ -30,6 +30,7 @@ constexpr auto kShutdownQuietPeriod = std::chrono::milliseconds(100);
 constexpr auto kShutdownDrainLimit = std::chrono::milliseconds(300);
 
 struct H26xQueuedPacket {
+	uint64_t encoded_ns = 0;
 	std::vector<uint8_t> data;
 	bool key_frame = false;
 };
@@ -52,6 +53,7 @@ struct H26xReader {
 	std::atomic<int> read_error{0};
 	std::atomic<bool> discard{false};
 	std::atomic<int> ready_event_fd{-1};
+	std::atomic<int> idle_event_fd{-1};
 	std::mutex mu;
 	std::mutex join_mu;
 	std::condition_variable cv;
@@ -80,6 +82,33 @@ static void clear_reader_queue(H26xReader &reader)
 
 static H26xReader g_readers[MMF_VENC_MAX_CHN];
 
+static void wake_idle_h26x_reader(H26xReader &reader)
+{
+    const int fd = reader.idle_event_fd.load(std::memory_order_acquire);
+    if (fd < 0) return;
+    const uint64_t value = 1;
+    while (write(fd, &value, sizeof(value)) < 0 && errno == EINTR) {}
+}
+
+/* Keep the sole late-AU drain owner, but avoid probing an empty VENC every
+ * 40 ms. Resume/stop has a separate wakeup so this idle watchdog does not
+ * add latency to a new consumer or native teardown. */
+static void wait_idle_h26x_reader(int ch, H26xReader &reader)
+{
+    const int wake = reader.idle_event_fd.load(std::memory_order_acquire);
+    if (wake >= 0) {
+        uint64_t value;
+        while (read(wake, &value, sizeof(value)) < 0 && errno == EINTR) {}
+    }
+    if (reader.stop.load(std::memory_order_acquire) ||
+        !reader.discard.load(std::memory_order_acquire)) return;
+    pollfd fds[2]{};
+    fds[0] = {wake, POLLIN, 0};
+    fds[1] = {g_runtime.h26x_encoders[ch].fd, POLLIN, 0};
+    int result;
+    do { result = poll(fds, 2, 500); } while (result < 0 && errno == EINTR);
+}
+
 static void notify_h26x_reader(H26xReader &reader)
 {
 	const int fd = reader.ready_event_fd.load(std::memory_order_acquire);
@@ -91,11 +120,17 @@ static void notify_h26x_reader(H26xReader &reader)
 		} while (written < 0 && errno == EINTR);
 		/* EAGAIN only means the event counter is already saturated/readable. */
 	}
+	if (reader.discard.load(std::memory_order_acquire) || reader.stop.load(std::memory_order_acquire))
+		wake_idle_h26x_reader(reader);
 	reader.cv.notify_all();
 }
 
 static void ensure_h26x_ready_event(H26xReader &reader)
 {
+    if (reader.idle_event_fd.load(std::memory_order_acquire) < 0) {
+        const int idle_fd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+        if (idle_fd >= 0) reader.idle_event_fd.store(idle_fd, std::memory_order_release);
+    }
 	if (reader.ready_event_fd.load(std::memory_order_acquire) >= 0)
 		return;
 	const int fd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
@@ -1267,7 +1302,7 @@ static int apply_h26x_rate_control(int ch, int output_fps, int gop,
 		if (output_fps <= 0)
 			return -1;
 		if (gop <= 0)
-			gop = output_fps;
+			gop = default_gop_frames(output_fps);
 	} else {
 		output_fps = cfg.output_fps;
 		gop = cfg.gop;
@@ -1329,7 +1364,7 @@ int set_h26x_output_fps(int ch, int output_fps, int gop)
 	if (output_fps <= 0)
 		return -1;
 	if (gop <= 0)
-		gop = output_fps;
+		gop = default_gop_frames(output_fps);
 	H26xReader &reader = g_readers[ch];
 	reader.pending_gop.store(gop, std::memory_order_relaxed);
 	reader.pending_output_fps.store(output_fps, std::memory_order_relaxed);
@@ -1346,7 +1381,7 @@ int set_h26x_rate_control(int ch, int output_fps, int gop, int bitrate_kbps,
 	if (output_fps <= 0)
 		return -1;
 	if (gop <= 0)
-		gop = output_fps;
+		gop = default_gop_frames(output_fps);
 	H26xReader &reader = g_readers[ch];
 	reader.pending_gop.store(gop, std::memory_order_relaxed);
 	reader.pending_output_fps.store(output_fps, std::memory_order_relaxed);
@@ -1395,6 +1430,7 @@ int start_h26x_reader(int ch, bool request_idr)
 			}
 			reader.discard.store(false, std::memory_order_release);
 		}
+		wake_idle_h26x_reader(reader);
 		notify_h26x_reader(reader);
 		return reader.read_error.load(std::memory_order_acquire);
 	}
@@ -1446,12 +1482,7 @@ int start_h26x_reader(int ch, bool request_idr)
 						reader_now_ns(), std::memory_order_release);
 					self.cv.notify_all();
 				}
-				if (discarded <= 0) {
-					std::unique_lock<std::mutex> lock(self.mu);
-					self.cv.wait_for(lock, std::chrono::milliseconds(5), [&] {
-						return self.stop.load(std::memory_order_relaxed);
-					});
-				}
+                if (discarded <= 0) wait_idle_h26x_reader(ch, self);
 				continue;
 			}
 			if (self.force_idr.exchange(false, std::memory_order_acq_rel)) {
@@ -1507,6 +1538,7 @@ int start_h26x_reader(int ch, bool request_idr)
 			if (scratch.capacity() == 0)
 				scratch = take_reader_buffer(self);
 			const int got = read_h26x_packet_into(ch, scratch);
+			const uint64_t encoded_ns = reader_now_ns();
 			if (got < 0) {
                 {
                     std::lock_guard<std::mutex> lock(self.mu);
@@ -1548,6 +1580,7 @@ int start_h26x_reader(int ch, bool request_idr)
             self.read_error.store(0, std::memory_order_release);
 			H26xQueuedPacket packet;
 			packet.key_frame = key;
+			packet.encoded_ns = encoded_ns;
 			if (key && parameter_sets.needs_parameter_prefix(
 					scratch.data(), static_cast<std::size_t>(got), h265)) {
 				packet.data = parameter_sets.augment_keyframe(
@@ -1697,7 +1730,8 @@ int finish_idle_h26x_drain(int ch)
 	return 0;
 }
 
-int take_ready_h26x_into(int ch, std::vector<uint8_t> *dst, bool *key_frame)
+int take_ready_h26x_into(int ch, std::vector<uint8_t> *dst, bool *key_frame,
+                         uint64_t *encoded_ns)
 {
 	if (ch < 0 || ch >= MMF_VENC_MAX_CHN)
 		return -1;
@@ -1708,6 +1742,8 @@ int take_ready_h26x_into(int ch, std::vector<uint8_t> *dst, bool *key_frame)
 	H26xQueuedPacket packet = std::move(reader.queue.front());
 	reader.queue.pop_front();
 	const int size = static_cast<int>(packet.data.size());
+	if (encoded_ns != nullptr)
+		*encoded_ns = packet.encoded_ns;
 	if (key_frame != nullptr)
 		*key_frame = packet.key_frame;
 	if (dst != nullptr) {

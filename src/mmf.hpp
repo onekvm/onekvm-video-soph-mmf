@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <memory>
 #include <vector>
+#include "input_resolution_tracker.hpp"
 
 namespace onekvm { class EncodedPacketPool; }
 
@@ -51,22 +52,9 @@ constexpr int kMaxOutputFps = 120;
 
 inline int clamp_output_fps(int fps, int width = 0, int height = 0)
 {
-	if (fps <= 0)
-		return 30;
-	int cap = kMaxOutputFps;
-	if (width > 0 && height > 0) {
-		const auto pixels = static_cast<int64_t>(width) * height;
-		if (pixels > 0) {
-			const int by_rate = static_cast<int>(150000000ll / pixels);
-			if (by_rate < cap)
-				cap = by_rate;
-		}
-	}
-	if (cap < 1)
-		cap = 1;
-	if (fps > cap)
-		return cap;
-	return fps;
+	return onekvm::clamp_video_fps(fps, {
+		width > 0 ? static_cast<uint32_t>(width) : 0u,
+		height > 0 ? static_cast<uint32_t>(height) : 0u});
 }
 
 inline int clamp_pipeline_fps(int fps, int in_w, int in_h, int out_w, int out_h)
@@ -76,16 +64,11 @@ inline int clamp_pipeline_fps(int fps, int in_w, int in_h, int out_w, int out_h)
 	return a < b ? a : b;
 }
 
-/* VENC src must be >= dest. 1080p30 still uses src 60; 1440p30 uses src 30;
-   720p120 uses src 120. */
+/* VPSS already converts the measured capture rate to the output cadence.
+   VENC must not apply that conversion a second time. */
 inline int venc_src_fps(int output_fps, int width = 0, int height = 0)
 {
-	const int fps = clamp_output_fps(output_fps, width, height);
-	int floor = kDefaultInputFps;
-	if (width > 0 && height > 0 &&
-	    static_cast<int64_t>(width) * height > 1920 * 1080)
-		floor = 30;
-	return fps < floor ? floor : fps;
+	return clamp_output_fps(output_fps, width, height);
 }
 
 struct H26xEncoderConfig {
@@ -123,6 +106,36 @@ inline int vpss_phy_channel(int width = 0)
 	return 1;
 }
 
+/* gop <= 0 selects five seconds of frames at the output rate. An explicit
+   interval is left unchanged. Packet loss and new viewers still request an
+   IDR immediately. */
+inline int default_gop_frames(int fps)
+{
+	if (fps < 1)
+		fps = 1;
+	return fps * 5;
+}
+
+/* A zero u32BufSize selects the driver's 9 MiB JPEG stream buffer. Size it
+   from the picture instead: half a byte per pixel, at least 512 KiB, and no
+   larger than the 2 MiB buffer the backend can return. The driver rejects a
+   size that is not a multiple of 1024. */
+inline uint32_t jpeg_stream_buffer_bytes(int width, int height)
+{
+	constexpr uint32_t kAlign = 1024;
+	constexpr uint32_t kMinimum = 512u * 1024u;
+	constexpr uint32_t kMaximum = 2u * 1024u * 1024u;
+	uint64_t bytes = 0;
+	if (width > 0 && height > 0)
+		bytes = static_cast<uint64_t>(width) * static_cast<uint64_t>(height) / 2u;
+	if (bytes < kMinimum)
+		bytes = kMinimum;
+	if (bytes > kMaximum)
+		bytes = kMaximum;
+	bytes = (bytes + kAlign - 1u) & ~(static_cast<uint64_t>(kAlign) - 1u);
+	return static_cast<uint32_t>(bytes);
+}
+
 inline int capture_pool_blocks(int, int)
 {
 	return 3;
@@ -141,10 +154,15 @@ inline int vi_common_pool_blocks(int width, int height)
 int find_free_capture_channel(void);
 int start_capture_pipeline(void);
 int stop_capture_pipeline(void);
-int open_capture_channel(int ch, int width, int height, int format, int fps);
+int open_capture_channel(int ch, int width, int height, int format, int fps,
+                         int input_fps = kDefaultInputFps);
 int close_capture_channel(int ch);
 int close_all_capture_channels(void);
-int reset_capture_channel(int ch, int width, int height, int format, int fps);
+int reset_capture_channel(int ch, int width, int height, int format, int fps,
+                          int input_fps = kDefaultInputFps);
+/* Cached vendor VI statistics only; no procfs dump or hardware probe. */
+int capture_input_fps(void);
+int update_capture_frame_rate(int ch, int output_fps, int input_fps);
 bool capture_channel_open(int ch);
 int pause_vpss_channel(int ch);
 int resume_vpss_channel(int ch);
@@ -193,7 +211,8 @@ int read_latest_h26x_packet_nowait(int ch, uint8_t *dst, int capacity);
 int drain_h26x_packets(int ch, uint8_t *scratch, int capacity);
 int start_h26x_reader(int ch, bool request_idr = true);
 void stop_h26x_reader(int ch);
-int take_ready_h26x_into(int ch, std::vector<uint8_t> *dst, bool *key_frame);
+int take_ready_h26x_into(int ch, std::vector<uint8_t> *dst, bool *key_frame,
+                         uint64_t *encoded_ns = nullptr);
 std::shared_ptr<onekvm::EncodedPacketPool> h26x_packet_pool(int ch);
 int read_manual_h26x_frame(int ch, uint8_t *dst, int capacity, int timeout_ms);
 int take_ready_h26x_packet(int ch, uint8_t *dst, int capacity,

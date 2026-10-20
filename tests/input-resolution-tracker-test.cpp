@@ -9,6 +9,14 @@ int main() {
     static_assert(supported_output_resolution({2880, 1620}));
     static_assert(!supported_output_resolution({2880, 1800}));
     static_assert(supported_input_rate({2880, 1620}, 30));
+    static_assert(!supported_input_rate({2560, 1440}, 60));
+    static_assert(supported_input_request({2560, 1440}, 60));
+    static_assert(normalize_capture_fps(59) == 60);
+    static_assert(normalize_capture_fps(29) == 30);
+    static_assert(normalize_capture_fps(53) == 53);
+    static_assert(supported_input_request({2880, 1620}, 120));
+    static_assert(classify_hdmi_input({2560, 1440}, 60) == HdmiInputClass::Supported);
+    static_assert(classify_hdmi_input({3840, 2160}, 60) == HdmiInputClass::OutOfRange);
     static_assert(!supported_input_resolution({3840, 2160}));
     static_assert(!supported_input_rate({3840, 2160}, 10));
     static_assert(!supported_input_rate({3840, 2160}, 30));

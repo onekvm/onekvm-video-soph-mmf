@@ -76,6 +76,50 @@ constexpr bool supported_input_rate(InputResolution resolution, int fps)
             static_cast<uint64_t>(fps) <= kMaxVideoPixelsPerSecond;
 }
 
+/* A requested stream rate is an upper bound, not the observed HDMI timing.
+   SG2002 uses the high-resolution path at 30 FPS; smaller frames retain the
+   pixel-throughput budget and 120 FPS ceiling. */
+constexpr int clamp_video_fps(int fps, InputResolution resolution = {})
+{
+    if (fps <= 0)
+        return 30;
+    int cap = 120;
+    const uint64_t pixels =
+        static_cast<uint64_t>(resolution.width) * resolution.height;
+    if (pixels > 0) {
+        const int by_rate = static_cast<int>(kMaxVideoPixelsPerSecond / pixels);
+        if (by_rate < cap)
+            cap = by_rate;
+        if (pixels > 1920ull * 1080ull && cap > 30)
+            cap = 30;
+    }
+    if (cap < 1)
+        cap = 1;
+    return fps < cap ? fps : cap;
+}
+
+constexpr bool supported_input_request(InputResolution resolution, int fps)
+{
+    return supported_input_rate(resolution, clamp_video_fps(fps, resolution));
+}
+
+/* Kernel frame counters use whole one-second windows. Stabilize the usual
+   29/30 and 59/60 observations without changing uncommon refresh rates. */
+constexpr int normalize_capture_fps(int fps)
+{
+    constexpr int common[] = {24, 25, 30, 48, 50, 60, 70, 72, 75, 90, 100, 120, 144, 165, 240};
+    int result = fps;
+    int distance = 2;
+    for (const int rate : common) {
+        const int delta = fps > rate ? fps - rate : rate - fps;
+        if (delta < distance || (delta == distance && rate > result)) {
+            distance = delta;
+            result = rate;
+        }
+    }
+    return distance <= 1 ? result : fps;
+}
+
 /* sc_v1 has a native output width limit of 2880. 2880x1620 is the largest
    16:9 profile which also fits the 5 MP output budget. */
 constexpr bool supported_output_resolution(InputResolution resolution)
@@ -155,7 +199,7 @@ constexpr HdmiInputClass classify_hdmi_input(
     InputResolution resolution, int fps = 30) {
     if (!plausible_hdmi_size(resolution))
         return HdmiInputClass::None;
-    if (supported_input_rate(resolution, fps))
+    if (supported_input_request(resolution, fps))
         return HdmiInputClass::Supported;
     return HdmiInputClass::OutOfRange;
 }

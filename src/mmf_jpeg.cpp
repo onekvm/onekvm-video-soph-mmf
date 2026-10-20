@@ -34,6 +34,7 @@ int create_jpeg_channel(int channel, int width, int height, int quality)
 	attributes.stVencAttr.u32MaxPicHeight = height;
 	attributes.stVencAttr.u32PicWidth = width;
 	attributes.stVencAttr.u32PicHeight = height;
+	attributes.stVencAttr.u32BufSize = jpeg_stream_buffer_bytes(width, height);
 	attributes.stVencAttr.bEsBufQueueEn = CVI_FALSE;
 	attributes.stVencAttr.bIsoSendFrmEn = CVI_FALSE;
 	attributes.stVencAttr.bByFrame = CVI_TRUE;

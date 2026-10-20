@@ -110,11 +110,11 @@ bool wait_for_pcie_timing(onekvm::InputResolution previous, int fps,
             if (!receiver_locked || *last_hdmi != previous)
                 old_timing_departed = true;
             const auto locked =
-                onekvm::supported_input_rate(*last_hdmi, fps) &&
+                onekvm::supported_input_request(*last_hdmi, fps) &&
                 *last_hdmi != previous
                     ? *last_hdmi
                     : onekvm::csi_reported_size(*last_csi, *last_hdmi);
-            if (onekvm::supported_input_rate(locked, fps) &&
+            if (onekvm::supported_input_request(locked, fps) &&
                 (!require_change || locked != previous ||
                  (old_timing_departed && receiver_locked &&
                   same_mode_delay != std::chrono::milliseconds::zero() &&
@@ -177,7 +177,7 @@ bool read_supported_input_resolution(onekvm::InputResolution *resolution,
                                      int fps) {
     onekvm::InputResolution value{};
     if (!read_hdmi_input(&value) ||
-        !onekvm::supported_input_rate(value, fps))
+        !onekvm::supported_input_request(value, fps))
         return false;
     *resolution = value;
     return true;
@@ -269,7 +269,7 @@ bool stable_hdmi_input(onekvm::InputResolution *resolution) {
 bool stable_input_resolution(onekvm::InputResolution *resolution, int fps) {
     onekvm::InputResolution value{};
     if (!stable_hdmi_input(&value) ||
-        !onekvm::supported_input_rate(value, fps))
+        !onekvm::supported_input_request(value, fps))
         return false;
     *resolution = value;
     return true;
@@ -295,7 +295,6 @@ void publish_input_format(Source *source) {
         (static_cast<uint64_t>(input.width) << 32) |
         static_cast<uint64_t>(input.height);
     source->cached_input_size.store(packed, std::memory_order_release);
-    source->cached_input_fps.store(source->config.fps, std::memory_order_relaxed);
     remember_hdmi_input(input);
 }
 
@@ -386,7 +385,7 @@ int open_source(Source *source, const onekvm_video_source_config_v1 *config,
         locked_receiver =
             onekvm::csi_reported_size(locked_csi, locked_hdmi);
         preserve_locked_csi =
-            onekvm::supported_input_rate(locked_receiver, requested_fps);
+            onekvm::supported_input_request(locked_receiver, requested_fps);
     }
     /* The old VI generation must be gone before LT6911 is reprogrammed.  VI
        startup itself happens later, after the bridge has been armed. */
@@ -415,7 +414,7 @@ int open_source(Source *source, const onekvm_video_source_config_v1 *config,
                      locked_receiver.width, locked_receiver.height);
     }
     const onekvm::InputResolution input = requested_input != nullptr &&
-        onekvm::supported_input_rate(*requested_input, requested_fps)
+        onekvm::supported_input_request(*requested_input, requested_fps)
         ? *requested_input
         : preserve_locked_csi ? locked_receiver
         : initial_input_resolution(requested_fps);
@@ -441,6 +440,10 @@ int open_source(Source *source, const onekvm_video_source_config_v1 *config,
         set_error(error, error_capacity, "LT6911 CSI arm before VI failed");
         return -1;
     }
+    const int input_fps = std::max(mmf::kDefaultInputFps, requested_fps);
+    source->cached_input_fps.store(input_fps, std::memory_order_relaxed);
+    source->input_fps_candidate = 0;
+    source->input_fps_samples = 0;
     if (mmf::initialize() != 0) {
         set_error(error, error_capacity, "initialize failed");
         return -1;
@@ -460,9 +463,10 @@ int open_source(Source *source, const onekvm_video_source_config_v1 *config,
     mmf::set_capture_mirror(channel, false);
     mmf::set_capture_flip(channel, false);
     const int fps = onekvm::mmf::clamp_pipeline_fps(
-        requested_fps, static_cast<int>(input.width),
+        std::min(requested_fps, input_fps), static_cast<int>(input.width),
         static_cast<int>(input.height), width, height);
-    int result = mmf::open_capture_channel(channel, width, height, kMMFNV21, fps);
+    int result = mmf::open_capture_channel(
+        channel, width, height, kMMFNV21, fps, input_fps);
     if (result != 0) {
         mmf::stop_capture_pipeline();
         mmf::shutdown();
@@ -730,7 +734,7 @@ int rebuild_for_hdmi_timing(Source *source, bool force_probe, char *error,
         ? static_cast<int>(source->config.fps) : 60;
     const auto kind = onekvm::classify_hdmi_input(reported, configured_fps);
     if (kind == onekvm::HdmiInputClass::OutOfRange) {
-        if (onekvm::supported_input_rate(csi, configured_fps)) {
+        if (onekvm::supported_input_request(csi, configured_fps)) {
             source->hdmi_oor_samples = 0;
             source->out_of_range.store(false, std::memory_order_relaxed);
             return 0;
@@ -790,7 +794,7 @@ int rebuild_for_hdmi_timing(Source *source, bool force_probe, char *error,
        counters remain 0x0 after the source returns. */
     const bool restored_timing_ready = consumer_waiting &&
         source->hdmi_waiting_for_signal &&
-        onekvm::supported_input_rate(hdmi, configured_fps) &&
+        onekvm::supported_input_request(hdmi, configured_fps) &&
         source->last_recovery.time_since_epoch().count() != 0 &&
         now - source->last_recovery >= kHDMIFollowProbeInterval;
     const bool unproved_retry_ready = consumer_waiting && awaiting_live_au &&
@@ -993,6 +997,30 @@ void hdmi_watch_loop(Source *source) {
            stop and changes cached_signal before asking for recovery. */
         const int cached_signal = source->cached_signal.load(
             std::memory_order_relaxed);
+        if (cached_signal == 1 && source->capture_live.load(std::memory_order_relaxed)) {
+            std::lock_guard<std::mutex> lock(source->mutex);
+            if (source->initialized) {
+                MmfControlLock control;
+                const int observed_fps = mmf::capture_input_fps();
+                if (observed_fps > 0) {
+                    source->input_fps_samples = observed_fps == source->input_fps_candidate
+                        ? source->input_fps_samples + 1 : 1;
+                    source->input_fps_candidate = observed_fps;
+                    if (source->input_fps_samples >= 2 && observed_fps !=
+                            source->cached_input_fps.load(std::memory_order_relaxed)) {
+                        const auto input = source->input_resolution.current();
+                        const auto [width, height] = source_output_size(source);
+                        const int fps = mmf::clamp_pipeline_fps(
+                            std::min(source->config.fps > 0 ? source->config.fps : 60, observed_fps),
+                            input.width, input.height, width, height);
+                        if (mmf::update_capture_frame_rate(source->channel, fps, observed_fps) == 0) {
+                            source->cached_input_fps.store(observed_fps, std::memory_order_relaxed);
+                            std::fprintf(stderr, "OneKVM: capture rate %d -> %d fps\n", observed_fps, fps);
+                        }
+                    }
+                }
+            }
+        }
         if (!onekvm::hdmi_watch_probe_due(
                 source->awaiting_hdmi_timing.load(std::memory_order_relaxed)
                     ? 0 : cached_signal, current,
@@ -1101,14 +1129,15 @@ int32_t source_reset(void *opaque, const onekvm_video_source_config_v1 *config,
         config->resolution, source->input_resolution.current());
     const int width = static_cast<int>(output.width);
     const int height = static_cast<int>(output.height);
+    const int input_fps = std::max(1, source->cached_input_fps.load(std::memory_order_relaxed));
     const int fps = onekvm::mmf::clamp_pipeline_fps(
-        config->fps > 0 ? static_cast<int>(config->fps) : 60,
+        std::min(config->fps > 0 ? static_cast<int>(config->fps) : 60, input_fps),
         static_cast<int>(source->input_resolution.current().width),
         static_cast<int>(source->input_resolution.current().height),
         width, height);
     MmfControlLock global_lock;
     int result = mmf::reset_capture_channel(
-        source->channel, width, height, kMMFNV21, fps);
+        source->channel, width, height, kMMFNV21, fps, input_fps);
     if (result != 0) {
         set_error(error, error_capacity, "reset MMF capture channel failed: %d", result);
         return -1;
@@ -1236,8 +1265,13 @@ int32_t source_read(void *opaque, onekvm_video_frame_v1 *frame,
             const auto [reset_width, reset_height] = source_output_size(source);
             const int reset_fps = source->config.fps > 0
                 ? static_cast<int>(source->config.fps) : 60;
+            const int input_fps = std::max(1,
+                source->cached_input_fps.load(std::memory_order_relaxed));
+            const auto input = source->input_resolution.current();
             int reset = mmf::reset_capture_channel(
-                source->channel, reset_width, reset_height, kMMFNV21, reset_fps);
+                source->channel, reset_width, reset_height, kMMFNV21,
+                mmf::clamp_pipeline_fps(std::min(reset_fps, input_fps),
+                    input.width, input.height, reset_width, reset_height), input_fps);
             source->channel = onekvm::mmf::vpss_phy_channel(reset_width);
             set_error(error, error_capacity, "MMF VI read failed; channel reset returned %d", reset);
         } else {

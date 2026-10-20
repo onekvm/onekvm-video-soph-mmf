@@ -23,7 +23,7 @@ void set_capture_flip(int channel, bool enabled)
 	g_capture_options.flip[channel] = enabled;
 }
 
-static CVI_S32 configure_vpss_channel(VPSS_GRP VpssGrp, VPSS_CHN VpssChn, int width, int height, PIXEL_FORMAT_E format, int fps, int depth, bool mirror, bool flip, int fit)
+static CVI_S32 configure_vpss_channel(VPSS_GRP VpssGrp, VPSS_CHN VpssChn, int width, int height, PIXEL_FORMAT_E format, int fps, int input_fps, int depth, bool mirror, bool flip, int fit)
 {
 #if 1
 	VPSS_GRP_ATTR_S stGrpAttr;
@@ -44,7 +44,7 @@ static CVI_S32 configure_vpss_channel(VPSS_GRP VpssGrp, VPSS_CHN VpssChn, int wi
 		chn_attr.u32Height                   = height;
 		chn_attr.enVideoFormat               = VIDEO_FORMAT_LINEAR;
 		chn_attr.enPixelFormat               = format;
-		chn_attr.stFrameRate.s32SrcFrameRate = fps;
+		chn_attr.stFrameRate.s32SrcFrameRate = input_fps;
 		chn_attr.stFrameRate.s32DstFrameRate = fps;
 		chn_attr.u32Depth                    = depth;
 		chn_attr.bMirror                     = mirror;
@@ -64,7 +64,7 @@ static CVI_S32 configure_vpss_channel(VPSS_GRP VpssGrp, VPSS_CHN VpssChn, int wi
 		chn_attr.u32Height                   = height;
 		chn_attr.enVideoFormat               = VIDEO_FORMAT_LINEAR;
 		chn_attr.enPixelFormat               = format;
-		chn_attr.stFrameRate.s32SrcFrameRate = fps;
+		chn_attr.stFrameRate.s32SrcFrameRate = input_fps;
 		chn_attr.stFrameRate.s32DstFrameRate = fps;
 		chn_attr.u32Depth                    = depth;
 		chn_attr.bMirror                     = mirror;
@@ -80,7 +80,7 @@ static CVI_S32 configure_vpss_channel(VPSS_GRP VpssGrp, VPSS_CHN VpssChn, int wi
 		chn_attr.u32Height                   = height;
 		chn_attr.enVideoFormat               = VIDEO_FORMAT_LINEAR;
 		chn_attr.enPixelFormat               = format;
-		chn_attr.stFrameRate.s32SrcFrameRate = fps;
+		chn_attr.stFrameRate.s32SrcFrameRate = input_fps;
 		chn_attr.stFrameRate.s32DstFrameRate = fps;
 		chn_attr.u32Depth                    = depth;
 		chn_attr.bMirror                     = mirror;
@@ -133,7 +133,7 @@ static CVI_S32 configure_vpss_channel(VPSS_GRP VpssGrp, VPSS_CHN VpssChn, int wi
 	chn_attr.u32Height                   = height;
 	chn_attr.enVideoFormat               = VIDEO_FORMAT_LINEAR;
 	chn_attr.enPixelFormat               = format;
-	chn_attr.stFrameRate.s32SrcFrameRate = fps;
+	chn_attr.stFrameRate.s32SrcFrameRate = input_fps;
 	chn_attr.stFrameRate.s32DstFrameRate = fps;
 	chn_attr.u32Depth                    = depth;
 	chn_attr.bMirror                     = mirror;
@@ -253,7 +253,7 @@ int stop_capture_pipeline(void)
 	return s32Ret;
 }
 
-static int create_capture_channel(int ch, int width, int height, int format, int fps) {
+static int create_capture_channel(int ch, int width, int height, int format, int fps, int input_fps) {
 	uint32_t pool_size_out = 0;
 	int pool_id = -1;
 	if (ch < 0 || ch >= MMF_VI_MAX_CHN) {
@@ -317,7 +317,7 @@ static int create_capture_channel(int ch, int width, int height, int format, int
 
 	/* fit=2 enables an identity crop. At 2560x1440 that crop path
 	   produces a zero NV21 while the UYVY VI pool still has pixels. */
-	s32Ret = configure_vpss_channel(0, ch, width, height, format_out, fps, depth, mirror, flip, 0);
+	s32Ret = configure_vpss_channel(0, ch, width, height, format_out, fps, input_fps, depth, mirror, flip, 0);
 	if (s32Ret != CVI_SUCCESS) {
 		SAMPLE_PRT("configure_vpss_channel failed with %#x!\n", s32Ret);
 		return CVI_FAILURE;
@@ -395,8 +395,30 @@ _need_deinit_vpss_chn:
 	return -1;
 }
 
-int open_capture_channel(int ch, int width, int height, int format, int fps) {
-	return create_capture_channel(ch, width, height, format, fps);
+int capture_input_fps(void)
+{
+	VI_CHN_STATUS_S status{};
+	if (CVI_VI_QueryChnStatus(0, 0, &status) != CVI_SUCCESS ||
+	    !status.bEnable || status.u32FrameRate < 10 || status.u32FrameRate > 240)
+		return 0;
+	return onekvm::normalize_capture_fps(static_cast<int>(status.u32FrameRate));
+}
+
+int update_capture_frame_rate(int ch, int output_fps, int input_fps)
+{
+	if (!capture_channel_open(ch) || input_fps < 1 || output_fps < 1)
+		return -1;
+	VPSS_CHN_ATTR_S attr{};
+	int result = CVI_VPSS_GetChnAttr(0, ch, &attr);
+	if (result != CVI_SUCCESS)
+		return result;
+	attr.stFrameRate.s32SrcFrameRate = input_fps;
+	attr.stFrameRate.s32DstFrameRate = output_fps;
+	return CVI_VPSS_SetChnAttr(0, ch, &attr);
+}
+
+int open_capture_channel(int ch, int width, int height, int format, int fps, int input_fps) {
+	return create_capture_channel(ch, width, height, format, fps, input_fps);
 }
 
 static void clear_capture_mappings(int ch)
@@ -605,7 +627,7 @@ void park_unbound_vpss_channels()
 	}
 }
 
-int reset_capture_channel(int ch, int width, int height, int format, int fps)
+int reset_capture_channel(int ch, int width, int height, int format, int fps, int input_fps)
 {
 	const int out_ch = vpss_phy_channel(width);
 	if (ch != out_ch)
@@ -613,7 +635,7 @@ int reset_capture_channel(int ch, int width, int height, int format, int fps)
             return -1;
 	if (close_capture_channel(out_ch) != 0)
         return -1;
-	return open_capture_channel(out_ch, width, height, format, fps);
+	return open_capture_channel(out_ch, width, height, format, fps, input_fps);
 }
 
 int acquire_capture_frame_for_encoder_timeout(int ch, int *width,

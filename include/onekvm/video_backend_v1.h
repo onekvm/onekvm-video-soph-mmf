@@ -58,6 +58,23 @@ enum onekvm_video_pixel_format_v1 {
 #define ONEKVM_VIDEO_FEATURE_SOURCE_DISPLAY     (1ull << 10)
 #define ONEKVM_VIDEO_FEATURE_SOURCE_DISPLAY_RGA (1ull << 11)
 #define ONEKVM_VIDEO_FEATURE_SOURCE_OVERLAY     (1ull << 12)
+/* Bound H26x packet pts_ns is CLOCK_MONOTONIC encode-output time (0 unknown). */
+#define ONEKVM_VIDEO_FEATURE_BOUND_ENCODED_TIME (1ull << 13)
+/* Optional encoder_color_info: cached, actual encoded component precision/range. */
+#define ONEKVM_VIDEO_FEATURE_ENCODER_COLOR_INFO (1ull << 14)
+
+enum onekvm_video_color_range_v1 {
+    ONEKVM_VIDEO_COLOR_RANGE_UNKNOWN = 0,
+    ONEKVM_VIDEO_COLOR_RANGE_LIMITED = 1,
+    ONEKVM_VIDEO_COLOR_RANGE_FULL = 2,
+    ONEKVM_VIDEO_COLOR_RANGE_UNSPECIFIED = 3,
+};
+
+struct onekvm_video_color_info_v1 {
+    uint32_t struct_size;
+    uint32_t bit_depth; /* bits per encoded component; 0 unknown */
+    uint32_t color_range; /* enum onekvm_video_color_range_v1 */
+};
 
 #define ONEKVM_VIDEO_DISPLAY_FLAG_RGA (1u << 0)
 #define ONEKVM_VIDEO_OVERLAY_FLAG_RGA (1u << 0)
@@ -160,7 +177,14 @@ struct onekvm_video_packet_v1 {
     uint32_t codec;
     uint32_t key_frame;
     uint64_t pts_ns;
+    /* Optional tail: nominal AU duration after backend frame-rate limiting.
+     * Zero preserves the caller's configured cadence. Check struct_size
+     * before writing; old callers still pass the base packet size. */
+    uint64_t duration_ns;
 };
+
+#define ONEKVM_VIDEO_PACKET_V1_BASE_SIZE \
+    (offsetof(struct onekvm_video_packet_v1, pts_ns) + sizeof(uint64_t))
 
 /* Last observed capture/encode durations. Zero means the backend has not
  * sampled that stage yet. Status/SSE must not probe hardware here. */
@@ -412,6 +436,12 @@ struct onekvm_video_backend_v1 {
     int32_t (*encoder_take_packet)(void *encoder, uint8_t **data, uint32_t *size,
                                    void **owner);
     void (*encoder_free_taken_packet)(void *owner);
+    /* Optional tail: actual encoded stream, not HDMI/EDID capabilities.
+     * Read cached state only. No hardware probing, frame reads or waits.
+     * UNKNOWN means unavailable; UNSPECIFIED means a known absent range tag.
+     * Zero bit_depth is valid when precision is not known. */
+    int32_t (*encoder_color_info)(void *encoder,
+                                  struct onekvm_video_color_info_v1 *info);
 };
 
 /*

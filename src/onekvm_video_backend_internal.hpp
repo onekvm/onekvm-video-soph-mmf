@@ -165,6 +165,8 @@ struct ONEKVM_VIDEO_INTERNAL Source {
     int capture_height = 0;
     std::atomic<uint64_t> cached_input_size{0};
     std::atomic<int32_t> cached_input_fps{0};
+    int input_fps_candidate = 0;
+    unsigned input_fps_samples = 0;
     std::atomic<bool> out_of_range{false};
     std::atomic<bool> capture_live{false};
     std::atomic<bool> hdmi_watch_stop{false};
@@ -178,6 +180,7 @@ struct ONEKVM_VIDEO_INTERNAL Encoder {
     int channel = -1;
     int width = 0;
     int height = 0;
+    int output_fps = 0;
     bool initialized = false;
     bool source_bound = false;
     bool placeholder_frames = false;
@@ -201,6 +204,7 @@ struct ONEKVM_VIDEO_INTERNAL Encoder {
     Source *reset_source = nullptr;
     std::atomic<uint64_t> last_capture_ns{0};
     std::atomic<uint64_t> last_encode_ns{0};
+    std::atomic<uint32_t> color_info{0};
     bool managed_allocation = false;
     uint64_t allocation_id = 0;
     uint32_t allocation_input_mode = 0;

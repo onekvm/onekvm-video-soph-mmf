@@ -179,7 +179,12 @@ int uxc_read(uint8_t *edid, size_t size)
             write_reg(kSys, 0x5a, 0x80) || write_reg(kSys, 0x5b, 0x01) ||
             write_reg(kSys, 0x5c, 0x80) ||
             write_reg(kSys, 0x5d, static_cast<uint8_t>(kUXCChunk * i)) ||
-            write_reg(kSys, 0x5a, 0x90) || write_reg(kSys, 0x5a, 0x80) ||
+            write_reg(kSys, 0x5a, 0x90))
+            return -1;
+        // Flash-to-FIFO is asynchronous. Match the maintained UXC flash reader's
+        // completion interval before stopping the transfer or reading the FIFO.
+        usleep(5000);
+        if (write_reg(kSys, 0x5a, 0x80) ||
             write_reg(kSys, 0x58, 0x21) ||
             read_regs(kSys, 0x5f, edid + kUXCChunk * i, kUXCChunk))
             return -1;

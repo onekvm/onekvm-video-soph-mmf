@@ -1,6 +1,7 @@
 #include "onekvm_video_backend_internal.hpp"
 #include "h264_annexb.hpp"
 #include "mmf_internal.hpp"
+#include "cvi_venc.h"
 
 #pragma GCC visibility push(hidden)
 namespace onekvm::video_backend {
@@ -77,16 +78,24 @@ int bitrate(int width, int height, double quality, int fps = 0) {
     return std::max(100, static_cast<int>(static_cast<double>(base) * quality * fps_scale));
 }
 
-static int normalized_output_fps(int fps, int width = 0, int height = 0)
+static int normalized_output_fps(int fps, int width = 0, int height = 0,
+                                 const Source *source = nullptr)
 {
-    return mmf::clamp_output_fps(fps, width, height);
+    if (source == nullptr)
+        return mmf::clamp_output_fps(fps, width, height);
+    const uint64_t packed = source->cached_input_size.load(std::memory_order_acquire);
+    const int input_fps = source->cached_input_fps.load(std::memory_order_relaxed);
+    if (input_fps > 0)
+        fps = std::min(fps > 0 ? fps : 30, input_fps);
+    return mmf::clamp_pipeline_fps(fps, static_cast<int>(packed >> 32),
+        static_cast<int>(packed & 0xffffffffu), width, height);
 }
 
 static int normalized_gop(int gop, int fps)
 {
     if (gop > 0)
         return gop;
-    return std::max(1, fps);
+    return mmf::default_gop_frames(fps);
 }
 
 int close_encoder(Encoder *encoder) {
@@ -118,9 +127,11 @@ int close_encoder(Encoder *encoder) {
         g_encoder_owner_generations[encoder->channel] = 0;
     }
     encoder->initialized = false;
+    encoder->color_info.store(0, std::memory_order_release);
     encoder->channel = -1;
     encoder->width = 0;
     encoder->height = 0;
+    encoder->output_fps = 0;
     encoder->frame_pending = false;
     encoder->source_bound = false;
     encoder->placeholder_frames = false;
@@ -154,6 +165,7 @@ void invalidate_stale_encoder(Encoder *encoder) {
     encoder->channel = -1;
     encoder->width = 0;
     encoder->height = 0;
+    encoder->output_fps = 0;
     encoder->source_bound = false;
     encoder->placeholder_frames = false;
     encoder->placeholder_need_key = false;
@@ -184,7 +196,8 @@ void recover_encoder_after_stream_error(Encoder *encoder) {
 }
 
 int configure_encoder(Encoder *encoder, int width, int height,
-                      char *error, uint32_t error_capacity) {
+                      char *error, uint32_t error_capacity,
+                      const Source *source = nullptr) {
     invalidate_stale_encoder(encoder);
     if (encoder->initialized && encoder->width == width && encoder->height == height) {
         return 0;
@@ -210,17 +223,11 @@ int configure_encoder(Encoder *encoder, int width, int height,
         set_error(error, error_capacity, "allocate encoder output: out of memory");
         return ONEKVM_VIDEO_RESOURCE_NO_MEMORY;
     }
-    int fps = normalized_output_fps(encoder->config.fps, width, height);
-    // The capture/VPSS path can continue delivering frames at the HDMI input
-    // cadence even when the requested output is lower.  Tell VENC the
-    // expected input cadence separately from the requested destination rate;
-    // using the target for both fields makes the driver assume every submitted
-    // frame is already at the target rate and it will not perform rate
-    // conversion (the stream then remains close to the source FPS).
+    int fps = normalized_output_fps(encoder->config.fps, width, height, source);
+    // VPSS converts the measured capture cadence before hardware binding.
+    // VENC receives that effective rate and must not decimate it again.
     const int venc_input_fps = mmf::venc_src_fps(fps, width, height);
-    /* Keep the default GOP at one second. This avoids spending excessive VBR
-       budget on IDR frames while still bounding decoder recovery latency. */
-    int gop = encoder->config.gop > 0 ? encoder->config.gop : std::max(1, fps);
+    const int gop = normalized_gop(encoder->config.gop, fps);
     int result = 0;
     int channel = kJPEGChannel;
     {
@@ -282,6 +289,28 @@ int configure_encoder(Encoder *encoder, int width, int height,
             g_encoder_owners[channel] = encoder;
             g_encoder_owner_generations[channel] =
                 g_mmf_generation.load(std::memory_order_acquire);
+            // The configured encoder input is DATA_BITWIDTH_8 NV21. Read VUI
+            // before binding/StartRecvFrame; never probe a live VENC from status.
+            uint32_t range = ONEKVM_VIDEO_COLOR_RANGE_UNKNOWN;
+            VENC_VUI_VIDEO_SIGNAL_S signal{};
+            bool have_vui = false;
+            if (encoder->codec_type == 1) {
+                VENC_H265_VUI_S vui{};
+                have_vui = CVI_VENC_GetH265Vui(channel, &vui) == CVI_SUCCESS;
+                signal = vui.stVuiVideoSignal;
+            } else if (encoder->codec_type == 2) {
+                VENC_H264_VUI_S vui{};
+                have_vui = CVI_VENC_GetH264Vui(channel, &vui) == CVI_SUCCESS;
+                signal = vui.stVuiVideoSignal;
+            }
+            if (have_vui) {
+                // H.264/H.265 infer video_full_range_flag=0 when it is absent.
+                // Report the effective range, including that normative default.
+                range = signal.video_signal_type_present_flag && signal.video_full_range_flag
+                    ? ONEKVM_VIDEO_COLOR_RANGE_FULL
+                    : ONEKVM_VIDEO_COLOR_RANGE_LIMITED;
+            }
+            encoder->color_info.store(8u | (range << 8), std::memory_order_release);
         }
     }
     if (result != 0) {
@@ -291,6 +320,7 @@ int configure_encoder(Encoder *encoder, int width, int height,
     encoder->channel = channel;
     encoder->width = width;
     encoder->height = height;
+    encoder->output_fps = fps;
     encoder->initialized = true;
     encoder->mmf_generation = g_mmf_generation.load(std::memory_order_acquire);
     return 0;
@@ -396,8 +426,23 @@ int32_t encoder_reset(void *opaque, const onekvm_video_encoder_config_v1 *config
     if (encoder->initialized && encoder->codec_type != 0 &&
         encoder->codec_type == next_codec && encoder->channel >= 0 &&
         encoder->width > 0 && encoder->height > 0) {
+        Source *source = encoder->reset_source;
+        std::unique_lock<std::mutex> source_lock;
+        if (source != nullptr)
+            source_lock = std::unique_lock<std::mutex>(source->mutex);
         const int fps = normalized_output_fps(
-            next.fps, encoder->width, encoder->height);
+            next.fps, encoder->width, encoder->height, source);
+        // Core applies FPS changes through encoder_reset without resetting the
+        // source. Keep VPSS conversion and its watcher target in sync too.
+        if (source != nullptr && source->initialized && source->config.fps != next.fps) {
+            MmfControlLock control;
+            if (mmf::update_capture_frame_rate(source->channel, fps,
+                    std::max(1, source->cached_input_fps.load(std::memory_order_relaxed))) != 0) {
+                set_error(error, error_capacity, "update VPSS frame rate failed");
+                return -1;
+            }
+            source->config.fps = next.fps;
+        }
         const int gop = normalized_gop(next.gop, fps);
         const int bitrate_kbps = next.bitrate_kbps > 0
             ? next.bitrate_kbps
@@ -410,6 +455,7 @@ int32_t encoder_reset(void *opaque, const onekvm_video_encoder_config_v1 *config
             return -1;
         }
         encoder->config = next;
+        encoder->output_fps = fps;
         encoder->codec_type = next_codec;
         return 0;
     }
@@ -439,12 +485,13 @@ size_t complete_jpeg_size(const uint8_t *data, size_t size) {
 }
 
 int drain_venc_packet(Encoder *encoder, const uint8_t **output_data,
-                      uint64_t *output_pts_ns, bool *key_frame) {
+                      uint64_t *output_pts_ns, bool *key_frame,
+                      uint64_t *encoded_ns = nullptr) {
     /* VENC pack addresses must not cross the ABI: RTP/sendmmsg outlive
        ReleaseStream. The reader already copied out of the driver into a
        recycled vector; move that buffer here instead of memcpy again. */
     const int result = mmf::take_ready_h26x_into(
-        encoder->channel, &encoder->output, key_frame);
+        encoder->channel, &encoder->output, key_frame, encoded_ns);
     if (result < 0) {
         recover_encoder_after_stream_error(encoder);
         return result;
@@ -529,7 +576,7 @@ int bind_encoder_to_source_locked(Encoder *encoder, Source *source,
         return ONEKVM_VIDEO_RESOURCE_INVALID;
     }
     const int configure_result = configure_encoder(
-        encoder, width, height, error, error_capacity);
+        encoder, width, height, error, error_capacity, source);
     if (configure_result != 0)
         return configure_result;
     /* JPEG is a logical bound stream rather than a SYS_Bind producer.  Keep
@@ -605,7 +652,7 @@ int32_t fill_bound_empty_packet(Encoder *encoder, onekvm_video_packet_v1 *packet
 int32_t fill_bound_live_packet(Encoder *encoder, Source *source,
                                onekvm_video_packet_v1 *packet,
                                const uint8_t *output_data, int result,
-                               bool key_frame, bool mark_hdmi);
+                               bool key_frame, bool mark_hdmi, uint64_t encoded_ns);
 
 bool placeholder_au_usable(const Encoder *encoder, const uint8_t *data,
                            int size, bool key_frame, int *sps_width,
@@ -722,13 +769,14 @@ int encode_bound_placeholder(Encoder *encoder, Source *source,
         encoder->placeholder_idr_tries++;
     const uint8_t *output_data = nullptr;
     uint64_t output_pts_ns = 0;
+    uint64_t encoded_ns = 0;
     bool key_frame = false;
     int result = drain_venc_packet(
-        encoder, &output_data, &output_pts_ns, &key_frame);
+        encoder, &output_data, &output_pts_ns, &key_frame, &encoded_ns);
     if (result == 0) {
         (void)mmf::wait_ready_h26x_packet(encoder->channel, 80);
         result = drain_venc_packet(
-            encoder, &output_data, &output_pts_ns, &key_frame);
+            encoder, &output_data, &output_pts_ns, &key_frame, &encoded_ns);
     }
     if (result < 0) {
         set_error(error, error_capacity,
@@ -760,13 +808,13 @@ int encode_bound_placeholder(Encoder *encoder, Source *source,
         encoder->placeholder_logged = true;
     }
     return fill_bound_live_packet(
-        encoder, source, packet, output_data, result, key_frame, false);
+        encoder, source, packet, output_data, result, key_frame, false, encoded_ns);
 }
 
 int32_t fill_bound_live_packet(Encoder *encoder, Source *source,
                                onekvm_video_packet_v1 *packet,
                                const uint8_t *output_data, int result,
-                               bool key_frame, bool mark_hdmi) {
+                               bool key_frame, bool mark_hdmi, uint64_t encoded_ns) {
     if (mark_hdmi) {
         source->early_blank_samples = 0;
         source->last_frame_ns.store(monotonic_ns(), std::memory_order_relaxed);
@@ -794,7 +842,13 @@ int32_t fill_bound_live_packet(Encoder *encoder, Source *source,
     packet->data_size = static_cast<uint64_t>(result);
     packet->codec = public_codec(encoder->codec_type);
     packet->key_frame = key_frame ? 1 : 0;
-    packet->pts_ns = monotonic_ns();
+    packet->pts_ns = encoded_ns;
+    if (packet->struct_size >= offsetof(onekvm_video_packet_v1, duration_ns) +
+            sizeof(packet->duration_ns)) {
+        const int fps = normalized_output_fps(
+            encoder->config.fps, encoder->width, encoder->height, source);
+        packet->duration_ns = 1000000000ull / static_cast<uint64_t>(fps);
+    }
     encoder->last_encode_ns.store(mmf::h26x_last_encode_ns(encoder->channel),
                                  std::memory_order_relaxed);
     uint64_t capture_ns = mmf::h26x_last_capture_ns(encoder->channel);
@@ -856,7 +910,7 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
                             char *error, uint32_t error_capacity) {
     auto *encoder = static_cast<Encoder *>(opaque);
     if (encoder == nullptr || packet == nullptr ||
-        packet->struct_size < sizeof(*packet)) {
+        packet->struct_size < ONEKVM_VIDEO_PACKET_V1_BASE_SIZE) {
         set_error(error, error_capacity, "invalid bound encoder read");
         return -1;
     }
@@ -879,7 +933,7 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
         if (!encoder->initialized || !encoder->source_bound ||
             encoder->width != width || encoder->height != height) {
             const int configure_result = configure_encoder(
-                encoder, width, height, error, error_capacity);
+                encoder, width, height, error, error_capacity, source);
             if (configure_result != 0)
                 return configure_result;
             encoder->source_bound = true;
@@ -994,8 +1048,23 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
             return -1;
         encoder->request_keyframe = true;
     }
+    const int effective_fps = normalized_output_fps(
+        encoder->config.fps, encoder->width, encoder->height, source);
+    if (effective_fps != encoder->output_fps) {
+        const auto &config = encoder->config;
+        const int bitrate_kbps = config.bitrate_kbps > 0 ? config.bitrate_kbps
+            : bitrate(encoder->width, encoder->height, config.quality_factor, effective_fps);
+        if (mmf::set_h26x_rate_control(encoder->channel, effective_fps,
+                normalized_gop(config.gop, effective_fps), bitrate_kbps,
+                config.initial_qp, config.min_qp, config.max_qp) != 0) {
+            set_error(error, error_capacity, "queue input cadence update failed");
+            return -1;
+        }
+        encoder->output_fps = effective_fps;
+    }
     const uint8_t *output_data = nullptr;
     uint64_t output_pts_ns = monotonic_ns();
+    uint64_t encoded_ns = 0;
     int result = 0;
     {
         if (encoder->packet_borrowed) {
@@ -1052,7 +1121,7 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
     if (!encoder->placeholder_frames) {
         if (result == 0 && output_data == nullptr)
             result = drain_venc_packet(
-                encoder, &output_data, &output_pts_ns, &key_frame);
+                encoder, &output_data, &output_pts_ns, &key_frame, &encoded_ns);
         if (result < 0) {
             set_error(error, error_capacity, "read bound MMF frame failed: %d", result);
             return -1;
@@ -1062,7 +1131,7 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
            /proc/cvitek/vi on this path. */
         if (result > 0 && bound_packet_is_live(encoder, source, key_frame))
             return fill_bound_live_packet(
-                encoder, source, packet, output_data, result, key_frame, true);
+                encoder, source, packet, output_data, result, key_frame, true, encoded_ns);
         if (result > 0)
             return fill_bound_empty_packet(encoder, packet);
 
@@ -1134,7 +1203,7 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
             if (!encoder->initialized)
                 return fill_bound_empty_packet(encoder, packet);
             result = drain_venc_packet(
-                encoder, &output_data, &output_pts_ns, &key_frame);
+                encoder, &output_data, &output_pts_ns, &key_frame, &encoded_ns);
             if (result < 0) {
                 set_error(error, error_capacity, "read bound MMF frame failed: %d", result);
                 return -1;
@@ -1142,7 +1211,7 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
             if (result > 0 && bound_packet_is_live(encoder, source, key_frame))
                 return fill_bound_live_packet(
                     encoder, source, packet, output_data, result, key_frame,
-                    true);
+                    true, encoded_ns);
             return fill_bound_empty_packet(encoder, packet);
         }
 
@@ -1325,7 +1394,8 @@ int32_t encoder_encode(void *opaque, const onekvm_video_frame_v1 *frame,
     auto *encoder = static_cast<Encoder *>(opaque);
     size_t required_frame_size = 0;
     if (encoder == nullptr || frame == nullptr || packet == nullptr ||
-        frame->struct_size < sizeof(*frame) || packet->struct_size < sizeof(*packet) ||
+        frame->struct_size < sizeof(*frame) ||
+        packet->struct_size < ONEKVM_VIDEO_PACKET_V1_BASE_SIZE ||
         frame->data == nullptr || frame->data_size == 0 ||
         frame->pixel_format != ONEKVM_VIDEO_PIXEL_NV21 ||
         !nv21_size(frame->width, frame->height, &required_frame_size) ||
@@ -1515,7 +1585,7 @@ int32_t encoder_set_quality(void *opaque, double quality,
         encoder->channel < 0 || encoder->width <= 0 || encoder->height <= 0)
         return 0;
     const int fps = normalized_output_fps(
-        encoder->config.fps, encoder->width, encoder->height);
+        encoder->config.fps, encoder->width, encoder->height, encoder->reset_source);
     const int gop = normalized_gop(encoder->config.gop, fps);
     const int bitrate_kbps = encoder->config.bitrate_kbps > 0
         ? encoder->config.bitrate_kbps
@@ -1548,6 +1618,17 @@ uint32_t encoder_codec(void *opaque) {
     if (encoder == nullptr) return ONEKVM_VIDEO_CODEC_AUTO;
     std::lock_guard<std::mutex> lock(encoder->mutex);
     return public_codec(encoder->codec_type);
+}
+
+int32_t encoder_color_info(void *opaque, onekvm_video_color_info_v1 *info) {
+    auto *encoder = static_cast<Encoder *>(opaque);
+    if (encoder == nullptr || info == nullptr || info->struct_size < sizeof(*info))
+        return ONEKVM_VIDEO_RESOURCE_INVALID;
+    const uint32_t packed = encoder->color_info.load(std::memory_order_acquire);
+    info->struct_size = sizeof(*info);
+    info->bit_depth = packed & 0xffu;
+    info->color_range = packed >> 8;
+    return ONEKVM_VIDEO_RESOURCE_OK;
 }
 
 namespace {
@@ -1792,7 +1873,9 @@ const onekvm_video_backend_v1 kBackend = {
         ONEKVM_VIDEO_FEATURE_LATENCY |
         ONEKVM_VIDEO_FEATURE_EDID |
         ONEKVM_VIDEO_FEATURE_ENCODER_ALLOCATION |
-        ONEKVM_VIDEO_FEATURE_SOURCE_SNAPSHOT,
+        ONEKVM_VIDEO_FEATURE_SOURCE_SNAPSHOT |
+        ONEKVM_VIDEO_FEATURE_BOUND_ENCODED_TIME |
+        ONEKVM_VIDEO_FEATURE_ENCODER_COLOR_INFO,
     kFormats,
     static_cast<uint32_t>(sizeof(kFormats) / sizeof(kFormats[0])),
     source_create,
@@ -1828,6 +1911,7 @@ const onekvm_video_backend_v1 kBackend = {
     nullptr,
     encoder_take_packet,
     encoder_free_taken_packet,
+    encoder_color_info,
 };
 
 
