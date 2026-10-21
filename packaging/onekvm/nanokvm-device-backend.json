@@ -3,6 +3,7 @@
   "api_major": 1,
   "transport": "native",
   "driver": "soph-mmf",
+  "video_source_device": false,
   "library": "/usr/lib/onekvm/video-backends/soph-mmf.so",
   "capabilities": ["video", "hid", "msd", "srtp-tx-offload", "temperature"],
   "temperature_millidegrees_path": "/sys/class/thermal/thermal_zone0/temp",
