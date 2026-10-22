@@ -7,6 +7,14 @@ set -eu
 
 log() { echo "lt6911uxc-firmware: $*"; }
 
+# Machine detection has already run before capture-chip-init. On Cube, avoid
+# spawning devmem for a PCIe-only check. Retain mailbox validation otherwise.
+hardware=/run/onekvm/hardware.json
+if [ -r "$hardware" ] && grep -q '"variant"[[:space:]]*:[[:space:]]*"cube"' "$hardware"; then
+  log "Cube board; skip PCIe firmware check"
+  exit 0
+fi
+
 magic=$(devmem 0x8FFF0000 32 2>/dev/null || true)
 variant=$(devmem 0x8FFF0010 32 2>/dev/null || true)
 case $magic in
