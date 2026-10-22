@@ -87,6 +87,17 @@ constexpr IoctlRequest kPrimitiveSetKey =
 constexpr IoctlRequest kPrimitiveRun =
     static_cast<IoctlRequest>(_IOWR(0xb7, 0x06, KernelPrimitiveRequest));
 
+struct KernelCmRequest {
+    uint32_t version, flags;
+    uint64_t src, dst;
+    uint32_t size, capacity, header_size, roc;
+    uint8_t iv[16];
+    uint32_t tag_size, reserved;
+};
+static_assert(sizeof(KernelCmRequest) == 64, "unexpected AES-CM request layout");
+constexpr IoctlRequest kCmBatch =
+    static_cast<IoctlRequest>(_IOWR(0xb7, 0x07, KernelBatchRequest));
+
 struct Session {
     int fd = -1;
     uint32_t auth_tag_size = kAuthTagSize;
@@ -248,9 +259,10 @@ int32_t primitive_create(uint32_t algorithm, const uint8_t *key,
     if (result != nullptr) *result = nullptr;
     const bool ctr = algorithm == ONEKVM_CRYPTO_ALGORITHM_AES_CTR;
     const bool hmac = algorithm == ONEKVM_CRYPTO_ALGORITHM_HMAC_SHA1;
-    if (result == nullptr || (key_size && key == nullptr) || (!ctr && !hmac) ||
+    const bool cm = algorithm == ONEKVM_CRYPTO_ALGORITHM_AES_CM;
+    if (result == nullptr || (key_size && key == nullptr) || (!ctr && !hmac && !cm) ||
         (ctr && key_size != 16 && key_size != 24 && key_size != 32) ||
-        (hmac && key_size > 64)) {
+        (hmac && key_size > 64) || (cm && key_size != 36)) {
         set_error(error, error_capacity, "invalid primitive session", EINVAL);
         return -EINVAL;
     }
@@ -310,6 +322,56 @@ int32_t primitive_run(void *opaque, onekvm_crypto_primitive_request_v1 *request,
     return 0;
 }
 
+int32_t cm_seal_batch(void *opaque, onekvm_crypto_cm_request_v1 *requests,
+                      uint32_t count, uint32_t *completed,
+                      char *error, uint32_t error_capacity) {
+    if (completed) *completed = 0;
+    auto *session = static_cast<Session *>(opaque);
+    if (!session || session->primitive != ONEKVM_CRYPTO_ALGORITHM_AES_CM ||
+        !completed || count > kMaxBatch || (count && !requests)) return -EINVAL;
+    if (!count) return 0;
+    // Only submitted entries are initialized; clearing the full 128-entry
+    // array per frame adds work unrelated to the actual packet count.
+    std::array<KernelCmRequest, kMaxBatch> native;
+    for (uint32_t i = 0; i < count; ++i) {
+        auto &r = requests[i];
+        r.output_size = 0;
+        if (r.struct_size < sizeof(r) || r.flags || !r.src_ptr || !r.dst_ptr ||
+            r.src_size > kMaxInput - 4 || r.header_size < 12 || r.header_size > r.src_size ||
+            (r.tag_size != 4 && r.tag_size != 10) || r.dst_capacity < r.src_size + r.tag_size) {
+            set_error(error, error_capacity, "invalid AES-CM request", EINVAL);
+            return -EINVAL;
+        }
+        native[i].version = kKernelABIVersion;
+        native[i].flags = 0;
+        native[i].reserved = 0;
+        native[i].src = r.src_ptr;
+        native[i].dst = r.dst_ptr;
+        native[i].size = r.src_size;
+        native[i].capacity = r.dst_capacity;
+        native[i].header_size = r.header_size;
+        native[i].roc = r.roc;
+        native[i].tag_size = r.tag_size;
+        std::memcpy(native[i].iv, r.iv, 16);
+    }
+    KernelBatchRequest batch{};
+    batch.version = kKernelABIVersion;
+    batch.count = count;
+    batch.requests_ptr = reinterpret_cast<uintptr_t>(native.data());
+    if (::ioctl(session->fd, kCmBatch, &batch) != 0) {
+        *completed = batch.completed;
+        return fail_errno(error, error_capacity, "AES-CM batch");
+    }
+    *completed = batch.completed;
+    if (batch.completed != count) {
+        set_error(error, error_capacity, "incomplete AES-CM batch", EIO);
+        return -EIO;
+    }
+    for (uint32_t i = 0; i < count; ++i)
+        requests[i].output_size = requests[i].src_size + requests[i].tag_size;
+    return 0;
+}
+
 const onekvm_crypto_backend_v1 kBackend = {
     sizeof(onekvm_crypto_backend_v1),
     ONEKVM_CRYPTO_BACKEND_ABI_V1,
@@ -332,6 +394,7 @@ const onekvm_crypto_backend_v1 kBackend = {
     primitive_run,
     kMaxPrimitiveInput,
     0,
+    cm_seal_batch,
 };
 
 } // namespace
@@ -353,6 +416,7 @@ extern "C" ONEKVM_CRYPTO_EXPORT int32_t onekvm_crypto_backend_query(
             if (::ioctl(fd, kGetCaps, &caps) == 0) {
                 if (caps & 1u) api.features |= ONEKVM_CRYPTO_FEATURE_AES_CTR;
                 if (caps & 2u) api.features |= ONEKVM_CRYPTO_FEATURE_HMAC_SHA1;
+                if (caps & 8u) api.features |= ONEKVM_CRYPTO_FEATURE_AES_CM_TX_BATCH;
                 if (caps & 4u) api.features |= ONEKVM_CRYPTO_FEATURE_CONCURRENT_H265_VIDEO;
             }
             ::close(fd);

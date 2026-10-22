@@ -30,9 +30,11 @@ extern "C" {
 #define ONEKVM_CRYPTO_FEATURE_CONCURRENT_H265_VIDEO (1ull << 2)
 #define ONEKVM_CRYPTO_FEATURE_AES_CTR (1ull << 3)
 #define ONEKVM_CRYPTO_FEATURE_HMAC_SHA1 (1ull << 4)
+#define ONEKVM_CRYPTO_FEATURE_AES_CM_TX_BATCH (1ull << 5)
 
 #define ONEKVM_CRYPTO_ALGORITHM_AES_CTR 1u
 #define ONEKVM_CRYPTO_ALGORITHM_HMAC_SHA1 2u
+#define ONEKVM_CRYPTO_ALGORITHM_AES_CM 3u
 
 struct onekvm_crypto_request_v1 {
     uint32_t struct_size;
@@ -61,6 +63,16 @@ struct onekvm_crypto_primitive_request_v1 {
     uint32_t output_size;
     uint8_t iv[16];
     uint32_t iv_size;
+};
+
+/* Whole RTP packet in/out; ROC is authenticated but is not transmitted.
+ * Algorithm AES_CM keys concatenate 16-byte AES and 20-byte HMAC keys. */
+struct onekvm_crypto_cm_request_v1 {
+    uint32_t struct_size, flags;
+    uint64_t src_ptr, dst_ptr;
+    uint32_t src_size, dst_capacity, header_size, roc;
+    uint8_t iv[16];
+    uint32_t tag_size, output_size;
 };
 
 struct onekvm_crypto_backend_v1 {
@@ -96,6 +108,12 @@ struct onekvm_crypto_backend_v1 {
         char *error, uint32_t error_capacity);
     uint32_t max_primitive_input;
     uint32_t primitive_reserved;
+
+    /* Optional AES-CM batching; check the full tail size and feature bit. */
+    int32_t (*cm_seal_batch)(
+        void *session, struct onekvm_crypto_cm_request_v1 *requests,
+        uint32_t count, uint32_t *completed,
+        char *error, uint32_t error_capacity);
 };
 
 typedef int32_t (*onekvm_crypto_backend_query_fn)(
