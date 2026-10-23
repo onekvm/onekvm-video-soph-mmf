@@ -20,7 +20,7 @@ SRC_URI = " \
     file://onekvm-video-soph-mmf-optional-modules.timer \
     file://onekvm-video-soph-mmf-modules.conf \
 "
-SRCREV = "958ab375eb5ed40b73acd857b56dd4710ab4dc90"
+SRCREV = "614258a9e645333f66ea5c57670a1650272873a7"
 BB_GIT_SHALLOW = "1"
 BB_GIT_SHALLOW_DEPTH = "1"
 B = "${WORKDIR}/build"
