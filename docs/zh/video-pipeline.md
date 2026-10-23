@@ -72,6 +72,27 @@ MMF 资源策略仍为一路 H264/H265 加一路 JPEG。双 H264、双 H265 的�
 
 ## VENC reader
 
+同步绑定模式的 fd 就绪条件必须同时满足：已有编码帧，且 `sem_send` 已发布可取的
+stream。仅看 `u32LeftStreamFrames` 会在 worker 发布之前提前返回可读，导致非阻塞
+`GetStream` 反复 BUSY；仅看信号量又可能抢走 worker 的初始启动 token。poll 只观察
+这两个条件，不消费 token；异步、隔离发送和非绑定路径保留原来的队列计数语义。
+
+H.264/H.265 的用户态 MMF runtime 按通道缓存 pack 占用的物理页映射，最多 256 项、
+4 MiB。`GetStream` 为每个 pack 固定映射，`ReleaseStream` 解除固定；LRU 只淘汰未固定
+的映射，防止同一 AU 后面的 pack 使前面的视图失效。超限或全部固定时使用一次性映射，
+成功 reset/destroy 后清空。JPEG 保留一次性映射。缓存不改变缓冲所有权，也不能替代
+内核在发布 DMA 输出前的 cache invalidate/flush。
+
+内核同步绑定 worker 的 pack 描述数组随通道上下文预分配，容量为驱动的
+`MAX_NUM_PACKS`；逐帧取流和释放只复用该数组，退出 worker 后才可销毁通道。
+编码器字符设备每次 open 另有独立的 ioctl 暂存数组，使用现有的通道 ioctl
+信号量保护，包括共享 fd、dup 和不同 open 的并发调用。它只借给
+`CVI_VENC_GetStreamInto`，复制回用户态后仍由文件对象持有，失败时不能 vfree；
+最后一个文件引用释放后再 kfree。原 `CVI_VENC_GetStream` 的分配所有权不变，
+供其他内核调用者使用。用户态结构和 ioctl ABI 不变，JPEG 暂存描述仍清零。
+`prealloc_bind_packs`、`prealloc_ioctl_packs` 默认为真且加载后只读，可分别关闭
+做对照；不能在运行中切换缓冲所有权。
+
 独立线程 `GetStream`。用户态有界队列最多 16 个 AU，只吸收同步 CryptoDMA/发送的短暂调度停顿。
 队满时不能等消费者，否则约 50 ms 的停顿就会把背压传回 VPSS 并触发 `VENC waitq is full`。
 reader 必须立刻丢掉陈旧链、在两次 `GetStream` 之间请求一次新 IDR，并继续排空硬件流。
@@ -201,6 +222,9 @@ VI `FrameRate` 列开机约 1 秒是 0，不能单靠这一列判无信号。已
 驱动侧 bind worker 的生命周期由 `osdrv-sg200x` 源码处理（显式 task 引用、completion、Destroy 前 join）。
 `soph_sys`、`soph_base`、`soph_vc_driver` 必须来自同一模块包，禁止单独热替换 vc 模块。
 该生命周期由 MMF 和匹配驱动处理，Core/systemd 不做模块重载或清池 workaround。
+
+H.26x ready eventfd 只在入队、错误及控制状态变化时通知；消费者出队不回写 ready。
+等待方必须先检查队列，清空通知后再检查队列，最后才 poll，避免丢唤醒或遗漏队列内的 AU。
 
 ## 延迟
 

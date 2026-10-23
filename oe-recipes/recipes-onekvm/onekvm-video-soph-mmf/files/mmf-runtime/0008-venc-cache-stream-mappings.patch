@@ -1,0 +1,99 @@
+From: OneKVM <dev@onekvm.local>
+Subject: [PATCH] venc: retain bounded pack page mappings until reset or destroy
+
+Upstream-Status: Inappropriate [OneKVM runtime performance]
+
+--- a/modules/venc/src/cvi_venc.c
++++ b/modules/venc/src/cvi_venc.c
+@@ -5,6 +5,7 @@
+ #include <stdlib.h>
+
+ #include "devmem.h"
++#include "venc_stream_map.h"
+ #include "cvi_venc.h"
+
+ #include <linux/cvi_vc_drv_ioctl.h>
+@@ -42,6 +43,9 @@
+
+ CVI_S32 s32VencFd[VENC_MAX_CHN_NUM] = {0};
+ CVI_U8 *pStreamPackArray[VENC_MAX_CHN_NUM][8] = {NULL};
++static struct venc_stream_maps stream_maps[VENC_MAX_CHN_NUM];
++static int stream_tokens[VENC_MAX_CHN_NUM][8];
++static CVI_BOOL cache_stream_maps[VENC_MAX_CHN_NUM];
+
+ static CVI_S32 cviGetEnv(CVI_CHAR *env, CVI_CHAR *fmt, CVI_VOID *param)
+ {
+@@ -144,6 +148,8 @@
+ 			return s32Ret;
+ 		}
+ 		u32ChannelCreatedCnt += 1;
++		cache_stream_maps[VeChn] = pstAttr->stVencAttr.enType == PT_H264 ||
++			pstAttr->stVencAttr.enType == PT_H265;
+ 	} else {
+ 		CVI_VENC_ERR("fail to open device %s\n", devName);
+ 		s32Ret = CVI_FAILURE;
+@@ -161,6 +167,7 @@
+ 			CVI_VENC_ERR("ioctl CVI_VC_VENC_DESTROY_CHN fail with %d\n", s32Ret);
+ 			return s32Ret;
+ 		}
++		venc_stream_maps_clear(&stream_maps[VeChn]);
+ 		close(s32VencFd[VeChn]);
+ 		s32VencFd[VeChn] = 0;
+ 	}
+@@ -177,7 +184,10 @@
+ CVI_S32 CVI_VENC_ResetChn(VENC_CHN VeChn)
+ {
+ 	if (s32VencFd[VeChn] > 0) {
+-		return ioctl(s32VencFd[VeChn], CVI_VC_VENC_RESET_CHN);
++		CVI_S32 ret = ioctl(s32VencFd[VeChn], CVI_VC_VENC_RESET_CHN);
++		if (ret == CVI_SUCCESS)
++			venc_stream_maps_clear(&stream_maps[VeChn]);
++		return ret;
+ 	}
+ 	return CVI_FAILURE;
+ }
+@@ -237,11 +247,33 @@
+ 			CVI_U32 i = 0;
+ 			VENC_PACK_S *ppack;
+
++			if (pstStream->u32PackCount > 8) {
++				ioctl(s32VencFd[VeChn], CVI_VC_VENC_RELEASE_STREAM, pstStream);
++				return CVI_FAILURE;
++			}
+ 			for (i = 0; i < pstStreamEx->pstStream->u32PackCount; i++) {
+ 				ppack = &pstStreamEx->pstStream->pstPack[i];
+ 				if (ppack->u64PhyAddr && ppack->u32Len) {
+ 					pStreamPackArray[VeChn][i] = ppack->pu8Addr;
+-					ppack->pu8Addr = devm_map(s32DevmemFd, ppack->u64PhyAddr, ppack->u32Len);
++					stream_tokens[VeChn][i] = -1;
++					ppack->pu8Addr = cache_stream_maps[VeChn]
++						? venc_stream_map_acquire(&stream_maps[VeChn], s32DevmemFd,
++							ppack->u64PhyAddr, ppack->u32Len, &stream_tokens[VeChn][i])
++						: devm_map(s32DevmemFd, ppack->u64PhyAddr, ppack->u32Len);
++					if (!ppack->pu8Addr) {
++						CVI_U32 mapped;
++						ppack->pu8Addr = pStreamPackArray[VeChn][i];
++						for (mapped = 0; mapped < i; ++mapped) {
++							VENC_PACK_S *pack = &pstStream->pstPack[mapped];
++							if (pack->u64PhyAddr && pack->u32Len) {
++								venc_stream_map_release(&stream_maps[VeChn], stream_tokens[VeChn][mapped],
++									pack->pu8Addr, pack->u32Len);
++								pack->pu8Addr = pStreamPackArray[VeChn][mapped];
++							}
++						}
++						ioctl(s32VencFd[VeChn], CVI_VC_VENC_RELEASE_STREAM, pstStream);
++						return CVI_FAILURE;
++					}
+ 				}
+ 			}
+ 		}
+@@ -259,7 +291,8 @@
+ 		for (i = 0; i < pstStream->u32PackCount; i++) {
+ 			ppack = &pstStream->pstPack[i];
+ 			if (ppack->u64PhyAddr && ppack->u32Len) {
+-				devm_unmap(ppack->pu8Addr, ppack->u32Len);
++				venc_stream_map_release(&stream_maps[VeChn], stream_tokens[VeChn][i],
++					ppack->pu8Addr, ppack->u32Len);
+ 				ppack->pu8Addr = pStreamPackArray[VeChn][i];
+ 			}
+ 		}

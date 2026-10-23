@@ -30,6 +30,30 @@ teardown, and snapshot rules are in the Chinese
 [video-pipeline.md](../zh/video-pipeline.md).
 ABI details are in [abi.md](abi.md).
 
+In synchronous bind mode, VENC poll readiness requires both an encoded frame
+and a published `sem_send` token. Poll never consumes that token. The frame
+check protects the worker's initial start token; the semaphore check prevents
+premature readiness and repeated nonblocking `GetStream` BUSY returns.
+
+The MMF runtime caches H.264/H.265 pack page mappings per channel, bounded to
+256 entries and 4 MiB. Packs pin their views from `GetStream` to
+`ReleaseStream`; eviction only uses unpinned entries. Oversized or fully pinned
+requests use temporary mappings, and successful channel reset/destroy clears
+the cache. JPEG keeps temporary mappings. Kernel DMA cache maintenance remains
+required before publishing each stream.
+
+The kernel synchronous bind worker reuses a channel-owned `MAX_NUM_PACKS`
+descriptor array. Each encoder open file description owns a separate ioctl
+scratch array, protected by the existing per-channel ioctl semaphore, including
+shared and duplicated file descriptors. `CVI_VENC_GetStreamInto` borrows this
+array through the userspace copy; error paths must not free it. Final file
+release frees the scratch, and channel destruction joins the worker before
+freeing its context. The original `CVI_VENC_GetStream` allocation contract and
+userspace ioctl ABI remain unchanged. JPEG scratch is still zeroed.
+The read-only load parameters `prealloc_bind_packs` and `prealloc_ioctl_packs`
+default to true and allow separate comparisons without changing ownership on a
+running channel.
+
 The backend is one shared library:
 
 ```text

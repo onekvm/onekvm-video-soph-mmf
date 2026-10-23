@@ -16,6 +16,8 @@ SRC_URI = " \
     file://0005-isp-tools-use-python3.patch \
     file://0006-libraries-leave-stripping-to-the-packager.patch \
     file://0007-sys-accept-oe-link-flags.patch \
+    file://0008-venc-cache-stream-mappings.patch \
+    file://venc_stream_map.h \
 "
 SRCREV_mpi = "75c181ee6e25baca9729a4a9b415f36180b54f93"
 SRCREV_sensors = "f064b02ba8a82746f3e87a2c5bb3bd683ff95db0"
@@ -32,6 +34,7 @@ PACKAGE_ARCH = "${MACHINE_ARCH}"
 DEPENDS += "patchelf-native python3-native virtual/kernel xxd-native"
 
 do_configure() {
+    install -m 0644 "${UNPACKDIR}/venc_stream_map.h" "${S}/modules/venc/src/venc_stream_map.h"
     # SensorSupportList is a standalone repository in current Sophgo sources;
     # cvi_mpi expects it at component/isp while building the selected sensor.
     install -d "${S}/component/isp" "${B}/vendor-config"

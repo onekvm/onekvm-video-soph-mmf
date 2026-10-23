@@ -1752,7 +1752,7 @@ int take_ready_h26x_into(int ch, std::vector<uint8_t> *dst, bool *key_frame,
 	} else {
 		recycle_reader_buffer(reader, std::move(packet.data));
 	}
-	notify_h26x_reader(reader);
+	/* Dequeue does not create readiness; producer/control paths notify. */
 	return size;
 }
 
@@ -1780,7 +1780,7 @@ int take_ready_h26x_packet(int ch, uint8_t *dst, int capacity, bool *key_frame)
 		*key_frame = front.key_frame;
 	recycle_reader_buffer(reader, std::move(front.data));
 	reader.queue.pop_front();
-	notify_h26x_reader(reader);
+	/* Dequeue does not create readiness; producer/control paths notify. */
 	return size;
 }
 

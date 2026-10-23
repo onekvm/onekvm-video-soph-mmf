@@ -18,6 +18,11 @@ function(onekvm_enable_warnings target)
 endfunction()
 
 if(BUILD_TESTING)
+    add_executable(venc_stream_map_test tests/venc-stream-map-test.c)
+    target_compile_features(venc_stream_map_test PRIVATE c_std_11)
+    onekvm_enable_warnings(venc_stream_map_test)
+    add_test(NAME venc-stream-map COMMAND venc_stream_map_test)
+
     add_executable(packet_buffer_pool_test tests/packet-buffer-pool-test.cpp)
     target_include_directories(packet_buffer_pool_test PRIVATE include)
     target_compile_features(packet_buffer_pool_test PRIVATE cxx_std_17)
