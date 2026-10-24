@@ -86,7 +86,7 @@ static int normalized_output_fps(int fps, int width = 0, int height = 0,
     const uint64_t packed = source->cached_input_size.load(std::memory_order_acquire);
     const int input_fps = source->cached_input_fps.load(std::memory_order_relaxed);
     if (input_fps > 0)
-        fps = std::min(fps > 0 ? fps : 30, input_fps);
+        fps = std::min(fps > 0 ? fps : input_fps, input_fps);
     return mmf::clamp_pipeline_fps(fps, static_cast<int>(packed >> 32),
         static_cast<int>(packed & 0xffffffffu), width, height);
 }

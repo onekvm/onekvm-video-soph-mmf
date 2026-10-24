@@ -910,7 +910,8 @@ int maybe_rearm_csi_half_rate(Encoder *encoder, Source *source,
         return 0;
     source->last_half_rate_check_ns = now_ns;
 
-    const int fps = encoder->config.fps > 0 ? encoder->config.fps : 60;
+    const int fps = encoder->config.fps > 0 ? encoder->config.fps :
+        std::max(1, source->cached_input_fps.load(std::memory_order_relaxed));
     const int target = mmf::clamp_output_fps(
         fps, encoder->width, encoder->height);
     const int enc_fps = static_cast<int>(mmf::h26x_last_enc_fps(encoder->channel));
@@ -1011,7 +1012,7 @@ void hdmi_watch_loop(Source *source) {
                         const auto input = source->input_resolution.current();
                         const auto [width, height] = source_output_size(source);
                         const int fps = mmf::clamp_pipeline_fps(
-                            std::min(source->config.fps > 0 ? source->config.fps : 60, observed_fps),
+                            std::min(source->config.fps > 0 ? source->config.fps : observed_fps, observed_fps),
                             input.width, input.height, width, height);
                         if (mmf::update_capture_frame_rate(source->channel, fps, observed_fps) == 0) {
                             source->cached_input_fps.store(observed_fps, std::memory_order_relaxed);
@@ -1131,7 +1132,7 @@ int32_t source_reset(void *opaque, const onekvm_video_source_config_v1 *config,
     const int height = static_cast<int>(output.height);
     const int input_fps = std::max(1, source->cached_input_fps.load(std::memory_order_relaxed));
     const int fps = onekvm::mmf::clamp_pipeline_fps(
-        std::min(config->fps > 0 ? static_cast<int>(config->fps) : 60, input_fps),
+        std::min(config->fps > 0 ? static_cast<int>(config->fps) : input_fps, input_fps),
         static_cast<int>(source->input_resolution.current().width),
         static_cast<int>(source->input_resolution.current().height),
         width, height);
@@ -1263,10 +1264,10 @@ int32_t source_read(void *opaque, onekvm_video_frame_v1 *frame,
             source->failures = 0;
             source->last_recovery = now;
             const auto [reset_width, reset_height] = source_output_size(source);
-            const int reset_fps = source->config.fps > 0
-                ? static_cast<int>(source->config.fps) : 60;
             const int input_fps = std::max(1,
                 source->cached_input_fps.load(std::memory_order_relaxed));
+            const int reset_fps = source->config.fps > 0
+                ? static_cast<int>(source->config.fps) : input_fps;
             const auto input = source->input_resolution.current();
             int reset = mmf::reset_capture_channel(
                 source->channel, reset_width, reset_height, kMMFNV21,
