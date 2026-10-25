@@ -23,6 +23,8 @@ HDMI 源
 | VENC reader | 唯一的 `GetStream` 所有者。参数集、IDR、改 FPS/码率都在这个线程、两次取流之间做。 |
 | 受管截图 | `source_snapshot` 复用已有 VPSS，另开 JPEG。扩展不得再开第二个 MMF source。 |
 
+持续自适应的纯码率/QP 更新不请求 IDR，也不重复写入相同 QP 参数；它们保持参考帧链。只有实际 FPS/GOP 变化沿用重同步请求，启动、丢帧恢复和显式请求仍各自处理关键帧。否则每次调码率都会制造大关键帧突发，干扰弱网反馈。
+
 1:1 输出也走 **VI→VPSS→VENC**。VPSS 是 online 出口，并做 UYVY→NV21。
 `SYS_Bind(VI,VENC)` 可以 ioctl 成功，但解开 VI→VPSS 后 Preraw `IntCnt` 会停在 0，
 `EncodedFrame=0`。双绑 VI→VPSS+VENC 会在几块 UYVY 池耗尽后变成 `VENC waitq is full`。

@@ -96,6 +96,7 @@ struct H26xEncoderState {
 	VENC_STREAM_S stream;
 	VENC_PACK_S packs[MMF_VENC_INTERNAL_PACKS];
 	H26xEncoderConfig cfg;
+	RateControl rate_control;
 	uint32_t staging_pool_id;
 	uint64_t last_submit_ns;
 	uint64_t last_encode_ns;

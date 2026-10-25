@@ -403,6 +403,7 @@ static int create_h26x_channel(int ch, const H26xEncoderConfig &config,
 	info->staging_frame = NULL;
 	info->stream.pstPack = info->packs;
 	memcpy(&info->cfg, cfg, sizeof(*cfg));
+	info->rate_control = *rc;
 	info->initialized = 1;
 	info->receiver_started = 0;
 	g_runtime.h26x_encoder_active = 1;
@@ -1348,13 +1349,19 @@ static int apply_h26x_rate_control(int ch, int output_fps, int gop,
 			ch, output_fps, gop, bitrate_kbps);
 	}
 
-	if ((mask & kH26xRcQp) == 0)
+	const auto &current_rc = g_runtime.h26x_encoders[ch].rate_control;
+	if ((mask & kH26xRcQp) == 0 ||
+	    (initial_qp == current_rc.initial_qp && min_qp == current_rc.min_qp && max_qp == current_rc.max_qp))
 		return 0;
 	RateControl rc{};
 	rc.initial_qp = initial_qp;
 	rc.min_qp = min_qp;
 	rc.max_qp = max_qp;
-	return _set_venc_rc_param(ch, &cfg, &rc);
+	const int ret = _set_venc_rc_param(ch, &cfg, &rc);
+	if (ret == 0) {
+		g_runtime.h26x_encoders[ch].rate_control = rc;
+	}
+	return ret;
 }
 
 int set_h26x_output_fps(int ch, int output_fps, int gop)
@@ -1516,6 +1523,12 @@ int start_h26x_reader(int ch, bool request_idr)
 			const uint32_t rc_mask = self.pending_rc_mask.exchange(
 				0, std::memory_order_acq_rel);
 			if (rc_mask != 0) {
+				const auto &previous = g_runtime.h26x_encoders[ch].cfg;
+				const bool timing_changed = (rc_mask & kH26xRcFpsGop) != 0 &&
+					(self.pending_output_fps.load(std::memory_order_relaxed) != previous.output_fps ||
+					 self.pending_gop.load(std::memory_order_relaxed) != previous.gop);
+				/* Bitrate/QP changes preserve the reference chain. Forcing an IDR
+				 * for each ABR step creates repeated large bursts on a weak link. */
 				if (apply_h26x_rate_control(
 					    ch,
 					    self.pending_output_fps.load(std::memory_order_relaxed),
@@ -1524,7 +1537,7 @@ int start_h26x_reader(int ch, bool request_idr)
 					    self.pending_initial_qp.load(std::memory_order_relaxed),
 					    self.pending_min_qp.load(std::memory_order_relaxed),
 					    self.pending_max_qp.load(std::memory_order_relaxed),
-					    rc_mask) == 0)
+					    rc_mask) == 0 && timing_changed)
 					self.want_idr.store(true, std::memory_order_relaxed);
 			}
 			if (!self.want_idr.load(std::memory_order_relaxed))
