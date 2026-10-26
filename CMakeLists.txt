@@ -75,6 +75,11 @@ if(BUILD_TESTING)
     target_compile_features(edid_board_test PRIVATE cxx_std_17)
     onekvm_enable_warnings(edid_board_test)
     add_test(NAME edid-board COMMAND edid_board_test)
+
+    add_executable(lt6911_info_test tests/lt6911-info-test.cpp)
+    target_compile_features(lt6911_info_test PRIVATE cxx_std_17)
+    onekvm_enable_warnings(lt6911_info_test)
+    add_test(NAME lt6911-info COMMAND lt6911_info_test)
 endif()
 
 if(NOT ONEKVM_BUILD_MMF_BACKEND)

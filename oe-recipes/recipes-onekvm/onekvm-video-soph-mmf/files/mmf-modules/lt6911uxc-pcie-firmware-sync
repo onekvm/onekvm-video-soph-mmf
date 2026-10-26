@@ -40,7 +40,6 @@ wr() { "$I2C" -y -f 4 w2@0x2b "$1" "$2" >/dev/null; }
 bank() { wr 0xff "$1"; }
 reset_fifo() { bank 0x80; wr 0x5a 0x84; sleep 0.001; wr 0x5a 0x80; }
 close_flash() { bank 0x80; wr 0xee 0x00; }
-trap close_flash EXIT
 open_flash() {
   bank 0x80
   wr 0xee 0x01
@@ -118,6 +117,22 @@ normalize() {
   printf '%s\n' "$1" | tr 'A-F' 'a-f' | tr '\n' ' ' | sed 's/0x//g; s/  */ /g; s/^ //; s/ $//'
 }
 
+# A board label is not a chip identity. Check the actual UXC register ID
+# before issuing any flash/FIFO commands; never use a previous Core cache.
+bank 0x80
+wr 0xee 0x01
+trap close_flash EXIT
+bank 0x81
+chip_id=$("$I2C" -y -f 4 w1@0x2b 0x00 r3) || {
+  log "cannot read chip ID; refusing firmware access"
+  exit 1
+}
+chip_id=$(normalize "$chip_id")
+if [ "$chip_id" != '17 04 83' ]; then
+  log "chip ID '$chip_id' is not LT6911UXC; refusing firmware access"
+  exit 1
+fi
+
 expect_1a60="22 12 52 a6 7f 24 7e 00 12 54 de 90 b0 02 e0 44 08 f0 12 1f 84 90 02 7b e0 70 03 02 1b c9 7f 32"
 expect_1a80="7e 00 12 54 de 90 b0 04 e0 44 20 f0 12 57 30 90 b0 04 e0 54 df f0 7f 24 7e 00 12 54 de 12 57 30"
 expect_1ae0="c3 f9 f8 d3 12 17 c4 40 0a 7f 14 7e 00 12 54 de 12 57 30 90 b0 a2 e0 ff 20 e4 06 20 e0 03 30 e5"
@@ -156,6 +171,28 @@ if [ "$programmable" -eq 0 ]; then
   exit 0
 fi
 
+# NOR-compatible bytes alone do not identify firmware. Only the audited
+# program may receive this device-specific patch. Full dump verifies two
+# independent reads and saves a durable backup before any programming.
+dump=/usr/libexec/onekvm/lt6911-flash-dump
+[ -x "$dump" ] || { log "firmware verifier unavailable; left unchanged"; exit 1; }
+backup_dir=/var/lib/onekvm/capture-firmware/lt6911uxc
+mkdir -p "$backup_dir"
+backup_work=$(mktemp -d "$backup_dir/.before-stage6.XXXXXX")
+cleanup() { close_flash; rm -rf "$backup_work"; }
+trap cleanup EXIT
+close_flash
+"$dump" uxc /dev/i2c-4 "$backup_work/flash.bin"
+program_hash=$(dd if="$backup_work/flash.bin" bs=24576 count=1 2>/dev/null | sha256sum)
+program_hash=${program_hash%% *}
+if [ "$program_hash" != 442226df921c461d877f2cd6107057368f86f7112d9624025a5a4d5c97cfc6d6 ]; then
+  log "unrecognized firmware program $program_hash; left unchanged"
+  exit 0
+fi
+mv "$backup_work/flash.bin" "$backup_dir/before-stage6.bin"
+sync
+open_flash
+
 log "programming stage6 pages"
 bank 0x80
 wr 0x5e 0xdf
@@ -179,7 +216,21 @@ for name in $pages; do
   fi
 done
 log "pages verified; releasing flash and resetting the bridge"
-trap - EXIT
 close_flash
+"$dump" uxc /dev/i2c-4 "$backup_work/after.bin"
+program_hash=$(dd if="$backup_work/after.bin" bs=24576 count=1 2>/dev/null | sha256sum)
+program_hash=${program_hash%% *}
+if [ "$program_hash" != 59af01e8c7ff7363abaeda4aff5a94745ec701318d803ec6cf76250545d8cee9 ]; then
+  log "full firmware program verification failed; refusing bridge reset"
+  exit 1
+fi
+before_tail=$(dd if="$backup_dir/before-stage6.bin" bs=24576 skip=1 2>/dev/null | sha256sum)
+after_tail=$(dd if="$backup_work/after.bin" bs=24576 skip=1 2>/dev/null | sha256sum)
+if [ "$before_tail" != "$after_tail" ]; then
+  log "firmware metadata changed unexpectedly; refusing bridge reset"
+  exit 1
+fi
+cleanup
+trap - EXIT
 reload_bridge
 log "stage6 image installed"

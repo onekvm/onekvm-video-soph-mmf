@@ -2,7 +2,7 @@ SUMMARY = "Sophgo MMF native video backend for OneKVM"
 HOMEPAGE = "https://github.com/onekvm/onekvm-video-soph-mmf"
 LICENSE = "CLOSED"
 PV = "0.2.0"
-PR = "r1"
+PR = "r2"
 OPKGBUILDCMD = "opkg-build -Z gzip"
 
 ONEKVM_COMPONENT_GIT_URI ??= "git://github.com/onekvm/onekvm-video-soph-mmf.git;protocol=https;branch=main"

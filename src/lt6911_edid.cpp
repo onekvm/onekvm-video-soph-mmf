@@ -1,4 +1,5 @@
 #include "lt6911_edid.hpp"
+#include "lt6911_info.hpp"
 
 #include "mmf.hpp"
 #include "onekvm_video_backend_internal.hpp"
@@ -377,6 +378,7 @@ EdidBoardInfo probe_edid_board()
         info.writable = false;
         break;
     }
+    (void)publish_lt6911_info(info);
     return info;
 }
 

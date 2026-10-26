@@ -1,7 +1,7 @@
 SUMMARY = "Sophgo SG2002 multimedia kernel modules"
 HOMEPAGE = "https://github.com/onekvm/osdrv-sg200x"
 LICENSE = "CLOSED"
-PR = "r33"
+PR = "r34"
 
 FILESEXTRAPATHS:prepend := "${THISDIR}/files/mmf-modules:"
 
@@ -154,7 +154,7 @@ FILES:${PN} += " \
     ${nonarch_libdir}/modprobe.d \
     ${nonarch_libdir}/modules-load.d \
 "
-RDEPENDS:${PN} += "kmod i2c-tools onekvm-machine-nanokvm (>= 0.1.0-r5) onekvm-core (>= 0.1.0-r49) onekvm-device-nanokvm-kernel-module-video-decoder"
+RDEPENDS:${PN} += "kmod i2c-tools onekvm-capture-firmware onekvm-machine-nanokvm (>= 0.1.0-r5) onekvm-core (>= 0.1.0-r49) onekvm-device-nanokvm-kernel-module-video-decoder"
 RPROVIDES:${PN} += "onekvm-device-nanokvm-mmf-modules"
 RREPLACES:${PN} += "onekvm-device-nanokvm-mmf-modules"
 RCONFLICTS:${PN} += "onekvm-device-nanokvm-mmf-modules"
