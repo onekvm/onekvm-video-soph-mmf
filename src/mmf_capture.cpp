@@ -795,6 +795,11 @@ int vpss_input_height()
 	return static_cast<int>(g_runtime.vi_size.u32Height);
 }
 
+bool capture_uses_user_frames()
+{
+	return !g_runtime.vi_bound_to_vpss;
+}
+
 int capture_use_user_frames()
 {
 	if (!g_runtime.vi_bound_to_vpss)

@@ -52,10 +52,10 @@ HDMI 源
 - `StartRecvFrame` 必须在 SYS bind 之后。否则 `enable_bind_mode` 仍为假，bind kthread 不会起来。
 - 绑定 VPSS→VENC 时 `bIsoSendFrmEn` 必须关掉。绑定路径从不 `SendFrame`；打开隔离后编码计数涨、`GetStream` 队列为空。
 - 首 AU 到达前不要因 VI `FrameRate=0` 走 `maybe_rebuild` 或打 LT6911 `80ee`。
-- HDMI watcher 的初始信号可能晚于 WebRTC 建链。新绑定或从空闲恢复后，第一个 AU 到达前保留 5 秒首帧窗口；1.5 秒只用于已经出过 AU 的活流停顿。不能因 `cached_signal` 未就绪就 unbind 后直送静帧。
+- HDMI watcher 的初始信号可能晚于 WebRTC 建链。source 重开（包括 EDID 操作）、新绑定，以及同一 VENC 从占位切回 VI 时，都要建立独立的 5 秒首帧窗口；旧 `cached_signal=0`、旧 reader 时间戳或恢复中的 timing 样本不能缩短它。窗口内 watcher 不探测 LT6911、不重建 VI，包路径等待新 AU；超时后才回到有界失锁恢复。1.5 秒只用于已证明活流的停顿。从占位恢复仍须至少三包新 AU、跨越 30 ms，再请求新 IDR 后发布；不能用窗口或时序样本替代真实帧确认。
 - 独占 VI→VENC 超过首帧窗口仍完全没有 AU 时，必须撤销绑定时乐观设置的 `cached_signal=1` 并启动静默失锁探测；不能无限期只请求 IDR。连续 CSI `0x0`、HDMI 仍报当前尺寸时，仅在有绑定消费者且 VI DMA 运行时累计软件重武装样本，不能把参数固定成 `false` 导致恢复门永远打不开。软件恢复重开 source 时不能用旧的 HDMI active-size 计数推断 CSI 已锁定并跳过 `lt6911_start_csi()`。完整 PCIe GPIO 复位后的重开则可以保留真正恢复的桥片锁定。
 - PCIe 冷启动在 CSI 武装前探测 HDMI 2.5 s。优先用窗口内稳定/最大的合法 timing，其次用 `/run/onekvm/last-hdmi-input` 记住的活路分辨率，再才回退 640×480。绑定 640/720×480 bootstrap 时不要把 `cached_signal` 设成 live，否则 watcher 要等占位路径才会 grow 到 1080p，WebRTC 会先锁在 640 SPS。
-- 活路 HDMI watcher 用静默探测：只读 0xd28b/0x85ea/0xe08c 计数，不写 `0x80ee`、不打 `D283`。PCIe 640/720×480 bootstrap 在还没有消费者时也静默探测。完整快照用于 CSI/VI 启动前，以及已进入占位、VI 不再接收真实帧的断信号恢复期；真实 AU 一旦恢复就停止完整快照。
+- 活路 HDMI watcher 用静默探测：只读 0xd28b/0x85ea/0xe08c 计数，不写 `0x80ee`、不打 `D283`。PCIe 640/720×480 bootstrap 在还没有消费者时也静默探测。完整快照用于 CSI/VI 启动前，以及已进入占位、VI 不再接收真实帧的断信号恢复期；C 和 UXC 都必须核对占位阶段及 MMF 实际已解绑 VI→VPSS，不能单靠 `awaiting_hdmi_timing` 或 PCIe 的等待标志推断安全。重新绑定即停止完整快照，先给新采集首帧窗口。
 - 冷启动若已经读到桥片锁定的合法时序，无消费者时不要仅凭静默计数暂时为零就把接收端盲目升到 1080p；这会破坏已锁定的 720×480 输入。只有 fallback bootstrap 才需要空闲 grow 探测，或者等绑定消费者后以真实 AU 判断。
 - Cube WAVE4 进程里只有一个 H.264/H.265 worker。绑定后不要 `DestroyChn` / `StopRecvFrame` 切换 H.264↔H.265。要换编码走设备视频设置的 `ResetVideo`（先 unbind）。
 - RustDesk/RTSP 共用绑定主路；info 报实际 codec。

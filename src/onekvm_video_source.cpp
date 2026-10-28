@@ -351,6 +351,7 @@ int close_source(Source *source) {
     source->capture_width = 0;
     source->capture_height = 0;
     source->capture_live.store(false, std::memory_order_relaxed);
+    source->capture_startup.reset();
     source->preserved_locked_csi = false;
     source->no_signal_frame.clear();
     return 0;
@@ -501,6 +502,7 @@ int open_source(Source *source, const onekvm_video_source_config_v1 *config,
     publish_input_format(source);
     source->no_signal_frame.clear();
     reset_signal_cache(source);
+    source->capture_startup.begin(monotonic_ns());
     return 0;
 }
 
@@ -648,6 +650,11 @@ int rebuild_for_hdmi_timing(Source *source, bool force_probe, char *error,
                             uint32_t error_capacity) {
     if (source == nullptr)
         return 0;
+    // A new VI generation needs time to lock even if the preceding HDMI
+    // episode left cached_signal=0. Neither a forced probe nor old timing
+    // samples may interrupt this bounded trial.
+    if (source->capture_startup.waiting(monotonic_ns()))
+        return 0;
 
     /* VENC last_frame_ns is not HDMI liveness. GetStream can stall while
        CSI is still running; probing LT6911 then interrupts a live frontend.
@@ -687,12 +694,17 @@ int rebuild_for_hdmi_timing(Source *source, bool force_probe, char *error,
 
     onekvm::InputResolution csi{};
     onekvm::InputResolution hdmi{};
-    /* After a true no-signal interval the UXC active-size bank can remain
-       zero in silent reads even after HDMI returns. The placeholder has
-       detached VI, so a gated snapshot is safe until capture resumes. */
-    if (!read_hdmi_timing(&csi, &hdmi,
-                          !source->hdmi_waiting_for_signal))
-        return 0;
+    /* Both C and UXC can retain zero silent counters after HDMI returns.
+       Open 80ee only after VI has actually been detached for user frames;
+       an awaiting flag alone does not mean the new capture is stopped. */
+    {
+        MmfControlLock control;
+        const bool full_probe =
+            source->capture_startup.full_timing_probe_safe() &&
+            mmf::capture_uses_user_frames();
+        if (!read_hdmi_timing(&csi, &hdmi, !full_probe))
+            return 0;
+    }
 
     hdmi = onekvm::infer_hdmi_mode(hdmi);
     if (source->awaiting_hdmi_timing.load(std::memory_order_relaxed)) {

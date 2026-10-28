@@ -242,6 +242,7 @@ int unbind_h26x_from_capture(int ch);
 int vpss_input_width();
 int vpss_input_height();
 int capture_use_user_frames();
+bool capture_uses_user_frames();
 int capture_use_vi_frames();
 int submit_vpss_nv21(const uint8_t *nv21, int width, int height);
 

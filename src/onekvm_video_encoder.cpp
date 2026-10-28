@@ -597,7 +597,8 @@ int bind_encoder_to_source_locked(Encoder *encoder, Source *source,
         ensure_hdmi_watch(source);
         return 0;
     }
-    if (encoder->source_bound && encoder->bound_source == source) {
+    if (encoder->source_bound && encoder->bound_source == source &&
+        !source->capture_startup.placeholder()) {
         ensure_hdmi_watch(source);
         return 0;
     }
@@ -616,6 +617,7 @@ int bind_encoder_to_source_locked(Encoder *encoder, Source *source,
     encoder->prepared_size = 0;
     encoder->prepared_pts_ns = 0;
     encoder->bound_since_ns = monotonic_ns();
+    source->capture_startup.begin(encoder->bound_since_ns);
     if (source->awaiting_hdmi_timing.load(std::memory_order_relaxed)) {
         source->bound_resume_packets = 0;
         source->bound_resume_first_ns = 0;
@@ -736,6 +738,7 @@ int encode_bound_placeholder(Encoder *encoder, Source *source,
             encoder->placeholder_frames = false;
             return -1;
         }
+        source->capture_startup.park();
         if (source->channel >= 0)
             (void)mmf::resume_vpss_channel(source->channel);
         const int push = mmf::submit_vpss_nv21(
@@ -816,6 +819,7 @@ int32_t fill_bound_live_packet(Encoder *encoder, Source *source,
                                const uint8_t *output_data, int result,
                                bool key_frame, bool mark_hdmi, uint64_t encoded_ns) {
     if (mark_hdmi) {
+        source->capture_startup.confirm();
         source->early_blank_samples = 0;
         source->last_frame_ns.store(monotonic_ns(), std::memory_order_relaxed);
         /* A real encoded frame completes the previous recovery. Keep the
@@ -1146,9 +1150,6 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
         const uint64_t live_ns = static_cast<uint64_t>(
             std::chrono::duration_cast<std::chrono::nanoseconds>(
                 kVencLiveRecentWindow).count());
-        const uint64_t first_au_ns = static_cast<uint64_t>(
-            std::chrono::duration_cast<std::chrono::nanoseconds>(
-                kVencFirstAuWindow).count());
         /* cached_signal starts at unknown/no-signal and the HDMI watcher may
            not publish its first sample before Core opens WebRTC.  Do not tear
            down a newly bound producer merely because the VENC worker has not
@@ -1157,10 +1158,9 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
            lock inversion (venc-handler waits for EnterVcodecLock while the
            caller waits for the VPU timelock), permanently pinning the VPSS
            VB pool. */
-        const bool awaiting_first_au = last_live == 0 &&
-            encoder->bound_since_ns != 0 && now >= encoder->bound_since_ns &&
-            now - encoder->bound_since_ns <= first_au_ns;
-        const bool live_recent = last_live != 0 &&
+        const bool awaiting_first_au = source->capture_startup.waiting(now);
+        const bool live_recent = last_live >= encoder->bound_since_ns &&
+            last_live != 0 &&
             now >= last_live && now - last_live <= live_ns;
         const bool venc_stale = last_live != 0 &&
             now > last_live && now - last_live > live_ns;
@@ -1170,7 +1170,8 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
         const uint64_t early_probe_ns = static_cast<uint64_t>(
             std::chrono::duration_cast<std::chrono::nanoseconds>(
                 kPcieBlankProbeDelay).count());
-        if (!missing_signal && last_live != 0 && now > last_live &&
+        if (!awaiting_first_au && !missing_signal &&
+            last_live != 0 && now > last_live &&
             now - last_live >= early_probe_ns &&
             pcie_hdmi_blank_after_stall(source)) {
             source->cached_signal.store(0, std::memory_order_relaxed);
@@ -1186,7 +1187,7 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
             source->bound_resume_packets > 0 &&
             source->bound_resume_first_ns != 0 &&
             now - source->bound_resume_first_ns < 500000000ull;
-        if ((!missing_signal && (awaiting_first_au || live_recent)) ||
+        if (awaiting_first_au || (!missing_signal && live_recent) ||
             awaiting_resume_packets) {
             const int ch = encoder->channel;
             source_lock.unlock();
@@ -1375,8 +1376,11 @@ int32_t encoder_unbind_source(void *opaque, char *error, uint32_t error_capacity
         set_error(error, error_capacity, "park VPSS/VENC capture failed");
         return -1;
     }
-    if (source != nullptr)
+    if (source != nullptr) {
         source->capture_live.store(false, std::memory_order_relaxed);
+        if (!source->capture_startup.placeholder())
+            source->capture_startup.reset();
+    }
     encoder->source_bound = false;
     encoder->frame_pending = false;
     encoder->packet_borrowed = false;

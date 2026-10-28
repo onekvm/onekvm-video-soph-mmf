@@ -3,6 +3,7 @@
 #include <onekvm/video_backend_v1.h>
 
 #include "input_resolution_tracker.hpp"
+#include "capture-startup.hpp"
 #include "mmf.hpp"
 #include "packet-buffer-pool.hpp"
 
@@ -82,12 +83,6 @@ ONEKVM_VIDEO_INTERNAL inline constexpr auto kVencLiveRecentWindow =
    may start HDMI recovery. A transient encoder pause keeps the full grace. */
 ONEKVM_VIDEO_INTERNAL inline constexpr auto kPcieBlankProbeDelay =
     std::chrono::milliseconds(250);
-/* A newly resumed VPSS→VENC path may take longer than the normal live-AU
-   staleness window to emit its first packet. 1.5 s is too short: the packet
-   path then treats "no AU yet" as no HDMI, probes LT6911 80ee, and stalls
-   low-clock CSI before it finishes locking. */
-ONEKVM_VIDEO_INTERNAL inline constexpr auto kVencFirstAuWindow =
-    std::chrono::milliseconds(5000);
 /* Give the LT6911UXC MCU time to restart before probing, then keep the
    previous bounded recovery window if it has not published a new timing. */
 ONEKVM_VIDEO_INTERNAL inline constexpr auto kPcieHDMIResetEarliestProbe =
@@ -128,8 +123,9 @@ struct ONEKVM_VIDEO_INTERNAL Source {
     std::atomic<uint64_t> last_capture_ns{0};
     std::atomic<uint64_t> last_signal_probe_ns{0};
     std::atomic<int> cached_signal{-1};
-    /* After a loss, only a fresh HDMI timing probe may resume live packets.
-       Reopening VI can otherwise publish old VENC AUs as live video. */
+    onekvm::CaptureStartup capture_startup;
+    /* After a loss, several fresh AUs must prove the new producer before
+       packets are published. Timing samples alone cannot prove recovery. */
     std::atomic<bool> awaiting_hdmi_timing{false};
     onekvm::InputResolution hdmi_resume_candidate{};
     unsigned hdmi_resume_samples = 0;
