@@ -31,6 +31,9 @@ int main()
     info.board_id = "cube";
     assert(publish_lt6911_info(info, directory.c_str()));
     assert(read_text(directory + "/chip_id") == "lt6911c\n");
+    info.chip = Lt6911Chip::D;
+    assert(publish_lt6911_info(info, directory.c_str()));
+    assert(read_text(directory + "/chip_id") == "lt6911d\n");
     struct stat st;
     assert(stat((directory + "/chip_id").c_str(), &st) == 0);
     assert((st.st_mode & 0777) == 0444);

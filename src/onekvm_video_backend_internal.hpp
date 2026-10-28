@@ -316,6 +316,9 @@ ONEKVM_VIDEO_INTERNAL int32_t encoder_allocation(
 ONEKVM_VIDEO_INTERNAL int32_t edid_capabilities(onekvm_video_edid_caps_v1 *caps);
 ONEKVM_VIDEO_INTERNAL int32_t edid_get(
     onekvm_video_edid_blob_v1 *edid, char *error, uint32_t error_capacity);
+ONEKVM_VIDEO_INTERNAL int32_t edid_set_mode(
+    const onekvm_video_edid_blob_v1 *, uint32_t,
+    onekvm_video_edid_apply_result_v1 *, char *, uint32_t);
 ONEKVM_VIDEO_INTERNAL int32_t edid_set(
     const onekvm_video_edid_blob_v1 *edid,
     onekvm_video_edid_apply_result_v1 *apply,

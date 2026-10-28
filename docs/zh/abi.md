@@ -77,8 +77,23 @@ KVM 主路是 **bound**：硬件把 VPSS 接到 VENC，Core 只 `encoder_read_pa
 
 库级接口，不依赖 source handle。`edid_set` 成功后通过 `apply_required` 告诉宿主要不要热插拔或重启；库本身不 `reboot`。
 
-- PCIe：可写 + 热插拔（`apply_policy=HOTPLUG`）。
-- Cube / Lite：可写 + 持久，`apply_policy=REBOOT`。库不在 `edid_set` 里重启。
+- PCIe：可写 + 持久 + 热插拔（`apply_policy=HOTPLUG`）；永久写入仍走原 Flash writer。
+- 已验证的 PCIe UXC 固件额外提供 `CAP_TEMPORARY` 与表尾 `edid_set_mode`。
+  启动前核对真实硅片 ID `17 04 83`、Shadow/HPD/看门狗函数的固件字节特征，
+  再验证 RAM 窗口。未知固件不开放临时写入。
+- Cube C 另按真实 ID `16 05`、启动 HPD、RAM writer 和 EDID 来源选择的固件特征
+  检测临时能力。`C090` 仅有已验证的顺序写入协议，不能把读值当作 RAM 内容。
+  使用固件选中的有效永久／内置 EDID和 `/run` 中的上次已知值作为事务恢复基线；
+  基线不明、恢复记录损坏或恢复失败时不开放临时能力。
+- 临时请求固定 256 字节（扩展计数 1），成功返回 `HOTPLUG`；不写 Flash 和
+  `/var/lib/onekvm/edid/active.bin`，也不调用 GPIO reset。RAM 在断电或芯片复位后丢失。
+  写入前暂停该 source 的 MMF；同 source 锁和全局事务锁排除 watcher/encoder，
+  恢复时沿用已有 generation 失效机制重新建流。
+- C 的永久写入在 Shadow 能力通过验证时，保存 Flash 后显式写同一份 RAM EDID
+  并触发 HPD，成功返回 `HOTPLUG`。没有该能力或保存成功后即时应用失败时返回
+  `POWER_CYCLE`，表示已保存、等待激活，不能按写入失败自动重试 Flash。
+  HPD 本身与重启 Linux 均不会重新加载 Flash。PCIe 永久路径保留 GPIO 复位。
+  库不自行重启；UI 不得将 `POWER_CYCLE` 变成系统重启按钮。
 
 ## 加密
 

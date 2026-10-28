@@ -1916,6 +1916,7 @@ const onekvm_video_backend_v1 kBackend = {
     encoder_take_packet,
     encoder_free_taken_packet,
     encoder_color_info,
+    edid_set_mode,
 };
 
 

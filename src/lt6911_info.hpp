@@ -51,6 +51,7 @@ inline bool publish_lt6911_info(const EdidBoardInfo &info,
     const char *chip = "unknown";
     if (info.chip == Lt6911Chip::C) chip = "lt6911c";
     if (info.chip == Lt6911Chip::UXC) chip = "lt6911uxc";
+    if (info.chip == Lt6911Chip::D) chip = "lt6911d";
     return write_text("chip_id", chip) &&
            write_text("board_id", info.board_id) &&
            write_text("driver", "soph-mmf");

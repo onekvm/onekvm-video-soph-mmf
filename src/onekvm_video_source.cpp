@@ -12,6 +12,10 @@ namespace onekvm::video_backend {
 std::recursive_mutex g_mmf_mutex;
 std::recursive_mutex g_mmf_transaction_mutex;
 std::atomic<uint64_t> g_mmf_generation{1};
+namespace {
+std::mutex g_edid_source_mutex;
+Source *g_edid_source = nullptr;
+}
 
 void set_error(char *error, uint32_t capacity, const char *format, ...) {
     if (error == nullptr || capacity == 0) {
@@ -1109,6 +1113,11 @@ int32_t source_create(const onekvm_video_source_config_v1 *config, void **result
         return -1;
     }
     *result = nullptr;
+    std::lock_guard<std::mutex> registry(g_edid_source_mutex);
+    lt6911_edid_initialize();
+    onekvm_video_edid_caps_v1 edid_caps{};
+    edid_caps.struct_size = sizeof(edid_caps);
+    (void)edid_capabilities(&edid_caps); // cache board identity before live VI
     Source *source = new (std::nothrow) Source();
     if (source == nullptr) {
         set_error(error, error_capacity, "allocate source: out of memory");
@@ -1123,7 +1132,31 @@ int32_t source_create(const onekvm_video_source_config_v1 *config, void **result
     }
     ensure_hdmi_watch(source);
     *result = source;
+    g_edid_source = source;
     return 0;
+}
+
+int with_edid_capture_stopped(int (*operation)(void *), void *context,
+                              char *error, uint32_t error_capacity) {
+    std::lock_guard<std::mutex> registry(g_edid_source_mutex);
+    auto *source = g_edid_source;
+    if (!source) {
+        MmfControlLock control;
+        return operation(context);
+    }
+    std::lock_guard<std::mutex> source_lock(source->mutex);
+    MmfControlLock control;
+    const auto config = source->config;
+    if (close_source(source)) {
+        set_error(error, error_capacity, "stop MMF before EDID write");
+        return -1;
+    }
+    const int result = operation(context);
+    // Reopen after both success and rollback, without a GPIO reset that would
+    // reload flash over the temporary EDID. Encoders follow MMF generation.
+    if (open_source(source, &config, error, error_capacity, nullptr, true) != 0)
+        return -1;
+    return result;
 }
 
 int32_t source_reset(void *opaque, const onekvm_video_source_config_v1 *config,
@@ -1369,6 +1402,8 @@ void source_destroy(void *opaque) {
     if (source == nullptr) {
         return;
     }
+    std::lock_guard<std::mutex> registry(g_edid_source_mutex);
+    if (g_edid_source == source) g_edid_source = nullptr;
     stop_hdmi_watch(source);
     {
         std::lock_guard<std::mutex> lock(source->mutex);

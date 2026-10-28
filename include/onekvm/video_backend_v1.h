@@ -123,6 +123,10 @@ enum onekvm_video_edid_apply_v1 {
 #define ONEKVM_VIDEO_EDID_CAP_WRITABLE   (1u << 0)
 #define ONEKVM_VIDEO_EDID_CAP_PERSISTENT (1u << 1)
 #define ONEKVM_VIDEO_EDID_CAP_HOTPLUG    (1u << 2)
+#define ONEKVM_VIDEO_EDID_CAP_TEMPORARY  (1u << 3)
+
+#define ONEKVM_VIDEO_EDID_WRITE_PERMANENT 0u
+#define ONEKVM_VIDEO_EDID_WRITE_TEMPORARY 1u
 
 struct onekvm_video_source_config_v1 {
     uint32_t struct_size;
@@ -442,6 +446,13 @@ struct onekvm_video_backend_v1 {
      * Zero bit_depth is valid when precision is not known. */
     int32_t (*encoder_color_info)(void *encoder,
                                   struct onekvm_video_color_info_v1 *info);
+    /* Optional tail. Legacy edid_set keeps its existing storage semantics.
+     * TEMPORARY requires this callback and CAP_TEMPORARY; never fall back to
+     * edid_set. A temporary write must not persist or require reboot/power. */
+    int32_t (*edid_set_mode)(const struct onekvm_video_edid_blob_v1 *edid,
+                             uint32_t mode,
+                             struct onekvm_video_edid_apply_result_v1 *apply,
+                             char *error, uint32_t error_capacity);
 };
 
 /*

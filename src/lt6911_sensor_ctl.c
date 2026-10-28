@@ -18,6 +18,7 @@
 #include <linux/cvi_comm_video.h>
 #endif
 #include "cvi_sns_ctrl.h"
+#include "lt6911_receiver.h"
 
 void onekvm_lt6911_get_active_size(uint32_t *width, uint32_t *height);
 
@@ -35,6 +36,17 @@ const CVI_U32 lt6911_data_byte = 1;
 
 static int g_fd[VI_MAX_PIPE_NUM] = {[0 ... (VI_MAX_PIPE_NUM - 1)] = -1};
 static int g_pinmux_configured;
+static int g_chip;
+
+int onekvm_lt6911_cached_chip(void)
+{
+    return __atomic_load_n(&g_chip, __ATOMIC_ACQUIRE);
+}
+
+void onekvm_lt6911_cache_chip(int chip)
+{
+    __atomic_store_n(&g_chip, chip, __ATOMIC_RELEASE);
+}
 static pthread_mutex_t g_i2c_lock = PTHREAD_MUTEX_INITIALIZER;
 
 void onekvm_lt6911_i2c_lock(void)
@@ -73,16 +85,6 @@ static void normalize_half_or_full_width(uint32_t *width, uint32_t height)
 		*width *= 2;
 }
 
-static int plausible_active_size(uint32_t width, uint32_t height)
-{
-	if (width < 320 || height < 200)
-		return 0;
-	if (width > 4096 || height > 2160)
-		return 0;
-	if ((width & 1u) != 0 || (height & 1u) != 0)
-		return 0;
-	return 1;
-}
 
 static void configure_pinmux_once(void)
 {
@@ -255,183 +257,132 @@ struct onekvm_lt6911_input_timing {
 	uint32_t uxc_rx_signal;
 };
 
-static void select_hdmi_active_size(uint32_t c_hdmi_width, uint32_t c_hdmi_height,
-				    uint32_t uxc_width, uint32_t uxc_height,
-				    uint32_t d_width, uint32_t d_height,
-				    uint32_t *hdmi_width, uint32_t *hdmi_height)
+/* Caller owns g_i2c_lock. Never select a family from stale geometry. */
+static int sensor_read(void *context, uint16_t addr, uint8_t *data, size_t size)
 {
-	const uint64_t hdmi_px = (uint64_t)c_hdmi_width * c_hdmi_height;
-	const uint64_t uxc_px = (uint64_t)uxc_width * uxc_height;
-	const uint64_t d_px = (uint64_t)d_width * d_height;
-	const int hdmi_ok = supported_active_size(c_hdmi_width, c_hdmi_height);
-	const int uxc_ok = supported_active_size(uxc_width, uxc_height);
-	const int d_ok = supported_active_size(d_width, d_height);
-	const int hdmi_maybe = plausible_active_size(c_hdmi_width, c_hdmi_height);
-	const int uxc_maybe = plausible_active_size(uxc_width, uxc_height);
-	const int d_maybe = plausible_active_size(d_width, d_height);
-
-	if (hdmi_ok && hdmi_px >= uxc_px && hdmi_px >= d_px) {
-		*hdmi_width = c_hdmi_width;
-		*hdmi_height = c_hdmi_height;
-	} else if (uxc_ok && uxc_px >= d_px) {
-		*hdmi_width = uxc_width;
-		*hdmi_height = uxc_height;
-	} else if (d_ok) {
-		*hdmi_width = d_width;
-		*hdmi_height = d_height;
-	} else if (hdmi_maybe) {
-		*hdmi_width = c_hdmi_width;
-		*hdmi_height = c_hdmi_height;
-	} else if (uxc_maybe) {
-		*hdmi_width = uxc_width;
-		*hdmi_height = uxc_height;
-	} else if (d_maybe) {
-		*hdmi_width = d_width;
-		*hdmi_height = d_height;
-	}
+    VI_PIPE pipe = *(VI_PIPE *)context;
+    for (size_t i = 0; i < size; ++i) {
+        int value = lt6911_i2c_read(pipe, addr + i);
+        if (value < 0) return -EIO;
+        data[i] = (uint8_t)value;
+    }
+    return 0;
 }
 
-/* Read-only HDMI/UXC/D active counters.  Does not open 0x80ee or pulse
- * D283, so CSI keeps running.  CSI bank 0xc2xx is unavailable without the
- * gate and is left at 0. */
-int lt6911_get_input_timing_silent(VI_PIPE pipe,
-				   struct onekvm_lt6911_input_timing *timing)
+static int sensor_write(void *context, uint16_t addr, uint8_t value)
 {
-	uint32_t c_hdmi_width = 0;
-	uint32_t c_hdmi_height = 0;
-	uint32_t uxc_width = 0;
-	uint32_t uxc_height = 0;
-	uint32_t d_width = 0;
-	uint32_t d_height = 0;
+    return lt6911_i2c_write(*(VI_PIPE *)context, addr, value) == CVI_SUCCESS ? 0 : -EIO;
+}
 
-	if (timing == NULL || !valid_pipe(pipe))
-		return CVI_FAILURE;
-	timing->csi_width = 0;
-	timing->csi_height = 0;
-	timing->hdmi_width = 0;
-	timing->hdmi_height = 0;
-	timing->uxc_rx_width = 0;
-	timing->uxc_rx_height = 0;
-	timing->uxc_rx_signal = 0;
-	configure_pinmux_once();
-	if (lt6911_i2c_init(pipe) != CVI_SUCCESS)
-		return CVI_FAILURE;
+static int identify_chip(VI_PIPE pipe)
+{
+    struct onekvm_lt6911_io io = { &pipe, sensor_read, sensor_write };
+    int chip = onekvm_lt6911_cached_chip();
+    if (chip != ONEKVM_LT6911_UNKNOWN) return CVI_SUCCESS;
+    if (onekvm_lt6911_identify(&io, &chip)) return CVI_FAILURE;
+    onekvm_lt6911_cache_chip(chip);
+    return CVI_SUCCESS;
+}
 
-	pthread_mutex_lock(&g_i2c_lock);
-	if (lt6911_i2c_read_be16(pipe, 0xd296, &c_hdmi_height) != CVI_SUCCESS ||
-	    lt6911_i2c_read_be16(pipe, 0xd28b, &c_hdmi_width) != CVI_SUCCESS ||
-	    lt6911_i2c_read_be16(pipe, 0x85f0, &uxc_height) != CVI_SUCCESS ||
-	    lt6911_i2c_read_be16(pipe, 0x85ea, &uxc_width) != CVI_SUCCESS ||
-	    lt6911_i2c_read_be16(pipe, 0xe08e, &d_height) != CVI_SUCCESS ||
-	    lt6911_i2c_read_be16(pipe, 0xe08c, &d_width) != CVI_SUCCESS) {
-		pthread_mutex_unlock(&g_i2c_lock);
-		return CVI_FAILURE;
-	}
-	pthread_mutex_unlock(&g_i2c_lock);
-	normalize_half_or_full_width(&c_hdmi_width, c_hdmi_height);
-	normalize_half_or_full_width(&d_width, d_height);
-	select_hdmi_active_size(c_hdmi_width, c_hdmi_height, uxc_width, uxc_height,
-				d_width, d_height, &timing->hdmi_width,
-				&timing->hdmi_height);
-	return CVI_SUCCESS;
+/* Recheck both dimensions so a failed/torn sample never replaces geometry. */
+static int read_active_pair(VI_PIPE pipe, int width_reg, int height_reg,
+                           uint32_t *width, uint32_t *height)
+{
+    uint32_t w, h, verify_w, verify_h;
+    if (lt6911_i2c_read_be16(pipe, height_reg, &h) ||
+        lt6911_i2c_read_be16(pipe, width_reg, &w) ||
+        lt6911_i2c_read_be16(pipe, height_reg, &verify_h) ||
+        lt6911_i2c_read_be16(pipe, width_reg, &verify_w) ||
+        w != verify_w || h != verify_h)
+        return CVI_FAILURE;
+    *width = w; *height = h;
+    return CVI_SUCCESS;
+}
+
+static int read_family_active(VI_PIPE pipe, int chip,
+                             struct onekvm_lt6911_input_timing *timing)
+{
+    uint32_t w = 0, h = 0;
+    int ret;
+    switch (chip) {
+    case ONEKVM_LT6911_C:
+        ret = read_active_pair(pipe, 0xd28b, 0xd296, &w, &h);
+        normalize_half_or_full_width(&w, h);
+        break;
+    case ONEKVM_LT6911_UXC:
+        ret = read_active_pair(pipe, 0x85ea, 0x85f0, &w, &h);
+        break;
+    case ONEKVM_LT6911_D:
+        ret = read_active_pair(pipe, 0xe08c, 0xe08e, &w, &h);
+        w *= 2; /* D's capture geometry uses half-pixel horizontal units. */
+        break;
+    default:
+        return CVI_FAILURE;
+    }
+    if (ret) return ret;
+    /* A single nonzero dimension does not prove a live D/C/UXC input. */
+    if (w && h) { timing->hdmi_width = w; timing->hdmi_height = h; }
+    return CVI_SUCCESS;
+}
+
+int lt6911_get_input_timing_silent(VI_PIPE pipe,
+                                   struct onekvm_lt6911_input_timing *timing)
+{
+    struct onekvm_lt6911_input_timing sample = {0};
+    int ret;
+    if (!timing || !valid_pipe(pipe)) return CVI_FAILURE;
+    memset(timing, 0, sizeof(*timing));
+    if (onekvm_lt6911_cached_chip() == ONEKVM_LT6911_UNKNOWN)
+        return CVI_FAILURE; /* Discovery must finish before live polling. */
+    if (lt6911_i2c_init(pipe) != CVI_SUCCESS) return CVI_FAILURE;
+    pthread_mutex_lock(&g_i2c_lock);
+    ret = read_family_active(pipe, onekvm_lt6911_cached_chip(), &sample);
+    if (!ret) *timing = sample;
+    pthread_mutex_unlock(&g_i2c_lock);
+    return ret;
 }
 
 static int lt6911_get_input_timing_impl(VI_PIPE pipe,
-		struct onekvm_lt6911_input_timing *timing, int pcie_rx)
+        struct onekvm_lt6911_input_timing *timing, int pcie_rx)
 {
-	int cleanup;
-	int rx_signal;
-	uint32_t c_width = 0;
-	uint32_t c_height = 0;
-	uint32_t c_hdmi_width = 0;
-	uint32_t c_hdmi_height = 0;
-	uint32_t uxc_width = 0;
-	uint32_t uxc_height = 0;
-	uint32_t d_width = 0;
-	uint32_t d_height = 0;
-	uint32_t rx_half_width = 0;
-	uint32_t rx_height = 0;
-
-	if (timing == NULL || !valid_pipe(pipe))
-		return CVI_FAILURE;
-	timing->csi_width = 0;
-	timing->csi_height = 0;
-	timing->hdmi_width = 0;
-	timing->hdmi_height = 0;
-	timing->uxc_rx_width = 0;
-	timing->uxc_rx_height = 0;
-	timing->uxc_rx_signal = 0;
-	configure_pinmux_once();
-	if (lt6911_i2c_init(pipe) != CVI_SUCCESS)
-		return CVI_FAILURE;
-
-	/* LT6911C CSI active size.  Keep the internal-register gate open for the
-	 * complete snapshot so width and height cannot come from different HDMI
-	 * modes while the source is switching. */
-	pthread_mutex_lock(&g_i2c_lock);
-	if (lt6911_i2c_write(pipe, 0x80ee, 0x01) != CVI_SUCCESS)
-		goto error;
-	if (lt6911_i2c_read_be16(pipe, 0xc206, &c_height) != CVI_SUCCESS ||
-	    lt6911_i2c_read_be16(pipe, 0xc238, &c_width) != CVI_SUCCESS)
-		goto error;
-
-	/* During a mode transition the CSI active counters drop to zero until VI
-	 * has been recreated with the new geometry.  Read the upstream HDMI active
-	 * counters as well; otherwise that zero creates a circular dependency and
-	 * the new mode can never be discovered. */
-	/* D283=0x11 starts a fresh HDMI timing measurement on LT6911C.  Repeating
-	 * that command from the live resolution watcher briefly disrupts CSI
-	 * output on NanoKVM Cube and makes VI report alternating short width/height
-	 * frames.  The active-size counters below are continuously maintained by
-	 * the bridge, so observing them must remain read-only while streaming. */
-	if (lt6911_i2c_read_be16(pipe, 0xd296, &c_hdmi_height) != CVI_SUCCESS ||
-	    lt6911_i2c_read_be16(pipe, 0xd28b, &c_hdmi_width) != CVI_SUCCESS ||
-	    lt6911_i2c_read_be16(pipe, 0x85f0, &uxc_height) != CVI_SUCCESS ||
-	    lt6911_i2c_read_be16(pipe, 0x85ea, &uxc_width) != CVI_SUCCESS)
-		goto error;
-	/* The UXC HDMI receiver reports its own active area before the CSI
-	 * counters settle. The width is in half-pixels on the PCIe board. Read
-	 * this only on the full recovery snapshot path: 0x80ee can disturb
-	 * live CSI. */
-	if (pcie_rx) {
-		if (lt6911_i2c_read_be16(pipe, 0x867e, &rx_height) != CVI_SUCCESS ||
-		    lt6911_i2c_read_be16(pipe, 0x8680, &rx_half_width) != CVI_SUCCESS)
-			goto error;
-		rx_signal = lt6911_i2c_read(pipe, 0x86a3);
-		if (rx_signal < 0)
-			goto error;
-		timing->uxc_rx_width = rx_half_width * 2;
-		timing->uxc_rx_height = rx_height;
-		timing->uxc_rx_signal = (uint32_t)rx_signal;
-	}
-	normalize_half_or_full_width(&c_hdmi_width, c_hdmi_height);
-	cleanup = lt6911_i2c_write(pipe, 0x80ee, 0x00);
-	if (cleanup != CVI_SUCCESS)
-		goto error;
-
-	/* LT6911D exposes active size without the 0x80ee internal-register gate.
-	 * Reading this family as a fallback also keeps the backend portable across
-	 * NanoKVM board revisions. */
-	if (lt6911_i2c_read_be16(pipe, 0xe08e, &d_height) != CVI_SUCCESS ||
-	    lt6911_i2c_read_be16(pipe, 0xe08c, &d_width) != CVI_SUCCESS)
-		goto error;
-	normalize_half_or_full_width(&d_width, d_height);
-
-	timing->csi_width = c_width;
-	timing->csi_height = c_height;
-	select_hdmi_active_size(c_hdmi_width, c_hdmi_height, uxc_width, uxc_height,
-				d_width, d_height, &timing->hdmi_width,
-				&timing->hdmi_height);
-
-	pthread_mutex_unlock(&g_i2c_lock);
-	return CVI_SUCCESS;
-
-error:
-	/* Best effort: a failed register read must not leave normal LT6911
-	 * register access enabled indefinitely. */
-	(void)lt6911_i2c_write(pipe, 0x80ee, 0x00);
-	pthread_mutex_unlock(&g_i2c_lock);
-	return CVI_FAILURE;
+    struct onekvm_lt6911_input_timing sample = {0};
+    int chip, ret = CVI_FAILURE, cleanup = 0;
+    uint32_t rx_half_width = 0;
+    if (!timing || !valid_pipe(pipe)) return CVI_FAILURE;
+    memset(timing, 0, sizeof(*timing));
+    configure_pinmux_once();
+    if (lt6911_i2c_init(pipe) != CVI_SUCCESS) return CVI_FAILURE;
+    pthread_mutex_lock(&g_i2c_lock);
+    if (identify_chip(pipe)) goto out;
+    chip = onekvm_lt6911_cached_chip();
+    /* D's E0 telemetry is external: never open either internal window here. */
+    if (chip != ONEKVM_LT6911_D) {
+        ret = lt6911_i2c_write(pipe, 0x80ee, 1);
+        if (ret) goto close;
+    }
+    ret = read_family_active(pipe, chip, &sample);
+    if (ret) goto close;
+    if (chip == ONEKVM_LT6911_C) {
+        ret = read_active_pair(pipe, 0xc238, 0xc206,
+                              &sample.csi_width, &sample.csi_height);
+    } else if (chip == ONEKVM_LT6911_UXC && pcie_rx) {
+        ret = read_active_pair(pipe, 0x8680, 0x867e,
+                              &rx_half_width, &sample.uxc_rx_height);
+        if (!ret) {
+            int signal = lt6911_i2c_read(pipe, 0x86a3);
+            if (signal < 0) ret = CVI_FAILURE;
+            else { sample.uxc_rx_width = rx_half_width * 2;
+                   sample.uxc_rx_signal = (uint32_t)signal; }
+        }
+    }
+close:
+    if (chip != ONEKVM_LT6911_D)
+        cleanup = lt6911_i2c_write(pipe, 0x80ee, 0);
+    if (!ret && !cleanup) *timing = sample;
+    else ret = CVI_FAILURE;
+out:
+    pthread_mutex_unlock(&g_i2c_lock);
+    return ret;
 }
 
 int lt6911_get_input_timing(VI_PIPE pipe,
@@ -504,6 +455,14 @@ int lt6911_kick_hdmi(void)
 	/* D283=0x11 starts HDMI timing measurement.  Do this once when
 	   opening VI, never from the live watcher. */
 	pthread_mutex_lock(&g_i2c_lock);
+	if (identify_chip(pipe)) {
+		pthread_mutex_unlock(&g_i2c_lock);
+		return CVI_FAILURE;
+	}
+	if (onekvm_lt6911_cached_chip() == ONEKVM_LT6911_D) {
+		pthread_mutex_unlock(&g_i2c_lock);
+		return CVI_SUCCESS;
+	}
 	if (lt6911_i2c_write(pipe, 0x80ee, 0x01) != CVI_SUCCESS)
 		goto error;
 	if (lt6911_i2c_write(pipe, 0xd283, 0x11) != CVI_SUCCESS)
@@ -531,6 +490,14 @@ static int lt6911_start_csi_impl(int remeasure)
 	   HDMI measurement with D283. Cold start and recovery still measure.
 	   Do not write 0x805a=0x88 after StartViChn: that zeros CSIBDG width. */
 	pthread_mutex_lock(&g_i2c_lock);
+	if (identify_chip(pipe)) {
+		pthread_mutex_unlock(&g_i2c_lock);
+		return CVI_FAILURE;
+	}
+	if (onekvm_lt6911_cached_chip() == ONEKVM_LT6911_D) {
+		pthread_mutex_unlock(&g_i2c_lock);
+		return CVI_SUCCESS;
+	}
 	if (lt6911_i2c_write(pipe, 0x80ee, 0x01) != CVI_SUCCESS)
 		goto error;
 	if (lt6911_i2c_write(pipe, 0x805a, 0x80) != CVI_SUCCESS)
@@ -569,24 +536,13 @@ int lt6911_start_csi_with_cached_timing(void)
 
 int lt6911_probe(VI_PIPE pipe)
 {
-	int id_high;
-	int id_low;
-
-	configure_pinmux_once();
-	usleep(50);
-	if (lt6911_i2c_init(pipe) != CVI_SUCCESS)
-		return CVI_FAILURE;
-
-	id_high = lt6911_read(pipe, LT6911_CHIP_ID_ADDR_H);
-	id_low = lt6911_read(pipe, LT6911_CHIP_ID_ADDR_L);
-	if (id_high < 0 || id_low < 0)
-		return CVI_FAILURE;
-
-	/* Some LT6911 firmware revisions return 0x0000 for these registers while
-	 * video is fully operational.  A successful I2C transaction proves that
-	 * the bridge is present; the optional ID value must not reject it. */
-	(void)LT6911_CHIP_ID;
-	return CVI_SUCCESS;
+    int ret;
+    configure_pinmux_once();
+    if (lt6911_i2c_init(pipe) != CVI_SUCCESS) return CVI_FAILURE;
+    pthread_mutex_lock(&g_i2c_lock);
+    ret = identify_chip(pipe);
+    pthread_mutex_unlock(&g_i2c_lock);
+    return ret;
 }
 
 void lt6911_init(VI_PIPE pipe)
