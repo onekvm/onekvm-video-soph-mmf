@@ -890,7 +890,7 @@ static int ensure_vpss_user_frames()
 	return 0;
 }
 
-int submit_vpss_nv21(const uint8_t *nv21, int width, int height)
+int submit_vpss_nv21(const uint8_t *nv21, int width, int height, bool content_changed)
 {
 	if (nv21 == nullptr || width <= 0 || height <= 0 || (width & 1) != 0)
 		return -1;
@@ -902,10 +902,10 @@ int submit_vpss_nv21(const uint8_t *nv21, int width, int height)
 	const int index = g_runtime.vpss_user_index & 1;
 	VIDEO_FRAME_INFO_S *frame = g_runtime.vpss_user_frame[index];
 	VIDEO_FRAME_S *vf = &frame->stVFrame;
-	/* The no-signal NV21 asset is immutable until its source buffer or
-	 * geometry changes. Preparing both DMA buffers once avoids converting and
-	 * flushing the same multi-megabyte still image at the stream frame rate. */
-	if (g_runtime.vpss_user_nv21_source != nv21) {
+	/* Cache files can replace the pixels in the same source allocation.
+	 * Invalidate both DMA copies when that content changes, then prepare
+	 * each once rather than converting and flushing every placeholder frame. */
+	if (content_changed || g_runtime.vpss_user_nv21_source != nv21) {
 		g_runtime.vpss_user_nv21_source = nv21;
 		g_runtime.vpss_user_prepared_mask = 0;
 	}

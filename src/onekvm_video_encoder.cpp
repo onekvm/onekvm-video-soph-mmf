@@ -727,10 +727,11 @@ int encode_bound_placeholder(Encoder *encoder, Source *source,
     if (ensure_no_signal_nv21(source, width, height, error, error_capacity,
                               encoder->width, encoder->height) != 0)
         return -1;
-    if (source->no_signal_device != previous_device ||
+    const bool artwork_changed = source->no_signal_device != previous_device ||
         source->no_signal_inode != previous_inode ||
         source->no_signal_mtime_sec != previous_mtime_sec ||
-        source->no_signal_mtime_nsec != previous_mtime_nsec)
+        source->no_signal_mtime_nsec != previous_mtime_nsec;
+    if (artwork_changed)
         encoder->placeholder_need_key = true;
     {
         MmfControlLock global_lock;
@@ -751,7 +752,7 @@ int encode_bound_placeholder(Encoder *encoder, Source *source,
         if (source->channel >= 0)
             (void)mmf::resume_vpss_channel(source->channel);
         const int push = mmf::submit_vpss_nv21(
-            source->no_signal_frame.data(), width, height);
+            source->no_signal_frame.data(), width, height, artwork_changed);
         if (push != 0) {
             set_error(error, error_capacity,
                       "submit no-signal frame to VPSS failed: %d", push);

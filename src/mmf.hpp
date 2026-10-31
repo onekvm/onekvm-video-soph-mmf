@@ -243,6 +243,7 @@ int vpss_input_height();
 int capture_use_user_frames();
 bool capture_uses_user_frames();
 int capture_use_vi_frames();
-int submit_vpss_nv21(const uint8_t *nv21, int width, int height);
+int submit_vpss_nv21(const uint8_t *nv21, int width, int height,
+                    bool content_changed = false);
 
 } // namespace onekvm::mmf
