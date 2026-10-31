@@ -720,9 +720,18 @@ int encode_bound_placeholder(Encoder *encoder, Source *source,
     }
     /* VPSS accepts frames at its input size. Preserve the artwork's output
        proportions when the no-signal receiver probes a different size. */
+    const uint64_t previous_device = source->no_signal_device;
+    const uint64_t previous_inode = source->no_signal_inode;
+    const int64_t previous_mtime_sec = source->no_signal_mtime_sec;
+    const int64_t previous_mtime_nsec = source->no_signal_mtime_nsec;
     if (ensure_no_signal_nv21(source, width, height, error, error_capacity,
                               encoder->width, encoder->height) != 0)
         return -1;
+    if (source->no_signal_device != previous_device ||
+        source->no_signal_inode != previous_inode ||
+        source->no_signal_mtime_sec != previous_mtime_sec ||
+        source->no_signal_mtime_nsec != previous_mtime_nsec)
+        encoder->placeholder_need_key = true;
     {
         MmfControlLock global_lock;
         if (mmf::h26x_bound_to_vi(encoder->channel) &&

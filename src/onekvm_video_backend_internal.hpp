@@ -116,6 +116,10 @@ struct ONEKVM_VIDEO_INTERNAL Source {
     int no_signal_height = 0;
     int no_signal_art_width = 0;
     int no_signal_art_height = 0;
+    uint64_t no_signal_device = 0;
+    uint64_t no_signal_inode = 0;
+    int64_t no_signal_mtime_sec = 0;
+    int64_t no_signal_mtime_nsec = 0;
     int failures = 0;
     std::chrono::steady_clock::time_point last_recovery{};
     std::chrono::steady_clock::time_point last_hdmi_probe{};
@@ -243,6 +247,8 @@ ONEKVM_VIDEO_INTERNAL bool pcie_hdmi_blank_after_stall(Source *source);
 /* Caller holds encoder and source mutexes. 1 = rebuilt, 0 = no change, -1 = failed. */
 ONEKVM_VIDEO_INTERNAL int maybe_rearm_csi_half_rate(
     Encoder *encoder, Source *source, char *error, uint32_t error_capacity);
+extern "C" int no_signal_cache_identity(int output_width, int output_height,
+    uint64_t *device, uint64_t *inode, int64_t *mtime_sec, int64_t *mtime_nsec);
 ONEKVM_VIDEO_INTERNAL int ensure_no_signal_nv21(
     Source *source, int width, int height,
     char *error, uint32_t error_capacity,

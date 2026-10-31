@@ -1,13 +1,50 @@
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <string>
+#include <unistd.h>
 #include <vector>
 
 extern "C" int render_no_signal_nv21(uint8_t *, int, int, int);
 extern "C" int render_no_signal_nv21_for_output(uint8_t *, int, int, int, int, int);
 extern "C" int no_signal_h264(int, int, const uint8_t **, size_t *);
 
+namespace {
+
+void write_nv21(const std::filesystem::path &path, int width, int height,
+		uint8_t dark, uint8_t bright)
+{
+	const int luma = width * height;
+	std::vector<uint8_t> frame(luma * 3 / 2, bright);
+	std::fill(frame.begin(), frame.begin() + luma / 2, dark);
+	std::fill(frame.begin() + luma, frame.end(), static_cast<uint8_t>(16));
+	std::ofstream output(path, std::ios::binary);
+	output.write(reinterpret_cast<const char *>(frame.data()),
+		static_cast<std::streamsize>(frame.size()));
+}
+
+void seed_cache()
+{
+	const auto root = std::filesystem::temp_directory_path() /
+		("onekvm-nosig-" + std::to_string(static_cast<long long>(::getpid())));
+	std::filesystem::remove_all(root);
+	const auto english = root / "en";
+	std::filesystem::create_directories(english);
+	write_nv21(english / "1920x1080.nv21", 1920, 1080, 220, 220);
+	write_nv21(english / "1280x720.nv21", 1280, 720, 220, 220);
+	write_nv21(english / "640x480.nv21", 640, 480, 16, 235);
+	std::filesystem::create_symlink("en", root / "current");
+	::setenv("ONEKVM_NO_SIGNAL_CACHE", root.c_str(), 1);
+}
+
+} // namespace
+
 int main()
 {
+	seed_cache();
 	constexpr int width = 640;
 	constexpr int height = 480;
 	constexpr int image_size = width * height * 3 / 2;

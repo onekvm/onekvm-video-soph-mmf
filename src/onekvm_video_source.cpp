@@ -1217,10 +1217,20 @@ int ensure_no_signal_nv21(Source *source, int width, int height,
         art_width = width;
         art_height = height;
     }
+    uint64_t device = 0;
+    uint64_t inode = 0;
+    int64_t mtime_sec = 0;
+    int64_t mtime_nsec = 0;
+    (void)no_signal_cache_identity(art_width, art_height,
+                                   &device, &inode, &mtime_sec, &mtime_nsec);
     if (source->no_signal_frame.size() == bytes &&
         source->no_signal_width == width && source->no_signal_height == height &&
         source->no_signal_art_width == art_width &&
-        source->no_signal_art_height == art_height)
+        source->no_signal_art_height == art_height &&
+        source->no_signal_device == device &&
+        source->no_signal_inode == inode &&
+        source->no_signal_mtime_sec == mtime_sec &&
+        source->no_signal_mtime_nsec == mtime_nsec)
         return 0;
     try {
         source->no_signal_frame.resize(bytes);
@@ -1240,6 +1250,10 @@ int ensure_no_signal_nv21(Source *source, int width, int height,
     source->no_signal_height = height;
     source->no_signal_art_width = art_width;
     source->no_signal_art_height = art_height;
+    source->no_signal_device = device;
+    source->no_signal_inode = inode;
+    source->no_signal_mtime_sec = mtime_sec;
+    source->no_signal_mtime_nsec = mtime_nsec;
     return 0;
 }
 

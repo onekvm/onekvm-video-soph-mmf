@@ -105,8 +105,9 @@ if(BUILD_TESTING)
 
     add_executable(no_signal_frame_test
         tests/no-signal-frame-test.cpp
+        tests/no_signal_h264_fixture.cpp
         src/no_signal.cpp)
-    target_include_directories(no_signal_frame_test PRIVATE include)
+    target_include_directories(no_signal_frame_test PRIVATE include src)
     target_compile_features(no_signal_frame_test PRIVATE cxx_std_17)
     onekvm_enable_warnings(no_signal_frame_test)
     add_test(NAME no-signal-frame COMMAND no_signal_frame_test)

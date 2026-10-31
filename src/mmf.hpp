@@ -25,7 +25,6 @@ int render_no_signal_nv21(uint8_t *data, int capacity, int width, int height);
 int render_no_signal_nv21_for_output(uint8_t *data, int capacity,
                                      int width, int height,
                                      int output_width, int output_height);
-int no_signal_h264(int width, int height, const uint8_t **data, size_t *size);
 int lt6911_get_input_timing(int pipe, struct onekvm_lt6911_input_timing *timing);
 int lt6911_get_input_timing_pcie(int pipe, struct onekvm_lt6911_input_timing *timing);
 int lt6911_get_input_timing_silent(int pipe, struct onekvm_lt6911_input_timing *timing);

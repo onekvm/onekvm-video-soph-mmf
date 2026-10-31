@@ -1,36 +1,56 @@
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <limits>
 #include <new>
+#include <string>
 #include <vector>
 
-#include "no_signal_frames.inc"
-#include "no_signal_h264.inc"
+#include <sys/stat.h>
 
 namespace {
 
-const no_signal_asset_t *find_asset(int width, int height)
+struct FrameSpec {
+	const char *name;
+	int width;
+	int height;
+};
+
+constexpr FrameSpec kFrames[] = {
+	{"1920x1080", 1920, 1080},
+	{"1280x720", 1280, 720},
+	{"640x480", 640, 480},
+};
+
+std::string cache_root()
 {
-	for (const no_signal_asset_t &asset : no_signal_assets) {
-		if (asset.width == width && asset.height == height)
-			return &asset;
+	const char *env = std::getenv("ONEKVM_NO_SIGNAL_CACHE");
+	if (env != nullptr && env[0] != '\0')
+		return env;
+	return "/data/onekvm/cache/no-signal";
+}
+
+const FrameSpec *find_frame(int width, int height)
+{
+	for (const FrameSpec &frame : kFrames) {
+		if (frame.width == width && frame.height == height)
+			return &frame;
 	}
 	return nullptr;
 }
 
-const no_signal_asset_t *nearest_asset(int width, int height)
+const FrameSpec *nearest_frame(int width, int height)
 {
-	const no_signal_asset_t *best = nullptr;
+	const FrameSpec *best = nullptr;
 	int64_t best_score = -1;
-	for (const no_signal_asset_t &asset : no_signal_assets) {
-		if (asset.width <= 0 || asset.height <= 0)
-			continue;
-		const int64_t dw = static_cast<int64_t>(asset.width) - width;
-		const int64_t dh = static_cast<int64_t>(asset.height) - height;
+	for (const FrameSpec &frame : kFrames) {
+		const int64_t dw = static_cast<int64_t>(frame.width) - width;
+		const int64_t dh = static_cast<int64_t>(frame.height) - height;
 		const int64_t score = dw * dw + dh * dh;
 		if (best == nullptr || score < best_score) {
-			best = &asset;
+			best = &frame;
 			best_score = score;
 		}
 	}
@@ -98,32 +118,67 @@ void letterbox_nv21(const uint8_t *src, int src_w, int src_h,
 	}
 }
 
-bool unpack(const no_signal_asset_t &asset, uint8_t *output, std::size_t output_size)
+std::string frame_file(const FrameSpec &frame)
 {
-	std::size_t input_offset = 0;
-	std::size_t output_offset = 0;
-	while (input_offset < asset.packed_size) {
-		uint8_t control = asset.packed[input_offset++];
-		if ((control & 0x80) != 0) {
-			std::size_t length = (control & 0x7f) + 3;
-			if (input_offset >= asset.packed_size || length > output_size - output_offset)
-				return false;
-			std::memset(output + output_offset, asset.packed[input_offset++], length);
-			output_offset += length;
-			continue;
-		}
+	return cache_root() + "/current/" + frame.name + ".nv21";
+}
 
-		std::size_t length = control + 1;
-		if (length > asset.packed_size - input_offset || length > output_size - output_offset)
-			return false;
-		std::memcpy(output + output_offset, asset.packed + input_offset, length);
-		input_offset += length;
-		output_offset += length;
+const FrameSpec *selected_frame(int width, int height, int output_width, int output_height)
+{
+	const bool scaled = width != output_width || height != output_height;
+	if (!scaled) {
+		if (const FrameSpec *exact = find_frame(width, height))
+			return exact;
 	}
-	return output_offset == output_size;
+	return nearest_frame(output_width, output_height);
+}
+
+bool load_nv21(const std::string &path, int width, int height, std::vector<uint8_t> &out)
+{
+	const std::size_t expect = static_cast<std::size_t>(width) *
+		static_cast<std::size_t>(height) * 3 / 2;
+	std::ifstream input(path, std::ios::binary);
+	if (!input)
+		return false;
+	out.resize(expect);
+	input.read(reinterpret_cast<char *>(out.data()), static_cast<std::streamsize>(expect));
+	if (input.gcount() != static_cast<std::streamsize>(expect))
+		return false;
+	char extra = 0;
+	input.read(&extra, 1);
+	return !input.gcount();
 }
 
 } // namespace
+
+extern "C" int no_signal_cache_identity(int output_width, int output_height,
+		uint64_t *device, uint64_t *inode, int64_t *mtime_sec, int64_t *mtime_nsec)
+{
+	if (device != nullptr)
+		*device = 0;
+	if (inode != nullptr)
+		*inode = 0;
+	if (mtime_sec != nullptr)
+		*mtime_sec = 0;
+	if (mtime_nsec != nullptr)
+		*mtime_nsec = 0;
+	const FrameSpec *frame = selected_frame(output_width, output_height,
+		output_width, output_height);
+	if (frame == nullptr)
+		return -1;
+	struct stat info {};
+	if (stat(frame_file(*frame).c_str(), &info) != 0)
+		return -1;
+	if (device != nullptr)
+		*device = static_cast<uint64_t>(info.st_dev);
+	if (inode != nullptr)
+		*inode = static_cast<uint64_t>(info.st_ino);
+	if (mtime_sec != nullptr)
+		*mtime_sec = static_cast<int64_t>(info.st_mtim.tv_sec);
+	if (mtime_nsec != nullptr)
+		*mtime_nsec = static_cast<int64_t>(info.st_mtim.tv_nsec);
+	return 0;
+}
 
 extern "C" int render_no_signal_nv21_for_output(uint8_t *data, int capacity,
 		int width, int height, int output_width, int output_height)
@@ -144,34 +199,14 @@ extern "C" int render_no_signal_nv21_for_output(uint8_t *data, int capacity,
 		return -1;
 
 	const bool scaled_for_output = width != output_width || height != output_height;
-	const no_signal_asset_t *exact = scaled_for_output
-		? nullptr : find_asset(width, height);
-	if (exact != nullptr) {
-		if (!unpack(*exact, data, image_size))
-			fill_nv21_black(data, width, height);
-		return static_cast<int>(image_size);
-	}
-
-	/* Packed artwork is only 1080/720/480. Other VENC sizes (800x600,
-	   1024x768, auto-follow HDMI) letterbox the nearest PNG. A still
-	   black frame is better than failing encoder_read_packet. */
-	const no_signal_asset_t *src = nearest_asset(output_width, output_height);
-	if (src == nullptr) {
-		fill_nv21_black(data, width, height);
-		return static_cast<int>(image_size);
-	}
-	const std::size_t src_pixels = static_cast<std::size_t>(src->width) *
-		static_cast<std::size_t>(src->height);
-	const std::size_t src_size = src_pixels + src_pixels / 2;
+	const FrameSpec *src = selected_frame(width, height, output_width, output_height);
 	std::vector<uint8_t> unpacked;
-	try {
-		unpacked.resize(src_size);
-	} catch (const std::bad_alloc &) {
+	if (src == nullptr || !load_nv21(frame_file(*src), src->width, src->height, unpacked)) {
 		fill_nv21_black(data, width, height);
 		return static_cast<int>(image_size);
 	}
-	if (!unpack(*src, unpacked.data(), src_size)) {
-		fill_nv21_black(data, width, height);
+	if (!scaled_for_output && src->width == width && src->height == height) {
+		std::memcpy(data, unpacked.data(), image_size);
 		return static_cast<int>(image_size);
 	}
 	letterbox_nv21(unpacked.data(), src->width, src->height, data, width, height,
@@ -184,24 +219,4 @@ extern "C" int render_no_signal_nv21(uint8_t *data, int capacity,
 {
 	return render_no_signal_nv21_for_output(data, capacity, width, height,
 			width, height);
-}
-
-extern "C" int no_signal_h264(int width, int height, const uint8_t **data, size_t *size)
-{
-	if (data == nullptr || size == nullptr)
-		return -1;
-	const no_signal_h264_asset_t *found = nullptr;
-	for (const no_signal_h264_asset_t &asset : no_signal_h264_assets) {
-		if (asset.width == width && asset.height == height) {
-			found = &asset;
-			break;
-		}
-	}
-	if (found == nullptr)
-		found = &no_signal_h264_assets[0];
-	if (found->data == nullptr || found->size == 0)
-		return -1;
-	*data = found->data;
-	*size = found->size;
-	return 0;
 }
