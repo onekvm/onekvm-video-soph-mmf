@@ -264,17 +264,22 @@ VI `FrameRate` 列开机约 1 秒是 0，不能单靠这一列判无信号。已
 `soph_sys`、`soph_base`、`soph_vc_driver` 必须来自同一模块包，禁止单独热替换 vc 模块。
 该生命周期由 MMF 和匹配驱动处理，Core/systemd 不做模块重载或清池 workaround。
 
-排查 VPU 时钟时分别核对频率和 CCF 引用计数。`osdrv-sg200x` 的 CV181x
-HAL `vpu_cfg_clk_enable()` 每次增加时钟引用，而 `vpu_cfg_clk_disable()` 的
-释放主体被 `#if 0` 禁用；VDI 仍会把软件状态改为关闭，下一次编码操作便再次
-增加引用。持续增长的 `clk_h264c`、`clk_vc_src0`、`clk_cfg_reg_vc` 和
-`clk_axi_video_codec` 计数属于驱动生命周期问题，不代表时钟频率变高，也不能
-单凭它认定 CSI 失锁的原因。
+CV181x 的 VPU 与 JPEG 保持常开策略：分别在 probe 中用 `devm_clk_bulk_get`
+取得必需时钟，`clk_bulk_prepare_enable` 为每个设备的每个时钟只持有一个引用。
+部分取得／prepare／enable 失败时必须回滚并让 probe 返回错误；devres action
+在 probe 失败或 remove 时平衡释放，不能在 remove 后留下时钟引用。
 
-保留常开时钟也必须按设备／核心生命周期只取得一次引用，并平衡释放；不能
-靠逐帧重复 prepare 来维持常开。修正归 `osdrv-sg200x`，不能在 MMF 用修改
-分频、卸载模块或手工递减引用掩盖。也不能直接恢复整个关闭分支，须先核对
-H.264、H.265、JPEG 共享时钟和 SRAM 的所有权，避免关闭其他使用者的资源。
+VPU 的 H.264、H.265 时钟均保持开启；VDI 逐帧软件开关和 PM 的双核心 mask
+不再改变 CCF 引用。单核心请求仍须切换共享 SRAM 的选择，双核心 PM 请求
+只访问共享寄存器，不改变 SRAM 所有者。JPEG 对 `clk_vc_src0`、
+`clk_cfg_reg_vc`、`clk_axi_video_codec` 另持有独立引用；任何设备只能释放
+自己的引用，不能根据 `__clk_is_enabled` 推断引用归属。禁用 clock gating 的
+调试标志不能妨碍设备退出时释放引用。
+
+排查时分别核对频率和引用计数：播放、空闲恢复和切换编码格式时计数应有界，
+不能逐帧累加。旧版 HAL 关闭主体被 `#if 0` 禁用而 enable 反复增加引用；
+这属于驱动生命周期问题，不代表频率变高，也不能单凭它认定 CSI 失锁原因。
+不能在 MMF 修改分频、卸载模块或手工递减引用来掩盖驱动问题。
 
 H.26x ready eventfd 只在入队、错误及控制状态变化时通知；消费者出队不回写 ready。
 等待方必须先检查队列，清空通知后再检查队列，最后才 poll，避免丢唤醒或遗漏队列内的 AU。
