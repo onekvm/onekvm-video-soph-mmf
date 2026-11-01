@@ -24,3 +24,18 @@ Runtime and modules recipe changes are read from that layer, while their
 sources still use their own fixed revisions and normal fetch/unpack tasks.
 For current driver code as well as working tree module packaging files, use
 `ONEKVM_DEBUG_WORKTREES=onekvm-video-soph-mmf,osdrv-sg200x`.
+
+## Optional NPU package
+
+`onekvm-kernel-module-npu` contains `soph_tpu.ko`, its disabled service and the
+NPU system-plugin registration/page. The driver is installed under the optional
+`updates/onekvm/npu` module tree, with the target kernel release/magic metadata.
+The default multimedia package and device-services package do not install any
+NPU driver, service or page. The feed-tools target builds the optional package
+without making it a dependency of the default image.
+
+Installing `onekvm-kernel-module-npu` explicitly makes the NPU entry available;
+the service remains disabled until enabled by the user. It depends on the
+matching multimedia package already provided by the image. Removal stops the
+service and refreshes the module index. Inference runtimes and models remain
+separate dependencies.

@@ -1,0 +1,11 @@
+[Unit]
+Description=Load NanoKVM NPU module
+
+[Service]
+Type=oneshot
+ExecStart=/sbin/modprobe soph_tpu
+ExecStop=/sbin/modprobe -r soph_tpu
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

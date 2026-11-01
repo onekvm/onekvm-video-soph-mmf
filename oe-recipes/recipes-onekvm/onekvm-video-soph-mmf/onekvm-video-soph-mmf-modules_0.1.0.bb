@@ -19,6 +19,10 @@ SRC_URI = " \
     file://onekvm-video-soph-mmf-optional-modules.service \
     file://onekvm-video-soph-mmf-optional-modules.timer \
     file://onekvm-video-soph-mmf-modules.conf \
+    file://onekvm-device-nanokvm-npu.service \
+    file://npu-system-plugin.json \
+    file://npu-page.html \
+    file://npu.js \
 "
 SRCREV = "614258a9e645333f66ea5c57670a1650272873a7"
 BB_GIT_SHALLOW = "1"
@@ -29,6 +33,7 @@ inherit module-base systemd onekvm-kernel-module-depmod
 
 COMPATIBLE_MACHINE = "^onekvm-nanokvm$"
 PACKAGE_ARCH = "${MACHINE_ARCH}"
+PACKAGES =+ "onekvm-kernel-module-npu"
 DEPENDS += "bc-native virtual/kernel"
 
 # OSDRV launches a separate Kbuild for each module.  Running those module
@@ -93,9 +98,20 @@ do_install() {
         soph_sys soph_base soph_vcodec soph_jpeg \
         soph_mipi_rx soph_snsr_i2c \
         soph_vi soph_vpss soph_dwa soph_vo soph_rgn soph_vc_driver soph_ive \
-        soph_tpu soph_clock_cooling; do
+        soph_clock_cooling; do
         install -m 0644 "${B}/modules/$module.ko" "$module_dir/$module.ko"
     done
+
+    install -Dm0644 "${B}/modules/soph_tpu.ko" \
+        "${D}${nonarch_base_libdir}/modules/$kernel_release/updates/onekvm/npu/soph_tpu.ko"
+    install -Dm0644 "${UNPACKDIR}/onekvm-device-nanokvm-npu.service" \
+        "${D}${systemd_system_unitdir}/onekvm-device-nanokvm-npu.service"
+    install -Dm0644 "${UNPACKDIR}/npu-system-plugin.json" \
+        "${D}${datadir}/onekvm/system-plugins/npu.json"
+    install -Dm0644 "${UNPACKDIR}/npu-page.html" \
+        "${D}${datadir}/onekvm/system-plugins/npu/0.1.0/web/index.html"
+    install -Dm0644 "${UNPACKDIR}/npu.js" \
+        "${D}${datadir}/onekvm/system-plugins/npu/0.1.0/web/npu.js"
 
     install -Dm0755 "${UNPACKDIR}/load-onekvm-video-soph-mmf-modules" \
         "${D}${libexecdir}/onekvm/load-video-soph-mmf-modules"
@@ -146,6 +162,26 @@ pkg_postinst:${PN}() {
 
 SYSTEMD_SERVICE:${PN} = "onekvm-video-soph-mmf-modules.service"
 SYSTEMD_AUTO_ENABLE:${PN} = "enable"
+SYSTEMD_PACKAGES = "${PN} onekvm-kernel-module-npu"
+SYSTEMD_SERVICE:onekvm-kernel-module-npu = "onekvm-device-nanokvm-npu.service"
+SYSTEMD_AUTO_ENABLE:onekvm-kernel-module-npu = "disable"
+FILES:onekvm-kernel-module-npu = " \
+    ${nonarch_base_libdir}/modules/*/updates/onekvm/npu/soph_tpu.ko \
+    ${systemd_system_unitdir}/onekvm-device-nanokvm-npu.service \
+    ${datadir}/onekvm/system-plugins/npu.json \
+    ${datadir}/onekvm/system-plugins/npu \
+"
+RDEPENDS:onekvm-kernel-module-npu = "${PN} (= ${EXTENDPKGV}) kmod"
+pkg_postinst:onekvm-kernel-module-npu() {
+    if [ -z "$D" ]; then
+        depmod -a
+    fi
+}
+pkg_postrm:onekvm-kernel-module-npu() {
+    if [ -z "$D" ]; then
+        depmod -a
+    fi
+}
 FILES:${PN} += " \
     ${nonarch_base_libdir}/modules/*/extra/onekvm/nanokvm \
     ${libexecdir}/onekvm \

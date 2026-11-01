@@ -1,0 +1,32 @@
+{
+  "id": "npu",
+  "name": "NPU",
+  "description": "Optional on-device NPU used by OCR runtimes.",
+  "i18n": {
+    "default": {
+      "name": "NPU",
+      "description": "Optional on-device NPU used by OCR runtimes."
+    },
+    "zh": {
+      "name": "NPU",
+      "description": "供 OCR 运行时使用的可选设备端 NPU。"
+    }
+  },
+  "kind": "device",
+  "version": "0.1.0",
+  "capabilities": ["npu"],
+  "icon": {
+    "source": "lucide",
+    "name": "cpu"
+  },
+  "page": {
+    "title": "NPU",
+    "renderer": "html",
+    "entrypoint": "web/index.html",
+    "icon": {
+      "source": "lucide",
+      "name": "cpu"
+    }
+  },
+  "unit": "onekvm-device-nanokvm-npu.service"
+}
