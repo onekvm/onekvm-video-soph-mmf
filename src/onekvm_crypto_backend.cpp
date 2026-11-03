@@ -20,6 +20,18 @@ constexpr uint32_t kMaxBatch = 128;
 constexpr uint32_t kMaxInput = 20 * 1024;
 constexpr uint32_t kPayloadAlignment = 16;
 
+// Older drivers can claim concurrency while still using the faulty native
+// CTR IV loader. Require the immutable explicit-counter mode as well.
+bool explicit_ctr_counters() {
+    const int fd = ::open("/sys/module/cvitek_spacc/parameters/ctr_explicit_counters",
+                          O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return false;
+    char value = 0;
+    const auto count = ::read(fd, &value, 1);
+    ::close(fd);
+    return count == 1 && value == 'Y';
+}
+
 struct KernelKeyConfig {
     uint32_t version;
     uint32_t key_len;
@@ -377,9 +389,8 @@ const onekvm_crypto_backend_v1 kBackend = {
     ONEKVM_CRYPTO_BACKEND_ABI_V1,
     "soph-mmf",
     "nanokvm CryptoDMA",
-    // H.265 VENC + CryptoDMA has not passed end-to-end streaming validation:
-    // 1080p90 may keep sending but stall browser decoding. Leave concurrent
-    // H.265 unadvertised so Core uses software SRTP for that codec.
+    // Add concurrency only after checking both the driver profile and the
+    // explicit-counter fix. Algorithm support alone does not establish safety.
     ONEKVM_CRYPTO_FEATURE_AES_GCM_TX | ONEKVM_CRYPTO_FEATURE_AES_GCM_TX_BATCH,
     kMaxBatch,
     kMaxInput,
@@ -417,8 +428,8 @@ extern "C" ONEKVM_CRYPTO_EXPORT int32_t onekvm_crypto_backend_query(
                 if (caps & 1u) api.features |= ONEKVM_CRYPTO_FEATURE_AES_CTR;
                 if (caps & 2u) api.features |= ONEKVM_CRYPTO_FEATURE_HMAC_SHA1;
                 if (caps & 8u) api.features |= ONEKVM_CRYPTO_FEATURE_AES_CM_TX_BATCH;
-                // Kernel bit 4 permits concurrent driver operations; it does
-                // not establish end-to-end H.265/WebRTC compatibility.
+                if ((caps & 15u) == 15u && explicit_ctr_counters())
+                    api.features |= ONEKVM_CRYPTO_FEATURE_CONCURRENT_H265_VIDEO;
             }
             ::close(fd);
         }
