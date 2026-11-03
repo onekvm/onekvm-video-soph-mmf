@@ -14,8 +14,9 @@ this tree outside that distro.
 - Captures HDMI from the LT6911.
 - Hardware-encodes H.264, H.265, and MJPEG.
 - Accepts even HDMI timings from 320×200 through 2880×1620, up to 5 MP, within
-  a 5 MP at 30 FPS (150M pixel/s) budget. 4K input is unsupported.
-- Advertises output profiles through 2880×1620@30. 1080p is up to 60 FPS; 720p
+  a general 5 MP at 30 FPS (150M pixel/s) budget, with a 1920×1080@90 exception.
+  4K input is unsupported.
+- Advertises output profiles through 2880×1620@30. 1920×1080 is up to 90 FPS; 720p
   can follow a 120 Hz HDMI source.
 - Bound encoder path: VPSS feeds VENC directly. Core reads compressed access
   units, not raw 1080p frames.
@@ -41,7 +42,8 @@ project is standalone and does not use MaixCDK.
 
 Input detection and stream output are independent. LT6911 input is not a mode
 whitelist: even dimensions from 320×200 through 2880×1620 are accepted when
-they stay under 5 MP and the 150M pixel/s budget. A 4K timing is recognized
+they stay under 5 MP and the general 150M pixel/s budget; 1920×1080 additionally
+supports 90 FPS. Set the stream FPS to Automatic to follow the HDMI rate. A 4K timing is recognized
 but always reports `out_of_range`.
 
 Selectable output profiles:

@@ -14,7 +14,7 @@ int main()
 	if (clamp_output_fps(120) != 120) return 3;
 	if (clamp_output_fps(200) != kMaxOutputFps) return 4;
 	if (clamp_output_fps(120, 1280, 720) != 120) return 9;
-	if (clamp_output_fps(120, 1920, 1080) != 72) return 10;
+	if (clamp_output_fps(120, 1920, 1080) != 90) return 10;
 	if (clamp_output_fps(60, 2560, 1440) != 30) return 11;
 	if (clamp_output_fps(30, 2880, 1620) != 30) return 22;
 	if (clamp_output_fps(60, 2880, 1620) != 30) return 23;
@@ -45,5 +45,9 @@ int main()
 	if (onekvm::mmf::jpeg_stream_buffer_bytes(2880, 1620) != 2u * 1024u * 1024u) return 35;
 	if (onekvm::mmf::jpeg_stream_buffer_bytes(640, 480) != 512u * 1024u) return 36;
 	if (onekvm::mmf::jpeg_stream_buffer_bytes(2000, 1000) != 1000448u) return 37;
+	if (clamp_pipeline_fps(90, 1920, 1080, 1920, 1080) != 90) return 38;
+	if (clamp_pipeline_fps(120, 1920, 1080, 1280, 720) != 90) return 39;
+	if (clamp_pipeline_fps(120, 1280, 720, 1920, 1080) != 90) return 40;
+	if (venc_src_fps(90, 1920, 1080) != 90) return 41;
 	return 0;
 }

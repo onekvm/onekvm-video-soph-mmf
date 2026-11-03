@@ -8,6 +8,12 @@ int main() {
     static_assert(supported_input_resolution({2880, 1620}));
     static_assert(supported_output_resolution({2880, 1620}));
     static_assert(!supported_output_resolution({2880, 1800}));
+    static_assert(supported_input_rate({1920, 1080}, 90));
+    static_assert(!supported_input_rate({1920, 1080}, 91));
+    static_assert(clamp_video_fps(120, {1920, 1080}) == 90);
+    static_assert(clamp_video_fps(60, {1920, 1080}) == 60);
+    static_assert(clamp_video_fps(120, {1280, 720}) == 120);
+    static_assert(clamp_video_fps(120, {2560, 1440}) == 30);
     static_assert(supported_input_rate({2880, 1620}, 30));
     static_assert(!supported_input_rate({2560, 1440}, 60));
     static_assert(supported_input_request({2560, 1440}, 60));

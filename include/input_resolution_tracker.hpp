@@ -65,24 +65,28 @@ constexpr InputResolution csi_reported_size(
     return {};
 }
 
-/* SG2002 input is capped at 5 MP and 2880x1620. Within that geometry limit,
-   cap the frame rate to the 5 MP at 30 frames/s pixel-throughput budget. */
+/* Keep the general 5 MP at 30 frames/s budget. The 1920x1080 path
+   additionally supports 90 FPS without enabling higher-resolution high FPS. */
 constexpr uint64_t kMaxVideoPixelsPerSecond = 5000000ull * 30ull;
 
 constexpr bool supported_input_rate(InputResolution resolution, int fps)
 {
+    if (resolution == InputResolution{1920, 1080})
+        return fps > 0 && fps <= 90;
     return fps > 0 && supported_input_resolution(resolution) &&
         static_cast<uint64_t>(resolution.width) * resolution.height *
             static_cast<uint64_t>(fps) <= kMaxVideoPixelsPerSecond;
 }
 
 /* A requested stream rate is an upper bound, not the observed HDMI timing.
-   SG2002 uses the high-resolution path at 30 FPS; smaller frames retain the
-   pixel-throughput budget and 120 FPS ceiling. */
+   SG2002 uses the high-resolution path at 30 FPS, 1920x1080 at up to 90 FPS;
+   other smaller frames retain the pixel-throughput budget and 120 FPS ceiling. */
 constexpr int clamp_video_fps(int fps, InputResolution resolution = {})
 {
     if (fps <= 0)
         return 30;
+    if (resolution == InputResolution{1920, 1080})
+        return fps < 90 ? fps : 90;
     int cap = 120;
     const uint64_t pixels =
         static_cast<uint64_t>(resolution.width) * resolution.height;
