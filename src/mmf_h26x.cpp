@@ -3,6 +3,7 @@
 #include "h264_annexb.hpp"
 #include "hw_latency_parser.hpp"
 #include "packet-buffer-pool.hpp"
+#include "vi_direct_policy.hpp"
 
 #include <atomic>
 #include <cerrno>
@@ -59,6 +60,14 @@ struct H26xReader {
 	std::condition_variable cv;
 	std::deque<H26xQueuedPacket> queue;
 	std::shared_ptr<onekvm::EncodedPacketPool> packet_pool;
+	// Sole reader owns this VI lease until the corresponding VCL AU has
+	// completed and its vendor stream has been released.
+	VIDEO_FRAME_INFO_S vi_frame{};
+	bool vi_frame_held = false;
+	bool vi_submitted = false;
+	bool vi_picture_complete = false;
+	std::vector<uint8_t> vi_headers;
+	std::atomic<int> input_fps{0};
 };
 
 static void recycle_reader_buffer(H26xReader &reader, std::vector<uint8_t> &&buf)
@@ -81,6 +90,18 @@ static void clear_reader_queue(H26xReader &reader)
 }
 
 static H26xReader g_readers[MMF_VENC_MAX_CHN];
+
+static int release_direct_vi_frame(H26xReader &reader)
+{
+    if (!reader.vi_frame_held) return 0;
+    if (reader.vi_submitted && !reader.vi_picture_complete) return -EBUSY;
+    const int ret = CVI_VI_ReleaseChnFrame(0, 0, &reader.vi_frame);
+    if (ret != CVI_SUCCESS) return ret;
+    reader.vi_frame_held = false;
+    reader.vi_submitted = false;
+    reader.vi_picture_complete = false;
+    return 0;
+}
 
 static void wake_idle_h26x_reader(H26xReader &reader)
 {
@@ -429,9 +450,10 @@ int close_h26x_encoder(int ch) {
 	}
 	H26xEncoderState *info = &g_runtime.h26x_encoders[ch];
 	const bool was_bound_to_capture = info->bound_to_capture;
+    if (info->bound_to_vi) stop_h26x_reader(ch);
 	if (info->stream_held)
 		release_h26x_packet(ch);
-	if (was_bound_to_capture) {
+	if (was_bound_to_capture && !info->bound_to_vi) {
 		/* An idle stream can arrive here with VPSS parked.  Feed and drain one
 		 * final frame so a reader already inside the vendor GetStream path can
 		 * leave the codec lock, then stop new input and wait out the tail frame. */
@@ -449,7 +471,16 @@ int close_h26x_encoder(int ch) {
 	}
 	stop_h26x_reader(ch);
 
-	CVI_S32 s32Ret = CVI_SUCCESS;
+    CVI_S32 s32Ret = CVI_SUCCESS;
+    if (info->bound_to_vi && g_readers[ch].vi_submitted &&
+        !g_readers[ch].vi_picture_complete) {
+        s32Ret = CVI_VENC_ResetChn(ch);
+        if (s32Ret != CVI_SUCCESS) return s32Ret;
+        g_readers[ch].vi_picture_complete = true;
+    }
+    if (info->bound_to_vi && release_direct_vi_frame(g_readers[ch]) != 0)
+        return -EBUSY;
+    g_readers[ch].vi_headers.clear();
 	if (info->bound_to_capture)
 		unbind_h26x_from_capture(ch);
 	/* Stop only after SYS unbind has made enable_bind_mode false.  At this point
@@ -669,9 +700,7 @@ static void refresh_bound_hw_latency(H26xEncoderState *info)
 	else
 		capture_us = bound_capture_us(
 			vpss_us, info->cfg.input_fps,
-			vi_common_pool_blocks(
-				static_cast<int>(g_runtime.vi_size.u32Width),
-				static_cast<int>(g_runtime.vi_size.u32Height)),
+			g_runtime.vi_common_buffers,
 			1);
 	if (capture_us > 0 && capture_us < 1000000u)
 		__atomic_store_n(&info->last_capture_ns,
@@ -754,10 +783,13 @@ static int copy_h26x_packet(int ch, uint8_t *dst, int capacity,
 			pack_ready_ns = reader_now_ns();
 
 		stream->pstPack = info->packs;
-		/* Never ask GetStream to block. The vendor EnterVcodecLock path
-		   ignores a millisecond timeout when the worker already holds
-		   the lock. The fd poll above is the bounded wait. */
-		ret = CVI_VENC_GetStream(ch, stream, 0);
+		/* Bound input has a separate kernel encoder worker: poll waits for
+		 * its published stream, and GetStream must not wait on its codec lock.
+		 * Manual VI input has no such worker. Its fd marks submitted input,
+		 * so GetStream must wait for the hardware interrupt to finish it. */
+        const int stream_wait_ms = info->bound_to_vi && wait_timeout_us > 0
+            ? static_cast<int>((remaining + 999) / 1000) : 0;
+		ret = CVI_VENC_GetStream(ch, stream, stream_wait_ms);
 		if (ret == CVI_ERR_VENC_BUSY) {
 			if (wait_timeout_us <= 0 || past_deadline)
 				return 0;
@@ -827,7 +859,7 @@ static int copy_h26x_packet(int ch, uint8_t *dst, int capacity,
 	const uint64_t done_ns = reader_now_ns();
 	/* Unbound: SendFrame → GetStream. Bound encode comes from VENC
 	   HwEncTime; pack.u64PTS is encode-complete and is not capture. */
-	if (!info->bound_to_capture) {
+	if (!info->bound_to_capture || info->bound_to_vi) {
 		uint64_t encode_start_ns = info->last_submit_ns;
 		if (encode_start_ns == 0)
 			encode_start_ns = pack_ready_ns;
@@ -914,6 +946,85 @@ static int read_h26x_packet_into(int ch, std::vector<uint8_t> &buffer) {
 	return result;
 }
 
+static int read_vi_direct_packet(int ch, std::vector<uint8_t> &buffer)
+{
+    auto &info = g_runtime.h26x_encoders[ch];
+    auto &reader = g_readers[ch];
+    if (reader.vi_frame_held && reader.vi_picture_complete && !info.stream_held) {
+        if (release_direct_vi_frame(reader) != 0) return -EIO;
+        info.packet_pending = false;
+    }
+    if (!reader.vi_frame_held) {
+        reader.vi_frame = {};
+        if (CVI_VI_GetChnFrame(0, 0, &reader.vi_frame, 40) != CVI_SUCCESS)
+            return 0;
+        reader.vi_frame_held = true;
+        auto &frame = reader.vi_frame.stVFrame;
+        const uint32_t stride = onekvm::vi_packed_stride(frame.u32Width, frame.u32Height);
+        if (!stride || !frame.u64PhyAddr[0] ||
+            frame.u32Width != static_cast<uint32_t>(info.cfg.width) ||
+            frame.u32Height != static_cast<uint32_t>(info.cfg.height) ||
+            frame.s16OffsetTop || frame.s16OffsetLeft) {
+            (void)release_direct_vi_frame(reader);
+            return -ENOTSUP;
+        }
+        if (!onekvm::keep_vi_frame(frame.u32TimeRef,
+                reader.input_fps.load(std::memory_order_acquire), info.cfg.output_fps))
+            return release_direct_vi_frame(reader);
+        // The existing HDMI bypass writer produces UYVY. Some vendor
+        // descriptors label it NV21; describe the actual DMA layout instead.
+        frame.enPixelFormat = PIXEL_FORMAT_UYVY;
+        frame.u32Stride[0] = stride;
+        frame.u32Length[0] = stride * frame.u32Height;
+        for (int i = 0; i < 3; ++i) frame.pu8VirAddr[i] = nullptr;
+        frame.u64PhyAddr[1] = frame.u64PhyAddr[2] = 0;
+        frame.u32Stride[1] = frame.u32Stride[2] = 0;
+        frame.u32Length[1] = frame.u32Length[2] = 0;
+    }
+    if (!reader.vi_submitted) {
+        // Even a send timeout can leave hardware using the VI buffer. Keep
+        // the lease until VCL completion, or a successful final ResetChn.
+        reader.vi_submitted = true;
+        reader.vi_picture_complete = false;
+        info.packet_pending = true;
+        info.last_submit_ns = reader_now_ns();
+        const int ret = CVI_VENC_SendFrame(ch, &reader.vi_frame, 100);
+        if (ret == CVI_ERR_VENC_FRC_NO_ENC) {
+            reader.vi_picture_complete = true; // Explicitly not submitted.
+            info.packet_pending = false;
+            return release_direct_vi_frame(reader);
+        }
+        if (ret != CVI_SUCCESS) {
+            std::fprintf(stderr, "OneKVM: VI-direct SendFrame failed %#x\n", ret);
+            return -EIO;
+        }
+    }
+    const int got = copy_h26x_packet(ch, nullptr, kReaderPacketCapacity,
+        80000, &buffer);
+    if (got <= 0) return got;
+    const bool picture = annexb_has_vcl(buffer.data(), buffer.size(), true);
+    reader.vi_picture_complete = picture;
+    if (release_h26x_packet(ch) != 0) return -EIO;
+    if (!picture) {
+        if (reader.vi_headers.size() + buffer.size() > kReaderPacketCapacity)
+            return -EOVERFLOW;
+        reader.vi_headers.insert(reader.vi_headers.end(), buffer.begin(), buffer.end());
+        return 0;
+    }
+    if (!reader.vi_headers.empty()) {
+        if (reader.vi_headers.size() + buffer.size() > kReaderPacketCapacity)
+            return -EOVERFLOW;
+        buffer.insert(buffer.begin(), reader.vi_headers.begin(), reader.vi_headers.end());
+        reader.vi_headers.clear();
+    }
+    if (release_direct_vi_frame(reader) != 0) return -EIO;
+    info.packet_pending = false;
+    const int input_fps = reader.input_fps.load(std::memory_order_acquire);
+    if (input_fps > 0)
+        __atomic_store_n(&info.last_capture_ns, 1000000000ull / input_fps, __ATOMIC_RELAXED);
+    return static_cast<int>(buffer.size());
+}
+
 int read_latest_h26x_packet_nowait(int ch, uint8_t *dst, int capacity) {
 	return copy_and_release_h26x_packet(ch, dst, capacity, 0);
 }
@@ -964,52 +1075,35 @@ int release_h26x_packet(int ch) {
 	return s32Ret;
 }
 
-static bool venc_matches_vi(const H26xEncoderConfig &cfg)
+bool hevc_vi_direct_supported()
 {
-	(void)cfg;
-	/* SG2002 HDMI is VI online → VPSS. Unbinding VI-VPSS so VENC can
-	   take exclusive UYVY stops Preraw: IntCnt stays 0, venc-handler
-	   idles, EncodedFrame=0. Dual-bind VI→VPSS+VENC runs for a while
-	   then starves the 3-block UYVY pool. 1:1 still uses VPSS as the
-	   online sink / UYVY→NV21 CSC. */
-	return false;
+    const char *override = std::getenv("ONEKVM_HEVC_VI_DIRECT");
+    if (override && std::strcmp(override, "0") == 0) return false;
+    FILE *cap = std::fopen("/sys/module/soph_vc_driver/parameters/hevc_packed_source", "r");
+    if (!cap) return false;
+    const int value = std::fgetc(cap);
+    std::fclose(cap);
+    return value == 'Y';
 }
 
-static CVI_S32 bind_vi_venc(int venc_ch)
+static bool can_capture_vi_direct(const H26xEncoderState &info, int channel)
 {
-	MMF_CHN_S src{};
-	MMF_CHN_S dst{};
-	src.enModId = CVI_ID_VI;
-	src.s32DevId = 0;
-	src.s32ChnId = 0;
-	dst.enModId = CVI_ID_VENC;
-	dst.s32DevId = 0;
-	dst.s32ChnId = venc_ch;
-	return CVI_SYS_Bind(&src, &dst);
+    return info.codec == H26xCodec::H265 && !info.vi_direct_disabled &&
+        info.cfg.width <= 1920 && info.cfg.height <= 1080 &&
+        !info.receiver_started && !g_runtime.jpeg_initialized &&
+        info.cfg.width == static_cast<int>(g_runtime.vi_size.u32Width) &&
+        info.cfg.height == static_cast<int>(g_runtime.vi_size.u32Height) &&
+        !g_capture_options.mirror[channel] && !g_capture_options.flip[channel] &&
+        hevc_vi_direct_supported();
 }
 
-static CVI_S32 unbind_vi_venc(int venc_ch)
+static int set_isolated_input(int ch, bool isolated)
 {
-	MMF_CHN_S src{};
-	MMF_CHN_S dst{};
-	src.enModId = CVI_ID_VI;
-	src.s32DevId = 0;
-	src.s32ChnId = 0;
-	dst.enModId = CVI_ID_VENC;
-	dst.s32DevId = 0;
-	dst.s32ChnId = venc_ch;
-	return CVI_SYS_UnBind(&src, &dst);
-}
-
-static int detach_vi_from_vpss()
-{
-	if (!g_runtime.vi_bound_to_vpss)
-		return 0;
-	const CVI_S32 ret = SAMPLE_COMM_VI_UnBind_VPSS(0, 0, 0);
-	if (ret != CVI_SUCCESS)
-		return ret;
-	g_runtime.vi_bound_to_vpss = false;
-	return 0;
+    VENC_CHN_ATTR_S attr{};
+    int ret = CVI_VENC_GetChnAttr(ch, &attr);
+    if (ret != CVI_SUCCESS) return ret;
+    attr.stVencAttr.bIsoSendFrmEn = isolated ? CVI_TRUE : CVI_FALSE;
+    return CVI_VENC_SetChnAttr(ch, &attr);
 }
 
 int bind_h26x_to_capture(int ch, int vpss_group, int vpss_channel) {
@@ -1018,7 +1112,7 @@ int bind_h26x_to_capture(int ch, int vpss_group, int vpss_channel) {
 		!g_runtime.h26x_encoders[ch].initialized || !capture_channel_open(vpss_channel))
 		return -1;
 	H26xEncoderState *info = &g_runtime.h26x_encoders[ch];
-	const bool want_vi = venc_matches_vi(info->cfg);
+	const bool want_vi = info->bound_to_vi || can_capture_vi_direct(*info, vpss_channel);
 	if (info->bound_to_capture) {
 		if (want_vi == info->bound_to_vi &&
 			info->capture_group == vpss_group &&
@@ -1044,31 +1138,22 @@ int bind_h26x_to_capture(int ch, int vpss_group, int vpss_channel) {
 	VENC_RECV_PIC_PARAM_S recv_param;
 	recv_param.s32RecvPicNum = -1;
 	bool bound_vi = false;
-	if (want_vi) {
-		/* VI common pool is 3 UYVY blocks. Fan-out to VPSS+VENC
-		   exhausts it; VENC waitq drops and GetStream gaps trip the
-		   1.5 s stale window. Give VENC exclusive VI. Do not resume
-		   VPSS first: that steals the only UYVY blocks. StartRecvFrame
-		   must run AFTER SYS bind or enable_bind_mode is still false
-		   and the bind kthread never starts. */
-		if (enable_vi_dma() != 0) {
-			fprintf(stderr, "OneKVM: enable VI DMA failed, using VPSS\n");
-		} else if (detach_vi_from_vpss() != 0) {
-			fprintf(stderr, "OneKVM: detach VI from VPSS failed, using VPSS\n");
-		} else {
-			ret = bind_vi_venc(ch);
-			if (ret == CVI_SUCCESS) {
-				bound_vi = true;
-				fprintf(stderr,
-					"OneKVM: VENC(%d) exclusive VI 1:1 %dx%d\n",
-					ch, info->cfg.width, info->cfg.height);
-			} else {
-				fprintf(stderr,
-					"OneKVM: VI->VENC bind %#x, using VPSS\n", ret);
-				(void)capture_use_vi_frames();
-			}
-		}
-	}
+    if (want_vi) {
+        VPSS_CHN_ATTR_S attr{};
+        if (CVI_VPSS_GetChnAttr(vpss_group, vpss_channel, &attr) == CVI_SUCCESS &&
+            !attr.bMirror && !attr.bFlip && attr.enPixelFormat == PIXEL_FORMAT_NV21 &&
+            enable_vi_dma() == 0 && pause_vpss_channel(vpss_channel) == 0 &&
+            capture_use_vi_frames() == 0 && set_isolated_input(ch, true) == 0) {
+            bound_vi = true;
+            g_readers[ch].input_fps.store(attr.stFrameRate.s32SrcFrameRate,
+                std::memory_order_release);
+            std::fprintf(stderr, "OneKVM: HEVC VI-direct %dx%d (native UYVY lease)\n",
+                info->cfg.width, info->cfg.height);
+        } else {
+            (void)capture_use_vi_frames();
+            if (set_isolated_input(ch, false) != 0) return -1;
+        }
+    }
 	if (!bound_vi) {
 		if (resume_vi_dma() != 0)
 			return -1;
@@ -1109,10 +1194,12 @@ int bind_h26x_to_capture(int ch, int vpss_group, int vpss_channel) {
 	if (start_worker) {
 		ret = CVI_VENC_StartRecvFrame(ch, &recv_param);
 		if (ret != CVI_SUCCESS) {
-			if (bound_vi)
-				(void)unbind_vi_venc(ch);
-			else
-				SAMPLE_COMM_VPSS_UnBind_VENC(vpss_group, vpss_channel, ch);
+            if (bound_vi) {
+                (void)capture_use_vi_frames();
+                (void)set_isolated_input(ch, false);
+            } else {
+                SAMPLE_COMM_VPSS_UnBind_VENC(vpss_group, vpss_channel, ch);
+            }
 			CVI_VENC_ResetChn(ch);
 			if (!bound_vi)
 				(void)pause_vpss_channel(vpss_channel);
@@ -1130,9 +1217,8 @@ int bind_h26x_to_capture(int ch, int vpss_group, int vpss_channel) {
 	 * the vendor recovery path discards it and the replacement carries SPS but
 	 * no PPS.  Existing workers still need an explicit IDR when they are rebound
 	 * after an idle or placeholder interval. */
-	/* VPSS NV21: StartRecvFrame's first AU is already IDR+SPS/PPS.
-	   Exclusive UYVY: WAVE4's first pack is a 32-byte non-key leftover
-	   (seen on 107); the reader waits forever for a natural IDR. */
+	/* Manual VI input requests an IDR before its first submission. VPSS
+	   startup keeps the natural complete parameter-set + IDR access unit. */
     const int started = start_h26x_reader(ch, bound_vi || !start_worker);
     if (started != 0)
         (void)unbind_h26x_from_capture(ch);
@@ -1141,30 +1227,49 @@ int bind_h26x_to_capture(int ch, int vpss_group, int vpss_channel) {
 
 int rebind_h26x_to_vpss(int ch)
 {
-	if (ch < 0 || ch >= MMF_VENC_MAX_CHN ||
-		!g_runtime.h26x_encoders[ch].initialized)
-		return -1;
-	H26xEncoderState *info = &g_runtime.h26x_encoders[ch];
-	if (!info->bound_to_capture || !info->bound_to_vi)
-		return 0;
-	if (info->stream_held && release_h26x_packet(ch) != 0)
-		return -1;
-	CVI_S32 ret = unbind_vi_venc(ch);
-	if (ret != CVI_SUCCESS) {
-		printf("VI unbind VENC(%d) failed with %#x\n", ch, ret);
-		return ret;
-	}
-	info->bound_to_vi = false;
-	ret = SAMPLE_COMM_VPSS_Bind_VENC(
-		info->capture_group, info->capture_channel, ch);
-	if (ret != CVI_SUCCESS) {
-		printf("VPSS(%d,%d) bind VENC(%d) after VI failed with %#x\n",
-			info->capture_group, info->capture_channel, ch, ret);
-		info->bound_to_capture = 0;
-		return ret;
-	}
-	fprintf(stderr, "OneKVM: VENC(%d) rebound to VPSS for placeholder\n", ch);
-	return 0;
+    if (ch < 0 || ch >= MMF_VENC_MAX_CHN) return -EINVAL;
+    auto &info = g_runtime.h26x_encoders[ch];
+    if (!info.initialized || !info.bound_to_vi) return 0;
+    const int group = info.capture_group, channel = info.capture_channel;
+    const uint64_t last_live = g_readers[ch].last_packet_ns.load(std::memory_order_acquire);
+    // A mode change must join the sole producer before changing its source,
+    // input isolation or the VI/VPSS topology.
+    if (unbind_h26x_from_capture(ch) != 0) return -1;
+    info.vi_direct_disabled = true;
+    if (set_isolated_input(ch, false) != 0) return -1;
+    const int ret = bind_h26x_to_capture(ch, group, channel);
+    uint64_t empty = 0;
+    if (ret == 0 && last_live != 0)
+        g_readers[ch].last_packet_ns.compare_exchange_strong(empty, last_live,
+            std::memory_order_release, std::memory_order_relaxed);
+    return ret;
+}
+
+bool h26x_vi_direct_failed(int ch)
+{
+    return ch >= 0 && ch < MMF_VENC_MAX_CHN &&
+        g_runtime.h26x_encoders[ch].bound_to_vi &&
+        g_readers[ch].read_error.load(std::memory_order_acquire) < 0;
+}
+
+int yield_h26x_vi_direct()
+{
+    for (int ch = 0; ch < MMF_VENC_MAX_CHN; ++ch) {
+        if (g_runtime.h26x_encoders[ch].initialized &&
+            g_runtime.h26x_encoders[ch].bound_to_vi &&
+            rebind_h26x_to_vpss(ch) != 0)
+            return -1;
+    }
+    return 0;
+}
+
+void set_h26x_capture_input_fps(int channel, int fps)
+{
+    for (int ch = 0; ch < MMF_VENC_MAX_CHN; ++ch) {
+        const auto &info = g_runtime.h26x_encoders[ch];
+        if (info.initialized && info.bound_to_capture && info.capture_channel == channel)
+            g_readers[ch].input_fps.store(fps, std::memory_order_release);
+    }
 }
 
 bool h26x_bound_to_vi(int ch)
@@ -1184,6 +1289,7 @@ int unbind_h26x_from_capture(int ch) {
 	}
 	const int vpss_group = info->capture_group;
 	const int vpss_channel = info->capture_channel;
+    if (info->bound_to_vi) stop_h26x_reader(ch);
 	if (info->stream_held && release_h26x_packet(ch) != 0)
 		return -1;
 	/* Disconnect only the producer.  CVITEK's VENC worker is not restart-safe:
@@ -1194,9 +1300,15 @@ int unbind_h26x_from_capture(int ch) {
 		CVI_VENC_CloseFd(ch);
 		info->fd = -1;
 	}
-	CVI_S32 ret = info->bound_to_vi
-		? unbind_vi_venc(ch)
-		: SAMPLE_COMM_VPSS_UnBind_VENC(vpss_group, vpss_channel, ch);
+    CVI_S32 ret = CVI_SUCCESS;
+    if (info->bound_to_vi) {
+        stop_h26x_reader(ch);
+        if (release_direct_vi_frame(g_readers[ch]) != 0) return -EBUSY;
+        ret = CVI_VENC_StopRecvFrame(ch);
+        if (ret == CVI_SUCCESS) info->receiver_started = false;
+    } else {
+        ret = SAMPLE_COMM_VPSS_UnBind_VENC(vpss_group, vpss_channel, ch);
+    }
 	if (ret != CVI_SUCCESS) {
 		printf("%s unbind VENC(%d) failed with %#x\n",
 			info->bound_to_vi ? "VI" : "VPSS", ch, ret);
@@ -1211,7 +1323,7 @@ int unbind_h26x_from_capture(int ch) {
 	info->capture_channel = 0;
 
 	/* SYS unbind only. DisableChn belongs to park_h26x / idle: a live
-	   exclusive-VI fallback or placeholder rebind still needs DMA, and
+	   VI-direct fallback or placeholder rebind still needs DMA, and
 	   CSI 0x0 from a paused VI looks like a hung CSIBDG to the watcher. */
 	park_unbound_vpss_channels();
 	return 0;
@@ -1230,8 +1342,10 @@ int park_h26x_capture(int ch) {
 		return -1;
 	H26xReader &reader = g_readers[ch];
 	reader.discard.store(true, std::memory_order_release);
-	if (info->bound_to_vi && rebind_h26x_to_vpss(ch) != 0)
-		return -1;
+    if (info->bound_to_vi) {
+        notify_h26x_reader(reader);
+        return 0;
+    }
 	if (pause_vi_dma() != 0)
 		return -1;
 	const int ret = pause_vpss_channel(info->capture_channel);
@@ -1274,15 +1388,11 @@ int request_h26x_idr(int ch) {
 		return -1;
 	h26x_reader_want_idr(ch);
 	H26xReader &reader = g_readers[ch];
-	/* StartRecvFrame naturally makes the first encoded frame an IDR with the
-	 * complete SPS/PPS set.  WebRTC and WebSocket subscribers both request a
-	 * keyframe as they attach; if that request reaches the vendor before the
-	 * first AU is dequeued, its GOP-reset path replaces the complete AU with an
-	 * SPS-only IDR.  The reader is already waiting for the natural keyframe, so
-	 * coalesce only this startup request. */
-	if (reader.running.load(std::memory_order_acquire) &&
-	    reader.last_packet_ns.load(std::memory_order_relaxed) == 0)
-		return 0;
+	/* A running reader owns codec control between complete pictures. Direct
+     * GetStream may hold the codec state while finishing an interrupt; never
+     * enter it concurrently from the subscriber/control thread. */
+    if (reader.running.load(std::memory_order_acquire))
+        return 0;
 	return CVI_VENC_RequestIDR(ch, CVI_TRUE);
 }
 
@@ -1482,7 +1592,13 @@ int start_h26x_reader(int ch, bool request_idr)
                 usleep(5000);
                 continue;
             }
-			if (self.discard.load(std::memory_order_acquire)) {
+            if (self.discard.load(std::memory_order_acquire) &&
+                g_runtime.h26x_encoders[ch].bound_to_vi && !self.vi_submitted) {
+                wait_idle_h26x_reader(ch, self);
+                continue;
+            }
+			if (self.discard.load(std::memory_order_acquire) &&
+                !g_runtime.h26x_encoders[ch].bound_to_vi) {
 				const int discarded = read_h26x_packet_into(ch, scratch);
 				if (discarded > 0) {
 					self.last_drain_ns.store(
@@ -1492,6 +1608,9 @@ int start_h26x_reader(int ch, bool request_idr)
                 if (discarded <= 0) wait_idle_h26x_reader(ch, self);
 				continue;
 			}
+            // A parameter-set pack is not picture completion. Finish its
+            // pending VI picture before any RC/IDR ioctl changes codec state.
+            if (!g_runtime.h26x_encoders[ch].bound_to_vi || !self.vi_submitted) {
 			if (self.force_idr.exchange(false, std::memory_order_acq_rel)) {
 				idr_ioctl_sent = false;
 				self.want_idr.store(true, std::memory_order_relaxed);
@@ -1548,9 +1667,12 @@ int start_h26x_reader(int ch, bool request_idr)
 				else
 					idr_ioctl_sent = true;
 			}
+            }
 			if (scratch.capacity() == 0)
 				scratch = take_reader_buffer(self);
-			const int got = read_h26x_packet_into(ch, scratch);
+            const int got = g_runtime.h26x_encoders[ch].bound_to_vi
+                ? read_vi_direct_packet(ch, scratch)
+                : read_h26x_packet_into(ch, scratch);
 			const uint64_t encoded_ns = reader_now_ns();
 			if (got < 0) {
                 {
@@ -1609,8 +1731,12 @@ int start_h26x_reader(int ch, bool request_idr)
 					recycle_reader_buffer(self, std::move(packet.data));
 				} else {
 					self.queue.push_back(std::move(packet));
-					if (key)
+					if (key) {
 						self.want_idr.store(false, std::memory_order_relaxed);
+                        // Complete this request now: an RC update can request
+                        // the next IDR before another loop observes want=false.
+                        idr_ioctl_sent = false;
+                    }
 					self.last_packet_ns.store(reader_now_ns(),
 						std::memory_order_relaxed);
 					notify_h26x_reader(self);
@@ -1640,6 +1766,8 @@ int start_h26x_reader(int ch, bool request_idr)
 			self.read_error.store(-ENOMEM, std::memory_order_release);
 			notify_h26x_reader(self);
 		}
+        if (g_runtime.h26x_encoders[ch].bound_to_vi)
+            (void)release_direct_vi_frame(self);
 		self.running.store(false, std::memory_order_release);
 	});
 	} catch (const std::system_error &) {

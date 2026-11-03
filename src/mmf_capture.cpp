@@ -414,7 +414,10 @@ int update_capture_frame_rate(int ch, int output_fps, int input_fps)
 		return result;
 	attr.stFrameRate.s32SrcFrameRate = input_fps;
 	attr.stFrameRate.s32DstFrameRate = output_fps;
-	return CVI_VPSS_SetChnAttr(0, ch, &attr);
+	result = CVI_VPSS_SetChnAttr(0, ch, &attr);
+	if (result == CVI_SUCCESS)
+		set_h26x_capture_input_fps(ch, input_fps);
+	return result;
 }
 
 int open_capture_channel(int ch, int width, int height, int format, int fps, int input_fps) {
@@ -597,6 +600,8 @@ int pause_vi_dma(void)
 
 int resume_vi_dma(void)
 {
+	if (yield_h26x_vi_direct() != 0)
+		return -1;
 	if (enable_vi_dma() != 0)
 		return -1;
 	return capture_use_vi_frames();

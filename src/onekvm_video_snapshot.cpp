@@ -98,6 +98,12 @@ int32_t source_snapshot(
     }
 
     MmfControlLock global_lock;
+    // Read the channel's running/idle state only after yielding direct video:
+    // a parked scaler does not mean that its VI-direct video consumer is idle.
+    if (mmf::yield_h26x_vi_direct() != 0) {
+        set_error(error, error_capacity, "snapshot could not release VI-direct input");
+        return ONEKVM_VIDEO_RESOURCE_BUSY;
+    }
     const int channel = source->channel;
     if (channel < 0 || channel >= MMF_VI_MAX_CHN ||
         !mmf::g_runtime.vi_chn_is_inited[channel]) {

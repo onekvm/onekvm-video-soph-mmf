@@ -18,6 +18,13 @@ function(onekvm_enable_warnings target)
 endfunction()
 
 if(BUILD_TESTING)
+    add_executable(vi_direct_policy_test tests/vi-direct-policy-test.cpp)
+    target_include_directories(vi_direct_policy_test PRIVATE src)
+    target_compile_features(vi_direct_policy_test PRIVATE cxx_std_17)
+    target_compile_options(vi_direct_policy_test PRIVATE -UNDEBUG)
+    onekvm_enable_warnings(vi_direct_policy_test)
+    add_test(NAME vi-direct-policy COMMAND vi_direct_policy_test)
+
     find_package(Python3 REQUIRED COMPONENTS Interpreter)
     add_test(NAME lt6911-receiver
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/lt6911-receiver-test.py)
@@ -237,7 +244,8 @@ set(ONEKVM_BACKEND_VERSION_SCRIPT
 target_link_options(soph_mmf PRIVATE
     "-Wl,-Bsymbolic"
     "-Wl,--version-script=${ONEKVM_BACKEND_VERSION_SCRIPT}"
-    "-Wl,--wrap=CVI_ISP_SensorRegCallBack")
+    "-Wl,--wrap=CVI_ISP_SensorRegCallBack"
+    "-Wl,--wrap=CVI_VI_SetChnAttr")
 set_property(TARGET soph_mmf APPEND PROPERTY
     LINK_DEPENDS "${ONEKVM_BACKEND_VERSION_SCRIPT}")
 

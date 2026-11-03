@@ -162,6 +162,11 @@ int reset_capture_channel(int ch, int width, int height, int format, int fps,
 /* Cached vendor VI statistics only; no procfs dump or hardware probe. */
 int capture_input_fps(void);
 int update_capture_frame_rate(int ch, int output_fps, int input_fps);
+void set_h26x_capture_input_fps(int capture_channel, int input_fps);
+// Yield native VI capture before a JPEG/CPU consumer resumes VPSS.
+int yield_h26x_vi_direct();
+bool h26x_vi_direct_failed(int ch);
+bool hevc_vi_direct_supported();
 bool capture_channel_open(int ch);
 int pause_vpss_channel(int ch);
 int resume_vpss_channel(int ch);

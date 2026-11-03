@@ -17,10 +17,11 @@ The default kernel is **Linux 6.18**.
 - Hardware-encodes H.264, H.265, and MJPEG.
 - Accepts even HDMI timings from 320×200 through 2880×1620, up to 5 MP, within
   a 5 MP at 30 FPS (150M pixel/s) budget. 4K input is unsupported.
-- Advertises output profiles through 2880×1620@30. 1080p is up to 60 FPS; 720p
+- Advertises output profiles through 2880×1620@30. 1920×1080 is up to 90 FPS; 720p
   can follow a 120 Hz HDMI source.
-- Bound encoder path: VPSS feeds VENC directly. Core reads compressed access
-  units, not raw 1080p frames.
+- H.264, scaling, and transforms use VPSS → VENC. A matching driver can
+  encode same-size H.265 VI frames directly, through 1920×1080. Core reads
+  compressed access units.
 - Reports HDMI signal state, sink EDID, capture/encode latency, and a built-in
   no-signal frame for the raw-frame fallback.
 - Optional AES-GCM offload through the CVITEK SPACC character device.

@@ -10,6 +10,22 @@ CVI_S32 get_base_fd(CVI_VOID);
 CVI_S32 vb_ioctl_exit(CVI_S32 fd);
 }
 
+// Vendor sample-common sets VI attributes exactly once before EnableChn.
+// Keep one latest raw frame so manual encoding does not miss a capture while
+// it waits for the previous picture. Never reconfigure an enabled VI channel.
+extern "C" CVI_S32 __real_CVI_VI_SetChnAttr(VI_PIPE, VI_CHN, VI_CHN_ATTR_S *);
+extern "C" CVI_S32 __wrap_CVI_VI_SetChnAttr(
+    VI_PIPE pipe, VI_CHN channel, VI_CHN_ATTR_S *attr)
+{
+    if (!attr) return __real_CVI_VI_SetChnAttr(pipe, channel, attr);
+    auto configured = *attr;
+    if (pipe == 0 && channel == 0 && configured.u32Depth == 0 &&
+        configured.stSize.u32Width <= 1920 && configured.stSize.u32Height <= 1080 &&
+        onekvm::mmf::hevc_vi_direct_supported())
+        configured.u32Depth = 1;
+    return __real_CVI_VI_SetChnAttr(pipe, channel, &configured);
+}
+
 namespace onekvm::mmf {
 
 RuntimeState g_runtime{};
@@ -637,7 +653,7 @@ static CVI_S32 initialize_vendor_system(SIZE_S stSize)
 	   VPSS waitq=1 and added 1/fps to capture. WAVE4/VPSS private pools
 	   still fit the 64 MiB carveout at 2880. */
 	stVbConf.astCommPool[MMF_VB_VI_ID].u32BlkCnt =
-		vi_common_pool_blocks(stSize.u32Width, stSize.u32Height);
+		g_runtime.vi_common_buffers;
 	stVbConf.astCommPool[MMF_VB_VI_ID].enRemapMode	= VB_REMAP_MODE_CACHED;
 	stVbConf.u32MaxPoolCnt = 1;
 	fprintf(stderr, "OneKVM: common VB %ux%u blk=%u count=%u\n",
@@ -900,6 +916,10 @@ static CVI_S32 initialize_runtime(void)
 	SAMPLE_PRT("common VB pool %ux%u (HDMI %ux%u)\n",
 		   stPoolSize.u32Width, stPoolSize.u32Height,
 		   stSize.u32Width, stSize.u32Height);
+    // The optional latest-VI queue is a third owner alongside DMA and VPSS.
+    // Two blocks suffice only when no user dequeue queue retains a raw frame.
+    g_runtime.vi_common_buffers = hevc_vi_direct_supported() &&
+        stSize.u32Width <= 1920 && stSize.u32Height <= 1080 ? 3 : 2;
 	s32Ret = initialize_vendor_system(stPoolSize);
 	if (s32Ret != CVI_SUCCESS) {
 		SAMPLE_PRT("sys init failed. s32Ret: 0x%x !\n", s32Ret);

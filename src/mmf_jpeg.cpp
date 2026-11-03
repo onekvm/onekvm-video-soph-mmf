@@ -119,6 +119,9 @@ int open_jpeg_encoder(int channel, int width, int height, int pixel_format,
 		quality > kMaxJpegQuality || g_runtime.reference_count == 0)
 		return -1;
 
+    if (yield_h26x_vi_direct() != 0)
+        return -EBUSY;
+
     if (g_runtime.jpeg_cleanup_pending && close_jpeg_encoder(channel) != 0)
         return -EBUSY;
 	if (g_runtime.jpeg_initialized) {

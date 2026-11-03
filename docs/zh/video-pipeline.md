@@ -2,7 +2,8 @@
 
 [English documentation index](../en/README.md) | 简体中文
 
-NanoKVM Cube（SG2002）默认视频是 **LT6911 HDMI → CSI → VI → VPSS → VENC**。
+NanoKVM Cube（SG2002）的视频使用 **LT6911 HDMI → CSI → VI**。H.264、缩放和
+变换经 VPSS 再送 VENC；具备 packed-source 能力的驱动允许同尺寸 H.265 直接使用 VI 帧。
 Core 走绑定 H.264/H.265，不读原始帧。改采集、绑定、释放或 HDMI 探测前先读本文。
 验收数据和试验过程记在工作区 `docs/`，不要把流水账写回这里。
 
@@ -64,9 +65,39 @@ HDMI 源
 
 持续自适应的纯码率/QP 更新不请求 IDR，也不重复写入相同 QP 参数；它们保持参考帧链。只有实际 FPS/GOP 变化沿用重同步请求，启动、丢帧恢复和显式请求仍各自处理关键帧。否则每次调码率都会制造大关键帧突发，干扰弱网反馈。
 
-1:1 输出也走 **VI→VPSS→VENC**。VPSS 是 online 出口，并做 UYVY→NV21。
+H.264 和需要缩放、镜像、翻转的输出使用 **VI→VPSS→VENC**，由 VPSS 做 UYVY→NV21。
 `SYS_Bind(VI,VENC)` 可以 ioctl 成功，但解开 VI→VPSS 后 Preraw `IntCnt` 会停在 0，
 `EncodedFrame=0`。双绑 VI→VPSS+VENC 会在几块 UYVY 池耗尽后变成 `VENC waitq is full`。
+
+## H.265 原始帧直通
+
+直通仅接纳输入／输出同尺寸、不超过 1920×1080、无镜像或翻转、尚无 JPEG 消费者的
+H.265 编码器，并要求 `soph_vc_driver` 的只读 `hevc_packed_source=Y`。
+旧驱动、缺失能力或 `ONEKVM_HEVC_VI_DIRECT=0` 使用 VPSS；不能仅按版本或机型推断支持。
+驱动逐帧配置 packed／NV21 布局，并仅对 HEVC 的这几种格式放行源格式切换；
+保留 H.264 的格式变更拒绝和其他格式检查。
+
+启动前，sample-common 的 `CVI_VI_SetChnAttr` 经链接包装器为上述尺寸设置一帧最新
+VI 队列，并使用三块公共 VB，覆盖 DMA、最新帧缓存和 VPSS 三个同时存在的所有者。禁止在 VI 运行时修改属性。直通关闭 VPSS 输出通道，
+保留 VI→VPSS online 连接供前端正常运行；不做 `SYS_Bind(VI,VENC)`，不双绑消费者。
+VPSS 线程仍有少量接收／释放工作，不能称为完全关闭 VPSS。
+
+唯一 reader 以 `GetChnFrame` 借用 VI VB，按真实 UYVY 布局（行距按 16 字节对齐）
+描述物理地址，再手动 `SendFrame`；不映射、复制或 invalidate 整幅原始图像。
+reader 按缓存输入 FPS、目标 FPS 和 VI `u32TimeRef` 在提交前选帧，丢弃的原始帧立即归还。
+VENC 的 FPS 仍描述转换后的实际输出；不得丢弃编码后的 P 帧来代替原始帧降帧。
+
+手动模式启用 `bIsoSendFrmEn`，没有绑定编码线程。此时 fd 可读只说明已提交输入，
+`GetStream` 必须使用正的有界等待完成硬件中断；沿用绑定模式的零超时会反复返回 BUSY。
+RC／IDR 请求只能由 reader 在整帧完成后执行；单独参数集不是硬件完成边界。
+独立参数集暂存到首个 VCL AU；`ReleaseStream` 成功且确认该帧完成后才归还 VI lease。
+即使发送超时也不能提前释放可能仍由硬件读取的帧；关闭时须成功 ResetChn 后才能归还。
+网络、加密和慢客户端只持有复制出的压缩 AU，不持有原始 VI 缓冲。
+
+截图、JPEG、CPU 像素读取或无信号占位先停止并 join 直通 reader，再切回 VPSS，
+切换成功前不得改变输入布局或释放原始帧。回退后同一编码器生命周期保持 VPSS，
+避免抢占截图和反复切换；停止／重建编码器后重新判断。截图须先让出直通，再记录
+VPSS 的原运行状态，不能把直通时关闭的 scaler 当作整个视频空闲。
 
 ## 绑定路径
 
@@ -90,10 +121,11 @@ HDMI 源
 - 读 `/proc/cvitek/vi`（整份 dump 会把 60fps 打成 30–50）
 - 读 `/proc/cvitek/vi_dbg`（会 `msleep` 并卡住 CSI）
 - 对活着的 1080 或更高探 LT6911 I2C（`80ee` 会打乱前端）
-- `SendFrame` / `submit_h26x_frame`（再拷一整帧 NV21）
+- `submit_h26x_frame`（CPU 帧拷贝）；直通 reader 的原生物理帧 `SendFrame` 除外
 - `augment_keyframe`（IDR 已带齐 SPS/PPS 时）
 
-像素是 VI VB → VPSS VB → VENC，硬件绑定，没有用户态 NV21 `memcpy`。
+VPSS 路径是 VI VB → VPSS VB → VENC；H.265 直通为 VI VB → VENC。
+两条路径都没有用户态原始像素 `memcpy`。
 `GetStream` 必须在 `ReleaseStream` 前把压缩 AU 拷出驱动缓冲，这是唯一必要的码流拷贝。
 reader 先检查所有 pack 的长度、偏移和容量，再把 AU 直接拷进可复用 vector；
 队列、`take_ready_h26x_into` 与 `encoder_take_packet` 逐级移动所有权，不再经过独立 scratch。
@@ -294,8 +326,10 @@ H.26x ready eventfd 只在入队、错误及控制状态变化时通知；消费
 绑定路径没有 `acquire_capture_frame`。VENC pack `u64PTS` 是编码完成时刻，不能当采集起点。
 
 采集是 HDMI IN 到编码器前：当前 progressive 帧 +（VI 公共池 > 2 时 VPSS waitq 一场）+ VPSS `CostTime`。
-VI 公共池固定 **2** 块（fill + consume）。第三块 UYVY 会多一场采集延迟。
-1080p60 大约 23 ms（16.7 + CostTime ~6.7）。
+关闭原始帧最新缓存时，VI 公共池使用 **2** 块（fill + consume）。
+启用最新帧缓存的尺寸使用 **3** 块，避免缓存／DMA／VPSS 同时持有时缺块；
+VPSS 路径的捕获延迟估计使用实际公共池块数，不能仍按两块报告。
+关闭最新缓存时，1080p60 大约 23 ms（16.7 + CostTime ~6.7）。
 
 不要把 progressive 改成 50%：`VI_EARLY_INTERRUPT` 只有 proc 字段，没有 ioctl，驱动从不写 `enEalyInt`；YUV HDMI 是 `input_mem`，VPSS 等整帧进 DRAM。
 不要计入 VENC waitq / `HwEncTime`（那是编码），也不要计入 VPSS `u32Depth`（截图 doneq）。编码缓存 = VENC `HwEncTime`。
@@ -358,9 +392,9 @@ Tight JPEG；Core 将压缩包写入共享 ring，VNC 借用 ring 槽并直接�
 
 - 采集一律走 phy chn 1（`sc_v1`，最大输出宽 2880）。phy chn 0（`sc_d`，最大 1920）上 1:1 2560 会 tile，NV21 全 0。HDMI 1080→1440 同一 PID 不换通道。
 - watcher 通过 `CVI_VI_QueryChnStatus` 读取 vendor 共享内存中已缓存的输入 FPS，两次稳定样本后更新帧率转换；它只是复制统计，不读 `/proc/cvitek/vi`、不取帧、不访问 LT6911。不能用用户设置覆盖缓存的输入帧率，也不能为测量 FPS 在活动流上打开 `80ee`。
-- VPSS 的源帧率使用上述采集 FPS，目标帧率取用户上限、输入帧率及输入／输出像素预算的最小值，实际丢帧发生在编码前。VENC 的源与目标都使用转换后的有效 FPS，不再额外施加 60/30 FPS floor。把 VPSS 两端都填成目标值会关闭转换，仅改 VENC 的标称目标也不能保证实际降帧。720p 高刷时 `input_fps`/`TarFr` 可到 120。
+- VPSS 路径的源帧率使用上述采集 FPS，目标帧率取用户上限、输入帧率及输入／输出像素预算的最小值，实际丢帧发生在编码前。VENC 的源与目标都使用转换后的有效 FPS，不再额外施加 60/30 FPS floor。把 VPSS 两端都填成目标值会关闭转换，仅改 VENC 的标称目标也不能保证实际降帧。720p 高刷时 `input_fps`/`TarFr` 可到 120。
 - `video.fps=0` 为自动模式，省去用户帧率上限，使用缓存的实测输入 FPS；启动仍以 60 FPS 建立流水线，稳定采样后跟随输入。重配、恢复及半速检测沿用这一语义，并继续遵守像素吞吐和大尺寸最高 30 FPS 的限制。
-- Core 只改 FPS 时走编码器实时更新；后端须同时更新 VPSS 的目标 FPS 和 source 中保存的用户上限，不能只更新 VENC，也无需重建采集通道。
+- Core 只改 FPS 时走编码器实时更新；后端同时更新 VPSS 的目标 FPS、直通 reader 的输入 FPS 和 source 中保存的用户上限，不能只更新 VENC，也无需重建采集通道。
 - 配置 GOP 为 0 时按输出帧率取 5 秒的帧数。显式 GOP 保持不变。丢包和队列溢出仍立即请求 IDR。新观众不请求 IDR，也不为他保存整段 GOP。环只留约 1 秒（64 个 AU）；上一张 IDR 还在环里就从那里接着读，已经被盖掉就丢掉 P 帧，等到下一张计划中的 IDR。
 - JPEG 码流缓冲按宽×高的一半分配，下限 512 KiB，上限 2 MiB（与用户态返回缓冲相同），并按 1 KiB 对齐。`u32BufSize` 留 0 会让驱动分配 9 MiB。
 - Core 绑定路径的 RTP 时戳用 `1/有效FPS`，不要用墙钟间隔。MMF 在 packet 的可选 `duration_ns` 尾字段报告帧率限制后的标称时长；旧调用者仍可传基础大小，后端不能越界写尾字段。

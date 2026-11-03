@@ -1062,6 +1062,15 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
             return -1;
         encoder->request_keyframe = true;
     }
+    if (mmf::h26x_vi_direct_failed(encoder->channel)) {
+        MmfControlLock control;
+        if (mmf::rebind_h26x_to_vpss(encoder->channel) != 0) {
+            set_error(error, error_capacity, "VI-direct fallback could not release its input");
+            return -1;
+        }
+        encoder->bound_since_ns = monotonic_ns();
+        source->capture_startup.begin(encoder->bound_since_ns);
+    }
     const int effective_fps = normalized_output_fps(
         encoder->config.fps, encoder->width, encoder->height, source);
     if (effective_fps != encoder->output_fps) {

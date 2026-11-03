@@ -89,6 +89,7 @@ struct H26xEncoderState {
 	bool stream_held;
 	bool bound_to_capture;
 	bool bound_to_vi;
+	bool vi_direct_disabled;
 	uint8_t capture_group;
 	uint8_t capture_channel;
 	int fd;
@@ -125,6 +126,7 @@ struct RuntimeState {
 	VI_CHN_ATTR_S vi_chn_attr;
 	int vi_chn_pool_id[MMF_VI_MAX_CHN];
 	SIZE_S vi_size;
+    int vi_common_buffers = 2;
 	VIDEO_FRAME_INFO_S *vpss_user_frame[2];
 	int vpss_user_pool_id = -1;
 	int vpss_user_index;
