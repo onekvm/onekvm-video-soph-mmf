@@ -377,9 +377,9 @@ const onekvm_crypto_backend_v1 kBackend = {
     ONEKVM_CRYPTO_BACKEND_ABI_V1,
     "soph-mmf",
     "nanokvm CryptoDMA",
-    // Do not advertise CONCURRENT_H265_VIDEO. SG2002 currently hard-locks
-    // under concurrent H.265 VENC and CryptoDMA load, so Core must use its
-    // generic AES-GCM path for H.265 sessions.
+    // H.265 VENC + CryptoDMA has not passed end-to-end streaming validation:
+    // 1080p90 may keep sending but stall browser decoding. Leave concurrent
+    // H.265 unadvertised so Core uses software SRTP for that codec.
     ONEKVM_CRYPTO_FEATURE_AES_GCM_TX | ONEKVM_CRYPTO_FEATURE_AES_GCM_TX_BATCH,
     kMaxBatch,
     kMaxInput,
@@ -417,7 +417,8 @@ extern "C" ONEKVM_CRYPTO_EXPORT int32_t onekvm_crypto_backend_query(
                 if (caps & 1u) api.features |= ONEKVM_CRYPTO_FEATURE_AES_CTR;
                 if (caps & 2u) api.features |= ONEKVM_CRYPTO_FEATURE_HMAC_SHA1;
                 if (caps & 8u) api.features |= ONEKVM_CRYPTO_FEATURE_AES_CM_TX_BATCH;
-                if (caps & 4u) api.features |= ONEKVM_CRYPTO_FEATURE_CONCURRENT_H265_VIDEO;
+                // Kernel bit 4 permits concurrent driver operations; it does
+                // not establish end-to-end H.265/WebRTC compatibility.
             }
             ::close(fd);
         }

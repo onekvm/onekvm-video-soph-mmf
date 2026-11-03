@@ -375,7 +375,11 @@ Tight JPEG；Core 将压缩包写入共享 ring，VNC 借用 ring 槽并直接�
 `write_sample` 在视频线程上同步 `block_on` 加密。完成位是 `CRYPTODMA_WR_INT`，不要 `wait_event` 活 DTB 上那条从不触发的 PLIC 59。
 单次 `ETIMEDOUT` 只让当前批次走软件；Core 以 1、2、4、8、16、30 秒（封顶）
 指数退避自动探测恢复。不要因一次瞬态超时在进程生命周期内永久禁用 offload。
-不要给 crypto backend 打 `CONCURRENT_H265_VIDEO`：H.265 VENC 和 CryptoDMA 同时跑会锁死 SG2002，Core 对 H.265 会话改用软件 AES-GCM。
+不要给 crypto backend 打 `CONCURRENT_H265_VIDEO`，包括内核 GetCaps 返回并发位时：
+该位只描述驱动能力，不能代替 H.265/WebRTC 联合验收。SG2002 的 H.265 高帧率
+与 CryptoDMA 发送组合会出现持续收包但停止解码，切到软件加密后恢复。Core 对
+H.265 会话使用协商协议对应的软件 SRTP；默认 AES-CM 路径仍保留，H.264 可使用
+硬件加密。不通过修改整机环境变量来永久关闭所有编码格式的硬件路径。
 
 ## WebSocket 分发
 
