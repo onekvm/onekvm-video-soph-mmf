@@ -693,15 +693,16 @@ static void refresh_bound_hw_latency(H26xEncoderState *info)
 	if (got_venc_perf)
 		__atomic_store_n(&info->last_enc_fps, enc_fps, __ATOMIC_RELAXED);
 
-	/* Capture stops at VPSS output. VENC waitq/HwEncTime are encode. */
+	/* Capture stops at VPSS output. VENC waitq/HwEncTime are encode.
+	   cfg.input_fps keeps the rate seen when the encoder was created; the
+	   reader follows the measured HDMI cadence. */
+	const int live_fps = g_readers[info->ch].input_fps.load(std::memory_order_acquire);
+	const int input_fps = live_fps > 0 ? live_fps : info->cfg.input_fps;
 	uint32_t capture_us = 0;
 	if (info->bound_to_vi)
-		capture_us = bound_frame_period_us(info->cfg.input_fps);
+		capture_us = bound_frame_period_us(input_fps);
 	else
-		capture_us = bound_capture_us(
-			vpss_us, info->cfg.input_fps,
-			g_runtime.vi_common_buffers,
-			1);
+		capture_us = bound_capture_us(vpss_us, input_fps);
 	if (capture_us > 0 && capture_us < 1000000u)
 		__atomic_store_n(&info->last_capture_ns,
 			static_cast<uint64_t>(capture_us) * 1000ull, __ATOMIC_RELAXED);
@@ -1170,6 +1171,8 @@ int bind_h26x_to_capture(int ch, int vpss_group, int vpss_channel) {
 		 * attributes in the hot H.26x path. The private three-block pool
 		 * already accounts for producer, bound VENC, and one short-lived
 		 * userspace borrower. */
+		g_readers[ch].input_fps.store(attr.stFrameRate.s32SrcFrameRate,
+			std::memory_order_release);
 		if (attr.u32Depth != MMF_VPSS_LOW_LATENCY_DEPTH) {
 			attr.u32Depth = MMF_VPSS_LOW_LATENCY_DEPTH;
 			ret = CVI_VPSS_SetChnAttr(vpss_group, vpss_channel, &attr);

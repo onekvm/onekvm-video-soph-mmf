@@ -68,25 +68,12 @@ inline uint32_t bound_frame_period_us(int input_fps)
 	return 1000000u / static_cast<uint32_t>(input_fps);
 }
 
-/* HDMI IN → encoder input only. Progressive fill is one frame. VPSS workq is
-   CostTime, not another period. A third VI VB can occupy VPSS waitq=1.
-   Do not count VENC waitq or snapshot u32Depth. */
-inline uint32_t bound_capture_queue_frames(int vi_blocks, int vpss_waitq)
+/* HDMI IN → encoder input: one progressive frame fill plus the VPSS job.
+   VENC receives each VPSS output about CostTime after VI frame done (VI
+   stamps frame done; RcvFrmPts lag ≈ CostTime), so the third VI block in
+   the common pool does not add a queued frame. Do not count VENC waitq,
+   HwEncTime or snapshot u32Depth. Bound path has no source PTS. */
+inline uint32_t bound_capture_us(uint32_t vpss_cost_us, int input_fps)
 {
-	uint32_t frames = 1;
-	if (vi_blocks > 2 && vpss_waitq > 0)
-		frames += 1;
-	return frames;
-}
-
-/* Bound path has no source PTS. Do not read /proc/cvitek/vi. */
-inline uint32_t bound_capture_us(uint32_t vpss_cost_us, int input_fps,
-				 int vi_blocks, int vpss_waitq)
-{
-	uint32_t capture_us = vpss_cost_us;
-	const uint32_t frame_us = bound_frame_period_us(input_fps);
-	if (frame_us == 0)
-		return capture_us;
-	capture_us += bound_capture_queue_frames(vi_blocks, vpss_waitq) * frame_us;
-	return capture_us;
+	return vpss_cost_us + bound_frame_period_us(input_fps);
 }

@@ -42,19 +42,11 @@ int main()
 		return 7;
 	if (bound_frame_period_us(0) != 0)
 		return 8;
-	if (bound_capture_queue_frames(3, 1) != 2)
+	if (bound_capture_us(6249, 60) != 6249 + frame60)
 		return 9;
-	if (bound_capture_queue_frames(2, 1) != 1)
+	if (bound_capture_us(6249, 0) != 6249)
 		return 10;
-	if (bound_capture_queue_frames(1, 0) != 1)
+	if (bound_capture_us(0, 90) != 1000000u / 90)
 		return 11;
-	if (bound_capture_us(6249, 60, 3, 1) != 6249 + 2 * frame60)
-		return 12;
-	if (bound_capture_us(6249, 0, 3, 1) != 6249)
-		return 13;
-	if (bound_capture_us(0, 60, 3, 1) != 2 * frame60)
-		return 14;
-	if (bound_capture_us(6249, 60, 1, 0) != 6249 + frame60)
-		return 15;
 	return 0;
 }
