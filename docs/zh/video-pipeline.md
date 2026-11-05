@@ -281,9 +281,9 @@ VI `FrameRate` 列开机约 1 秒是 0，不能单靠这一列判无信号。已
 
 ## 空闲与释放
 
-无消费者时 Core `videoLoop` 停在 `waitForConsumer`。空闲只 `CVI_VPSS_DisableChn` 停 scaler（`CVI_VIP_SCL`），保持 VI→VPSS 绑定和 VI DMA。`CVI_VI_DisableChn` / UnBind 会把 Preraw 打停，后续 `EnableChn`+`SetChnAttr`+`lt6911_start_csi` 仍拉不回 CSIBDG，活路会掉进无 HDMI 占位。保留 VPSS→VENC、VENC bind worker 和唯一的用户态 VENC reader；reader 进入 discard 模式，以有界 fd poll 排空停 scaler 后的迟到 AU。直接解绑而不先排空在途帧，会让无输入的 worker 在最终 `StopRecvFrame` 时卡进厂商锁。重新绑定先 `EnableChn` VPSS。
+无消费者时 Core `videoLoop` 停在 `waitForConsumer`。空闲只 `CVI_VPSS_DisableChn` 停 scaler（`CVI_VIP_SCL`），保持 VI→VPSS 绑定和 VI DMA。`CVI_VI_DisableChn` / UnBind 在 osdrv `8d646e2` 之前的驱动上会把 Preraw 打停，后续 `EnableChn`+`SetChnAttr`+`lt6911_start_csi` 拉不回，活路会掉进无 HDMI 占位（原因见 [dynamic-ion.md](dynamic-ion.md)）。新驱动已可在同一进程内恢复，但空闲策略尚未改用 VI 关闭，且必须兼容旧模块。保留 VPSS→VENC、VENC bind worker 和唯一的用户态 VENC reader；reader 进入 discard 模式，以有界 fd poll 排空停 scaler 后的迟到 AU。直接解绑而不先排空在途帧，会让无输入的 worker 在最终 `StopRecvFrame` 时卡进厂商锁。重新绑定先 `EnableChn` VPSS。
 
-`unbind_h26x_from_capture` 只断开 SYS bind，不停 VI。空闲不要 `DisableChn`：在 SG2002 HDMI 上它不可逆。不要因为 CSI `0x0` + HDMI 仍是 1080 就 `reopen_source`（空闲停 scaler 和占位都会出现这个读数）。从空闲恢复只 `resume_vpss_channel`。
+`unbind_h26x_from_capture` 只断开 SYS bind，不停 VI。空闲不要 `DisableChn`：旧 VI 模块上它不可逆，新模块的恢复尚未纳入空闲策略。不要因为 CSI `0x0` + HDMI 仍是 1080 就 `reopen_source`（空闲停 scaler 和占位都会出现这个读数）。从空闲恢复只 `resume_vpss_channel`。
 
 重新绑定 VENC 时先清除旧的 `last_packet_ns` 和 `read_error`，再退出 discard 并强制 IDR；这样首帧沿用 `bound_since_ns` 的 1.5 秒 grace，不会把空闲前的旧时间戳误判为 VENC 停帧并切换 placeholder。Enable 失败则保持关闭并让 Core 重试，不要拆 VI。
 

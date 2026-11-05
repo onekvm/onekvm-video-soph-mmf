@@ -591,10 +591,10 @@ int pause_vi_dma(void)
 {
 	if (!g_runtime.vi_dma_running)
 		return 0;
-	/* Do not CVI_VI_DisableChn and do not UnBind VI→VPSS. On SG2002 HDMI
-	   both stop Preraw: IntCnt dies, EnableChn/SetChnAttr do not bring
-	   CSIBDG back, and the encoder falls through to the no-signal still.
-	   Idle parks the VPSS scaler only. */
+	/* Do not CVI_VI_DisableChn and do not UnBind VI→VPSS. With VI modules
+	   older than osdrv 8d646e2 both stop Preraw: IntCnt dies, EnableChn/
+	   SetChnAttr do not bring it back, and the encoder falls through to the
+	   no-signal still. Idle parks the VPSS scaler only. */
 	return 0;
 }
 

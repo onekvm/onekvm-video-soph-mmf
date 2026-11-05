@@ -90,16 +90,35 @@ MMF 的恢复序列只调用 `SetChnAttr` 与 `EnableChn`，没有再次 `Enable
 「未重置的每轮软件状态」推断，具体是哪一项状态阻止第二帧尚未定位。关闭 VI 可释放约 8 MB
 ISP 缓冲，但 VI／VPSS VB 池仍由 VB 模块持有，须 `VB_Exit` 才能归还。
 
+### 驱动修复（osdrv `8d646e2`）
+
+| 改动 | 作用 |
+| --- | --- |
+| `total_dev_num` 由已启用设备标记计算，DisableChn 不再清零，最后一次 release 时清零 | 厂商用户态 `CVI_VI_EnableChn` 只有在设备数等于 1 时才下发 ioctl；之前清零后它直接返回成功，什么也不做 |
+| 新一轮 EnableChn 前调用 `vi_reset_stream_state()` | 清 `isp_streamoff`、帧／触发计数和前后级状态；保留管线配置与已启用设备 |
+
+107 验证（1080p60、H.264、WebRTC，临时实验开关在通道打开后立即 DisableChn，消费者到来时按
+`lt6911_start_csi` + `SetChnAttr` + `EnableChn` 恢复，不调用 EnableDev）：
+
+| 项 | 结果 |
+| --- | --- |
+| 不开实验开关的常规回归 | 60 FPS，`IntCnt` 持续增长，ION 40.1 MB |
+| 同一进程 DisableChn→EnableChn | 4 轮（不重启 Core）均 60 FPS，`IntCnt` 持续增长，无占位 |
+| 重新启用到首个 WebRTC 关键帧 | 约 140、57、58、50 ms |
+| VI 关闭期间 ION | 打开后即关闭时 31.8 MB（ISP 缓冲已释放）；VI／VPSS VB 池仍在 |
+
 可行路线：
 
 | 路线 | 做法 | 首帧代价 | 状态 |
 | --- | --- | --- | --- |
-| A | 复用现有完整重开（`DestroyVi` + `SYS_Exit`，再 `initialize()`），分辨率切换已用 | 约 0.7–1.5 s（规范实测，含 LT6911 序列） | 已可用，超出 100–200 ms 预算 |
-| B | 修驱动：disable 只清本轮状态并保留设备计数，enable 时重置 `_vi_sw_init` 中的每轮字段；核对 MAC 时钟引用平衡 | 预计接近 VI 启动本身，需实测 | 需改 `osdrv-sg200x` VI 驱动 |
+| A | 完整重开（`DestroyVi` + `SYS_Exit`，再 `initialize()`），可释放全部 VB | 约 0.7–1.5 s（含 LT6911 序列） | 已可用，超出预算 |
+| B | 空闲时 VI DisableChn，消费者到来时同进程重新启用 | 50–140 ms（上表） | 驱动已修复；MMF 空闲策略未改，需判断模块版本 |
+
+VB 池（约 31 MB）仍需 `VB_Exit` 或按池销毁才能交给保留式堆，这是阶段 2 的剩余工作。
 
 ## 待验证
 
-- VI DisableChn → 加 `EnableDev` 的恢复序列能否稳定出帧（多轮、不同分辨率）；ISP ION 缓冲是否随之释放与重新申请。
+- VI DisableChn 恢复在不同分辨率、断信号恢复及截图并发下的表现；VB 池能否在 VI 关闭期间按池销毁并重建。
 - 阶段 1 前后 `MemAvailable`／`CmaFree`：空闲、视频中、NPU 推理后。
 - 首帧时间：命中保留缓存与需要 `cma_alloc` 两种情况各至少三轮。
 - 内存压力下 shrinker 实际回收，回收后视频／NPU 仍能分配且无 OOM。
