@@ -85,7 +85,7 @@ H.265 编码器，并要求 `soph_vc_driver` 的只读 `hevc_packed_source=Y`。
 保留 H.264 的格式变更拒绝和其他格式检查。
 
 启动前，sample-common 的 `CVI_VI_SetChnAttr` 经链接包装器为上述尺寸设置一帧最新
-VI 队列，并使用三块公共 VB，覆盖 DMA、最新帧缓存和 VPSS 三个同时存在的所有者。禁止在 VI 运行时修改属性。直通关闭 VPSS 输出通道，
+VI 队列，并使用三块 VI 私有 VB，覆盖 DMA、最新帧缓存和 VPSS 三个同时存在的所有者。禁止在 VI 运行时修改属性。直通关闭 VPSS 输出通道，
 保留 VI→VPSS online 连接供前端正常运行；不做 `SYS_Bind(VI,VENC)`，不双绑消费者。
 VPSS 线程仍有少量接收／释放工作，不能称为完全关闭 VPSS。
 
@@ -333,7 +333,9 @@ H.26x ready eventfd 只在入队、错误及控制状态变化时通知；消费
 绑定路径没有 `acquire_capture_frame`。VENC pack `u64PTS` 是编码完成时刻，不能当采集起点。
 
 采集是 HDMI IN 到编码器前：当前 progressive 帧（`1/输入帧率`）+ VPSS `CostTime`。帧率取 reader 跟随实测 HDMI 节奏的输入帧率，不能用创建编码器时的 `cfg.input_fps`（例如配置 90、实际输入 60 时会把一帧 16.7 ms 算成 11.1 ms）。
-关闭原始帧最新缓存时，VI 公共池使用 **2** 块（fill + consume）；启用最新帧缓存的尺寸使用 **3** 块，避免缓存／DMA／VPSS 同时持有时缺块。第三块不增加排队：VI 在写完一帧时打 `ktime` 戳，VPSS 离线模式原样传给 VENC，107 1080p60 实测 VENC `RcvFrmPts` 距当前单调时钟最小约 7.4 ms（含读 proc 开销，VPSS `CostTime` 约 6.1 ms），若多排一帧会 ≥ 23 ms。1080p60 约 23 ms（16.7 + CostTime ~6.5）。
+关闭原始帧最新缓存时，VI 私有池使用 **2** 块（fill + consume）；启用最新帧缓存的尺寸使用 **3** 块，避免缓存／DMA／VPSS 同时持有时缺块。第三块不增加排队：VI 在写完一帧时打 `ktime` 戳，VPSS 离线模式原样传给 VENC，107 1080p60 实测 VENC `RcvFrmPts` 距当前单调时钟最小约 7.4 ms（含读 proc 开销，VPSS `CostTime` 约 6.1 ms），若多排一帧会 ≥ 23 ms。1080p60 约 23 ms（16.7 + CostTime ~6.5）。
+
+VI 原始帧不再用公共 VB 池：SYS 初始化时公共池数为 0，VI 帧来自名为 `vi_raw` 的私有池，经 `CVI_VI_AttachVbPool` 挂到 VI 通道 0。`CVI_VI_SetChnAttr` 会清掉通道的池绑定，所以挂池放在 `SetChnAttr` 的 `--wrap` 包装里，紧接着的 `EnableChn` 才能取到块。空闲暂停时：VPSS 通道 `DisableChn` 后卸下并销毁其输出池，VI `DisableChn` 后卸下并销毁 `vi_raw`；恢复时先重建池再 `EnableChn`。块仍被持有（编码器、截图帧）时 `DestroyPool` 失败，池保留并重新挂上，下次暂停再试。销毁的池回到 onekvm-lazy-dma 保留池，内存压力下由 shrinker 归还 Linux。107 1080p60 空闲占用 40.0→8.5 MB（剩 VENC 缓冲），开流重新启用到关键帧与改动前相同。
 
 不要把 progressive 改成 50%：`VI_EARLY_INTERRUPT` 只有 proc 字段，没有 ioctl，驱动从不写 `enEalyInt`；YUV HDMI 是 `input_mem`，VPSS 等整帧进 DRAM。
 不要计入 VENC waitq / `HwEncTime`（那是编码），也不要计入 VPSS `u32Depth`（截图 doneq）。编码缓存 = VENC `HwEncTime`。
@@ -403,7 +405,7 @@ Tight JPEG；Core 将压缩包写入共享 ring，VNC 借用 ring 槽并直接�
 - JPEG 码流缓冲按宽×高的一半分配，下限 512 KiB，上限 2 MiB（与用户态返回缓冲相同），并按 1 KiB 对齐。`u32BufSize` 留 0 会让驱动分配 9 MiB。
 - MMF 在 packet 的可选 `duration_ns` 尾字段报告帧率限制后的标称时长，供媒体时长使用；旧调用者仍可传基础大小，后端不能越界写尾字段。Core 的 WebRTC RTP 时钟独立按单调时间累计量化到 90 kHz，保留真实停顿且不累计逐帧截断误差；上一 AU 到当前 AU 的间隔须在标记当前 AU 前推进，不能误用普通 duration 接口将间隔错记到下一帧。详见 Core 的视频 ABI 规范。
 - VPSS 和 VENC 都按输入、输出两端较严格的像素率限制帧率，避免小输入放大到 1620p 时 scaler 仍跑 60 FPS。
-- 显式最大输入/输出为 **2880×1620@30**（4.67 MP、约 140 Mpixel/s），使用 **64 MiB** 视频 carveout：高于 2560×1440 时 VI 公共池两块 UYVY，VPSS 私有池仍三块。
+- 显式最大输入/输出为 **2880×1620@30**（4.67 MP、约 140 Mpixel/s），使用 **64 MiB** 视频 carveout：高于 2560×1440 时 VI 私有池两块 UYVY，VPSS 私有池仍三块。
 - 720p@120 需要源真出 1280×720@120（CEA VIC 47）；Cube 默认 EDID 不含该模式。
 - 活着的受支持模式不要探 LT6911 I2C。
 - CSI 半速（活包仍在、帧率是目标的一半）按上面 HDMI 节重装，不要当无信号占位，也不要为查帧率去 dump `/proc/cvitek/vi`。

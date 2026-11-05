@@ -23,7 +23,12 @@ extern "C" CVI_S32 __wrap_CVI_VI_SetChnAttr(
         configured.stSize.u32Width <= 1920 && configured.stSize.u32Height <= 1080 &&
         onekvm::mmf::hevc_vi_direct_supported())
         configured.u32Depth = 1;
-    return __real_CVI_VI_SetChnAttr(pipe, channel, &configured);
+    const CVI_S32 result = __real_CVI_VI_SetChnAttr(pipe, channel, &configured);
+    // SetChnAttr clears the channel's pool binding; EnableChn follows it.
+    if (result == CVI_SUCCESS && pipe == 0 && channel == 0 &&
+        onekvm::mmf::attach_vi_pool() != 0)
+        return CVI_FAILURE;
+    return result;
 }
 
 namespace onekvm::mmf {
@@ -614,8 +619,10 @@ static void shutdown_vendor_system(void)
 		}
 		g_vendor_vi_started = false;
 	}
+	release_vi_pool();
 	if (g_vendor_system_started) {
 		SAMPLE_COMM_SYS_Exit();
+		forget_vi_pool();
 		g_vendor_system_started = false;
 	}
 }
@@ -648,20 +655,22 @@ static CVI_S32 initialize_vendor_system(SIZE_S stSize)
 	u32BlkRotSize = COMMON_GetPicBufferSize(stSize.u32Height, stSize.u32Width, PIXEL_FORMAT_UYVY,
 		DATA_BITWIDTH_8, enCompressMode, DEFAULT_ALIGN);
 	u32BlkSize = MAX(u32BlkSize, u32BlkRotSize);
-	stVbConf.astCommPool[MMF_VB_VI_ID].u32BlkSize	= u32BlkSize;
 	/* Two UYVY blocks: VI fill + VPSS consume. A third block occupied
-	   VPSS waitq=1 and added 1/fps to capture. WAVE4/VPSS private pools
-	   still fit the 64 MiB carveout at 2880. */
-	stVbConf.astCommPool[MMF_VB_VI_ID].u32BlkCnt =
-		g_runtime.vi_common_buffers;
-	stVbConf.astCommPool[MMF_VB_VI_ID].enRemapMode	= VB_REMAP_MODE_CACHED;
-	stVbConf.u32MaxPoolCnt = 1;
-	fprintf(stderr, "OneKVM: common VB %ux%u blk=%u count=%u\n",
+	   VPSS waitq=1 and added 1/fps to capture. They form a private pool
+	   attached to VI channel 0 (see attach_vi_pool), not a common pool:
+	   a common pool lives until VB_Exit, a private one is destroyed while
+	   VI is paused so idle video holds no frame memory. */
+	stVbConf.u32MaxPoolCnt = 0;
+	memset(stVbConf.astCommPool, 0, sizeof(stVbConf.astCommPool));
+	g_runtime.vi_pool_id = -1;
+	g_runtime.vi_pool_blk_size = u32BlkSize;
+	fprintf(stderr, "OneKVM: VI VB %ux%u blk=%u count=%u (private)\n",
 		stSize.u32Width, stSize.u32Height, u32BlkSize,
-		stVbConf.astCommPool[MMF_VB_VI_ID].u32BlkCnt);
+		g_runtime.vi_common_buffers);
 
 	s32Ret = SAMPLE_COMM_SYS_Init(&stVbConf);
 	if (s32Ret != CVI_SUCCESS) {
+		g_runtime.vi_pool_blk_size = 0;
 		SAMPLE_PRT("system init failed with %#x\n", s32Ret);
 		return s32Ret;
 	}
@@ -933,6 +942,7 @@ static CVI_S32 initialize_runtime(void)
 		 * generation and unprepares clk_csi_mac0_vip twice. */
 		g_vendor_system_started = false;
 		g_vendor_vi_started = false;
+		forget_vi_pool();
 		SAMPLE_PRT("vi init failed. s32Ret: 0x%x !\n", s32Ret);
 		SAMPLE_PRT("Please try to check if the camera is working.\n");
 		return s32Ret;

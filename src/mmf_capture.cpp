@@ -375,6 +375,8 @@ static int create_capture_channel(int ch, int width, int height, int format, int
 	// CVI_VPSS_ReleaseChnFrame(0, ch, &frame);
 
 	g_runtime.vi_chn_pool_id[ch] = pool_id;
+	g_runtime.vi_chn_pool_size[ch] = pool_size_out;
+	g_runtime.vi_chn_pool_blocks[ch] = pool_blocks;
 	g_runtime.vi_chn_is_inited[ch] = true;
 	g_runtime.vi_chn_running[ch] = true;
 	g_runtime.vi_dma_running = true;
@@ -529,6 +531,45 @@ bool capture_channel_open(int ch) {
 	return g_runtime.vi_chn_is_inited[ch];
 }
 
+/* A paused VPSS channel gives its output pool back to the allocator. Blocks
+   still held (an encoder or snapshot frame) keep the pool until the next
+   pause; it stays attached so resume needs nothing. */
+static void release_vpss_pool(int ch)
+{
+	const int pool = g_runtime.vi_chn_pool_id[ch];
+	if (pool < 0)
+		return;
+	clear_capture_mappings(ch);
+	CVI_VPSS_DetachVbPool(0, ch);
+	if (_destroy_vb_pool(pool) != 0) {
+		CVI_VPSS_AttachVbPool(0, ch, pool);
+		std::fprintf(stderr, "OneKVM: VPSS chn %d pool busy, kept\n", ch);
+		return;
+	}
+	g_runtime.vi_chn_pool_id[ch] = -1;
+}
+
+static int restore_vpss_pool(int ch)
+{
+	if (g_runtime.vi_chn_pool_id[ch] >= 0)
+		return 0;
+	char name[20];
+	snprintf(name, sizeof(name), "vi_vpss%.1d", ch);
+	const int pool = _create_vb_pool(name, g_runtime.vi_chn_pool_size[ch],
+					 g_runtime.vi_chn_pool_blocks[ch]);
+	if (pool < 0) {
+		SAMPLE_PRT("recreate VPSS chn %d pool failed\n", ch);
+		return -1;
+	}
+	if (CVI_VPSS_AttachVbPool(0, ch, pool) != CVI_SUCCESS) {
+		_destroy_vb_pool(pool);
+		SAMPLE_PRT("reattach VPSS chn %d pool failed\n", ch);
+		return -1;
+	}
+	g_runtime.vi_chn_pool_id[ch] = pool;
+	return 0;
+}
+
 int pause_vpss_channel(int ch)
 {
 	if (!capture_channel_open(ch) || !g_runtime.vi_chn_running[ch])
@@ -539,6 +580,8 @@ int pause_vpss_channel(int ch)
 		return ret;
 	}
 	g_runtime.vi_chn_running[ch] = false;
+	if (!g_runtime.capture_frame_held[ch])
+		release_vpss_pool(ch);
 	std::fprintf(stderr, "OneKVM: VPSS chn %d paused\n", ch);
 	return 0;
 }
@@ -549,6 +592,8 @@ int resume_vpss_channel(int ch)
 		return -1;
 	if (g_runtime.vi_chn_running[ch])
 		return 0;
+	if (restore_vpss_pool(ch) != 0)
+		return -1;
 	const CVI_S32 ret = CVI_VPSS_EnableChn(0, ch);
 	if (ret != CVI_SUCCESS) {
 		SAMPLE_PRT("CVI_VPSS_EnableChn(%d) failed with %#x\n", ch, ret);
@@ -577,6 +622,8 @@ int enable_vi_dma(void)
 			return attr;
 		}
 	}
+	if (attach_vi_pool() != 0)
+		return -1;
 	const CVI_S32 ret = CVI_VI_EnableChn(0, 0);
 	if (ret != CVI_SUCCESS && ret != CVI_ERR_VI_FAILED_NOT_DISABLED) {
 		SAMPLE_PRT("CVI_VI_EnableChn failed with %#x\n", ret);
@@ -608,8 +655,59 @@ int pause_vi_dma(void)
 		return ret;
 	}
 	g_runtime.vi_dma_running = false;
+	release_vi_pool();
+	/* VPSS may have held the last VI frame when its channel paused. */
+	for (int ch = 0; ch < MMF_VI_MAX_CHN; ++ch)
+		if (capture_channel_open(ch) && !g_runtime.vi_chn_running[ch] &&
+		    !g_runtime.capture_frame_held[ch])
+			release_vpss_pool(ch);
 	std::fprintf(stderr, "OneKVM: VI DMA paused\n");
 	return 0;
+}
+
+int attach_vi_pool(void)
+{
+	if (g_runtime.vi_pool_blk_size == 0)
+		return 0;
+	if (g_runtime.vi_pool_id < 0) {
+		const int pool = _create_vb_pool("vi_raw", g_runtime.vi_pool_blk_size,
+						 g_runtime.vi_common_buffers);
+		if (pool < 0) {
+			SAMPLE_PRT("create VI pool failed\n");
+			return -1;
+		}
+		g_runtime.vi_pool_id = pool;
+	}
+	const CVI_S32 ret = CVI_VI_AttachVbPool(0, 0, g_runtime.vi_pool_id);
+	if (ret != CVI_SUCCESS) {
+		SAMPLE_PRT("CVI_VI_AttachVbPool failed with %#x\n", ret);
+		return ret;
+	}
+	return 0;
+}
+
+/* Only while VI DMA is stopped; blocks VPSS still holds keep the pool. */
+void release_vi_pool(void)
+{
+	const int pool = g_runtime.vi_pool_id;
+	if (pool < 0)
+		return;
+	CVI_VI_DetachVbPool(0, 0);
+	if (_destroy_vb_pool(pool) != 0) {
+		CVI_VI_AttachVbPool(0, 0, pool);
+		std::fprintf(stderr, "OneKVM: VI pool busy, kept\n");
+		return;
+	}
+	g_runtime.vi_pool_id = -1;
+}
+
+/* VB_Exit already freed every pool (failed VI init rollback). */
+void forget_vi_pool(void)
+{
+	if (g_runtime.vi_pool_id >= 0 && g_runtime.vi_pool_id < VB_MAX_COMM_POOLS)
+		memset(&g_runtime.vb_pool[g_runtime.vi_pool_id], 0,
+		       sizeof(g_runtime.vb_pool[0]));
+	g_runtime.vi_pool_id = -1;
 }
 
 int resume_vi_dma(void)

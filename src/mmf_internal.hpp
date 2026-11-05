@@ -125,8 +125,16 @@ struct RuntimeState {
 	bool vi_chn_attr_valid;
 	VI_CHN_ATTR_S vi_chn_attr;
 	int vi_chn_pool_id[MMF_VI_MAX_CHN];
+	/* Pools are destroyed while their stage is paused and recreated on
+	   resume, so idle video holds no VB memory. */
+	uint32_t vi_chn_pool_size[MMF_VI_MAX_CHN];
+	int vi_chn_pool_blocks[MMF_VI_MAX_CHN];
 	SIZE_S vi_size;
     int vi_common_buffers = 2;
+	/* VI raw frames come from this private pool instead of a common pool,
+	   which could only be freed by tearing down SYS/VB. */
+	int vi_pool_id = -1;
+	uint32_t vi_pool_blk_size;
 	VIDEO_FRAME_INFO_S *vpss_user_frame[2];
 	int vpss_user_pool_id = -1;
 	int vpss_user_index;
@@ -174,6 +182,9 @@ extern MMF_INTERNAL CaptureOptions g_capture_options;
 MMF_INTERNAL int _create_vb_pool(
     const char *name, uint32_t size, uint32_t max_num);
 MMF_INTERNAL int _destroy_vb_pool(uint32_t pool_id);
+MMF_INTERNAL int attach_vi_pool(void);
+MMF_INTERNAL void release_vi_pool(void);
+MMF_INTERNAL void forget_vi_pool(void);
 MMF_INTERNAL CVI_U32 frame_buffer_size(const VIDEO_FRAME_S *frame);
 MMF_INTERNAL VIDEO_FRAME_INFO_S *allocate_frame(
     int id, SIZE_S size, PIXEL_FORMAT_E format);
