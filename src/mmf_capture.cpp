@@ -592,7 +592,7 @@ int pause_vi_dma(void)
 	if (!g_runtime.vi_dma_running)
 		return 0;
 	/* Idle stops VI DMA and the ISP front end. The VI modules from
-	   osdrv 8d646e2 keep the device count across DisableChn and reset the
+	   osdrv 382c705 keep the device count across DisableChn and reset the
 	   per-stream state on EnableChn; enable_vi_dma() re-arms LT6911 CSI and
 	   restores the channel attribute first. VI→VPSS stays bound. */
 	/* Unbinding an unrelated encoder or parking VPSS must not stop the VI
