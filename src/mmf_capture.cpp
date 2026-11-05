@@ -591,10 +591,24 @@ int pause_vi_dma(void)
 {
 	if (!g_runtime.vi_dma_running)
 		return 0;
-	/* Do not CVI_VI_DisableChn and do not UnBind VI→VPSS. With VI modules
-	   older than osdrv 8d646e2 both stop Preraw: IntCnt dies, EnableChn/
-	   SetChnAttr do not bring it back, and the encoder falls through to the
-	   no-signal still. Idle parks the VPSS scaler only. */
+	/* Idle stops VI DMA and the ISP front end. The VI modules from
+	   osdrv 8d646e2 keep the device count across DisableChn and reset the
+	   per-stream state on EnableChn; enable_vi_dma() re-arms LT6911 CSI and
+	   restores the channel attribute first. VI→VPSS stays bound. */
+	/* Unbinding an unrelated encoder or parking VPSS must not stop the VI
+	   frames a live VI-direct reader or a held capture frame still uses. */
+	if (h26x_vi_direct_streaming())
+		return 0;
+	for (int ch = 0; ch < MMF_VI_MAX_CHN; ++ch)
+		if (g_runtime.capture_frame_held[ch])
+			return 0;
+	const CVI_S32 ret = CVI_VI_DisableChn(0, 0);
+	if (ret != CVI_SUCCESS) {
+		SAMPLE_PRT("CVI_VI_DisableChn failed with %#x\n", ret);
+		return ret;
+	}
+	g_runtime.vi_dma_running = false;
+	std::fprintf(stderr, "OneKVM: VI DMA paused\n");
 	return 0;
 }
 

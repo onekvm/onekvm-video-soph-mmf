@@ -1275,6 +1275,20 @@ void set_h26x_capture_input_fps(int channel, int fps)
     }
 }
 
+/* A live H.265 VI-direct reader consumes VI frames itself: no VPSS channel
+   or bound VENC shows that VI is in use. Parking keeps VI and only sets
+   discard, so only a reader that is not discarding counts as live. */
+bool h26x_vi_direct_streaming(void)
+{
+	for (int ch = 0; ch < MMF_VENC_MAX_CHN; ++ch) {
+		const H26xEncoderState &info = g_runtime.h26x_encoders[ch];
+		if (info.initialized && info.bound_to_capture && info.bound_to_vi &&
+		    !g_readers[ch].discard.load(std::memory_order_acquire))
+			return true;
+	}
+	return false;
+}
+
 bool h26x_bound_to_vi(int ch)
 {
 	if (ch < 0 || ch >= MMF_VENC_MAX_CHN)

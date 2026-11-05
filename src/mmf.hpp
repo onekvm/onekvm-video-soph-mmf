@@ -239,6 +239,7 @@ int set_h26x_rate_control(int ch, int output_fps, int gop, int bitrate_kbps,
 int bind_h26x_to_capture(int ch, int vpss_group, int vpss_channel);
 int rebind_h26x_to_vpss(int ch);
 bool h26x_bound_to_vi(int ch);
+bool h26x_vi_direct_streaming(void);
 int park_h26x_capture(int ch);
 int begin_idle_h26x_drain(int capture_channel, int *encoder_channel);
 int finish_idle_h26x_drain(int encoder_channel);

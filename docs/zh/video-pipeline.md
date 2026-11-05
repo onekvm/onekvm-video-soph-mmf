@@ -281,9 +281,9 @@ VI `FrameRate` 列开机约 1 秒是 0，不能单靠这一列判无信号。已
 
 ## 空闲与释放
 
-无消费者时 Core `videoLoop` 停在 `waitForConsumer`。空闲只 `CVI_VPSS_DisableChn` 停 scaler（`CVI_VIP_SCL`），保持 VI→VPSS 绑定和 VI DMA。`CVI_VI_DisableChn` / UnBind 在 osdrv `8d646e2` 之前的驱动上会把 Preraw 打停，后续 `EnableChn`+`SetChnAttr`+`lt6911_start_csi` 拉不回，活路会掉进无 HDMI 占位（原因见 [dynamic-ion.md](dynamic-ion.md)）。新驱动已可在同一进程内恢复，但空闲策略尚未改用 VI 关闭，且必须兼容旧模块。保留 VPSS→VENC、VENC bind worker 和唯一的用户态 VENC reader；reader 进入 discard 模式，以有界 fd poll 排空停 scaler 后的迟到 AU。直接解绑而不先排空在途帧，会让无输入的 worker 在最终 `StopRecvFrame` 时卡进厂商锁。重新绑定先 `EnableChn` VPSS。
+无消费者时 Core `videoLoop` 停在 `waitForConsumer`。空闲先 `CVI_VPSS_DisableChn` 停 scaler（`CVI_VIP_SCL`），再 `CVI_VI_DisableChn` 停 VI（只释放 128 KiB `vi_cmdq_buf`，VB 池仍在），保持 VI→VPSS 绑定。消费者到来时 `enable_vi_dma()` 依次 `lt6911_start_csi`、`SetChnAttr`、`EnableChn`，不调用 `EnableDev`。这要求 osdrv `8d646e2` 及以后的 VI 模块（保留设备计数并重置每轮出流状态，见 [dynamic-ion.md](dynamic-ion.md)）；MMF 与视频模块随同一批更新发布，不兼容旧模块。H.265 VI 直通在空闲时由 reader 持有 VI lease，暂不关闭 VI；`pause_vi_dma()` 在仍有未进入 discard 的直通 reader 或持有采集帧时不关闭 VI，避免解绑无关编码器时停掉直通输入。已知问题（改动前基线同样存在）：空闲期间 HDMI 切换尺寸（107 实测 1080p→640×480）后，下一个消费者在旧几何上启用 VI，watcher 反复「HDMI signal confirmed」→ 切回 VI → 无帧 → 占位，不会按新尺寸重开 source；播放中切换走 `HDMI recovery … rearm VI` 可恢复。保留 VPSS→VENC、VENC bind worker 和唯一的用户态 VENC reader；reader 进入 discard 模式，以有界 fd poll 排空停 scaler 后的迟到 AU。直接解绑而不先排空在途帧，会让无输入的 worker 在最终 `StopRecvFrame` 时卡进厂商锁。重新绑定先 `EnableChn` VPSS。
 
-`unbind_h26x_from_capture` 只断开 SYS bind，不停 VI。空闲不要 `DisableChn`：旧 VI 模块上它不可逆，新模块的恢复尚未纳入空闲策略。不要因为 CSI `0x0` + HDMI 仍是 1080 就 `reopen_source`（空闲停 scaler 和占位都会出现这个读数）。从空闲恢复只 `resume_vpss_channel`。
+`unbind_h26x_from_capture` 只断开 SYS bind，不停 VI。不要因为 CSI `0x0` + HDMI 仍是 1080 就 `reopen_source`（空闲停 VI 和占位都会出现这个读数）。从空闲恢复走 `resume_vi_dma()` + `resume_vpss_channel`，不重开 source。
 
 重新绑定 VENC 时先清除旧的 `last_packet_ns` 和 `read_error`，再退出 discard 并强制 IDR；这样首帧沿用 `bound_since_ns` 的 1.5 秒 grace，不会把空闲前的旧时间戳误判为 VENC 停帧并切换 placeholder。Enable 失败则保持关闭并让 Core 重试，不要拆 VI。
 
