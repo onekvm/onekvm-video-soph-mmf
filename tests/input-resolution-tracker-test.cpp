@@ -328,6 +328,11 @@ int main() {
         return 124;
     if (hdmi_watch_interval(-1, {1920, 1080}, false) != 1s)
         return 125;
+    static_assert(confirmed_hdmi_needs_rebuild({640, 480}, {1920, 1080}));
+    static_assert(confirmed_hdmi_needs_rebuild({1920, 1080}, {640, 480}));
+    static_assert(!confirmed_hdmi_needs_rebuild({1920, 1080}, {1920, 1080}));
+    static_assert(!confirmed_hdmi_needs_rebuild({}, {1920, 1080}));
+    static_assert(!confirmed_hdmi_needs_rebuild({640, 480}, {}));
 
     return 0;
 }

@@ -719,7 +719,16 @@ int rebuild_for_hdmi_timing(Source *source, bool force_probe, char *error,
                 source->hdmi_resume_candidate = hdmi;
                 source->hdmi_resume_samples = 1;
             }
-            if (source->hdmi_resume_samples >= 2) {
+            if (source->hdmi_resume_samples >= 2 &&
+                onekvm::confirmed_hdmi_needs_rebuild(
+                    hdmi, source->input_resolution.current())) {
+                /* Retrying VI at the old size cannot lock. Treat the two
+                   equal samples as the dead-VI evidence the follow gate
+                   needs, so the shrink/switch below rebuilds now. */
+                source->hdmi_follow_samples = onekvm::kHDMIFollowDeadSamples;
+                std::fprintf(stderr, "OneKVM: HDMI signal confirmed %ux%u; rebuild for new mode\n",
+                             hdmi.width, hdmi.height);
+            } else if (source->hdmi_resume_samples >= 2) {
                 /* This only starts a live capture trial. The packet path
                    alone can confirm fresh frames and release the IDR. */
                 source->cached_signal.store(1, std::memory_order_relaxed);

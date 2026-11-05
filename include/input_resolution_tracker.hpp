@@ -384,6 +384,20 @@ constexpr unsigned next_hdmi_follow_samples(
     return follow_samples + 1;
 }
 
+/* The placeholder confirms a returning signal after two equal supported
+   HDMI samples, then retries VI with the current receiver. When the
+   confirmed mode differs from that receiver (an idle 1080→640 switch),
+   the retry cannot produce frames, and the LT6911 reads 0x0 while VI is
+   attached, which resets the dead-VI follow count. Rebuild for the
+   confirmed mode instead of retrying the old geometry. */
+constexpr bool confirmed_hdmi_needs_rebuild(
+    InputResolution confirmed, InputResolution current)
+{
+    return supported_input_resolution(confirmed) &&
+        supported_input_resolution(current) &&
+        infer_hdmi_mode(confirmed) != current;
+}
+
 constexpr bool hdmi_stalled_follow_ready(
     InputResolution csi,
     InputResolution receiver,
