@@ -1,4 +1,5 @@
 # Keep the public decoder endpoint independent of the vendor driver name and
 # dynamically allocated video minor number. The kernel decoder registers this
-# stable card name for the V4L2 node.
-SUBSYSTEM=="video4linux", KERNEL=="video[0-9]*", ATTR{name}=="* decoder", SYMLINK+="onekvm-vdec"
+# stable card name for the V4L2 node. Group video lets extensions granted the
+# device-video permission decode recordings; capture nodes are unaffected.
+SUBSYSTEM=="video4linux", KERNEL=="video[0-9]*", ATTR{name}=="* decoder", SYMLINK+="onekvm-vdec", GROUP="video", MODE="0660"

@@ -10,6 +10,9 @@ for sys_node in /sys/class/video4linux/video*; do
 			video_node=/dev/$(basename "$sys_node")
 			[ -e "$video_node" ] || continue
 			ln -sfn "$video_node" "$alias"
+			# Same access as 99-onekvm-vdec.rules when udevd is not running:
+			# extensions granted device-video decode through group video.
+			chgrp video "$video_node" 2>/dev/null && chmod 0660 "$video_node" || true
 			exit 0
 			;;
 	esac
