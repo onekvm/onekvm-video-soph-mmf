@@ -1,6 +1,6 @@
 # SG2002 动态多媒体内存（设计草案）
 
-状态：内存池实现已移至独立仓库 `onekvm-lazy-dma`（模块 `onekvm_lazy_dma.ko`，设计见其 `docs/zh/design.md`）；本文保留 MMF 侧现状与 VI 关闭／恢复记录。本文记录目标、现状证据、方案及待验证项；实测结论落地后再并入
+状态：内存池实现已移至独立仓库 `onekvm-lazy-cma`（模块 `onekvm_lazy_cma.ko`，设计见其 `docs/zh/design.md`）；本文保留 MMF 侧现状与 VI 关闭／恢复记录。本文记录目标、现状证据、方案及待验证项；实测结论落地后再并入
 [视频流水线规范](video-pipeline.md)。
 
 ## 目标
@@ -132,7 +132,7 @@ VB 池（约 31 MB）与 VENC 缓冲（约 8 MB）仍需按池销毁或关闭编
 
 ## 空闲释放 VB 池（107，2026-11-06）
 
-VI 原始帧改用私有池 `vi_raw`（SYS 初始化不建公共池），VPSS 输出池与 `vi_raw` 在各自暂停时销毁、恢复时重建；细节见[视频流水线规范](video-pipeline.md)。配合 onekvm-lazy-dma `e918b27`（≤ 4 MiB 缓冲取普通内存，大块走 64 MiB CMA 池）。数据在工作区 `artifacts/lazy-dma-idle-pools-20261106/`。
+VI 原始帧改用私有池 `vi_raw`（SYS 初始化不建公共池），VPSS 输出池与 `vi_raw` 在各自暂停时销毁、恢复时重建；细节见[视频流水线规范](video-pipeline.md)。配合 onekvm-lazy-cma `e918b27`（≤ 4 MiB 缓冲取普通内存，大块走 64 MiB CMA 池）。数据在工作区 `artifacts/lazy-dma-idle-pools-20261106/`。
 
 | 项 | 改动前 | 改动后 |
 | --- | --- | --- |
@@ -145,7 +145,7 @@ VI 原始帧改用私有池 `vi_raw`（SYS 初始化不建公共池），VPSS �
 
 H.265 VI 直通（GPU Chromium 3 轮 60 FPS）空闲时 VI 按设计保持开启，空闲占用仍为 31.5 MB；切回 H.264 后恢复 8.5 MB。
 
-释放的池进入 lazy-dma 保留池，不立即计入 `MemAvailable`，内存压力下由 shrinker 归还。VENC 缓冲（约 8 MB）仍随编码器常驻，关闭编码器的代价未评估。
+释放的池进入 lazy-cma 保留池，不立即计入 `MemAvailable`，内存压力下由 shrinker 归还。VENC 缓冲（约 8 MB）仍随编码器常驻，关闭编码器的代价未评估。
 
 ## 待验证
 

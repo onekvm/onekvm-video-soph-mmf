@@ -335,7 +335,7 @@ H.26x ready eventfd 只在入队、错误及控制状态变化时通知；消费
 采集是 HDMI IN 到编码器前：当前 progressive 帧（`1/输入帧率`）+ VPSS `CostTime`。帧率取 reader 跟随实测 HDMI 节奏的输入帧率，不能用创建编码器时的 `cfg.input_fps`（例如配置 90、实际输入 60 时会把一帧 16.7 ms 算成 11.1 ms）。
 关闭原始帧最新缓存时，VI 私有池使用 **2** 块（fill + consume）；启用最新帧缓存的尺寸使用 **3** 块，避免缓存／DMA／VPSS 同时持有时缺块。第三块不增加排队：VI 在写完一帧时打 `ktime` 戳，VPSS 离线模式原样传给 VENC，107 1080p60 实测 VENC `RcvFrmPts` 距当前单调时钟最小约 7.4 ms（含读 proc 开销，VPSS `CostTime` 约 6.1 ms），若多排一帧会 ≥ 23 ms。1080p60 约 23 ms（16.7 + CostTime ~6.5）。
 
-VI 原始帧不再用公共 VB 池：SYS 初始化时公共池数为 0，VI 帧来自名为 `vi_raw` 的私有池，经 `CVI_VI_AttachVbPool` 挂到 VI 通道 0。`CVI_VI_SetChnAttr` 会清掉通道的池绑定，所以挂池放在 `SetChnAttr` 的 `--wrap` 包装里，紧接着的 `EnableChn` 才能取到块。空闲暂停时：VPSS 通道 `DisableChn` 后卸下并销毁其输出池，VI `DisableChn` 后卸下并销毁 `vi_raw`；恢复时先重建池再 `EnableChn`。块仍被持有（编码器、截图帧）时 `DestroyPool` 失败，池保留并重新挂上，下次暂停再试。销毁的池回到 onekvm-lazy-dma 保留池，内存压力下由 shrinker 归还 Linux。107 1080p60 空闲占用 40.0→8.5 MB（剩 VENC 缓冲），开流重新启用到关键帧与改动前相同。
+VI 原始帧不再用公共 VB 池：SYS 初始化时公共池数为 0，VI 帧来自名为 `vi_raw` 的私有池，经 `CVI_VI_AttachVbPool` 挂到 VI 通道 0。`CVI_VI_SetChnAttr` 会清掉通道的池绑定，所以挂池放在 `SetChnAttr` 的 `--wrap` 包装里，紧接着的 `EnableChn` 才能取到块。空闲暂停时：VPSS 通道 `DisableChn` 后卸下并销毁其输出池，VI `DisableChn` 后卸下并销毁 `vi_raw`；恢复时先重建池再 `EnableChn`。块仍被持有（编码器、截图帧）时 `DestroyPool` 失败，池保留并重新挂上，下次暂停再试。销毁的池回到 onekvm-lazy-cma 保留池，内存压力下由 shrinker 归还 Linux。107 1080p60 空闲占用 40.0→8.5 MB（剩 VENC 缓冲），开流重新启用到关键帧与改动前相同。
 
 不要把 progressive 改成 50%：`VI_EARLY_INTERRUPT` 只有 proc 字段，没有 ioctl，驱动从不写 `enEalyInt`；YUV HDMI 是 `input_mem`，VPSS 等整帧进 DRAM。
 不要计入 VENC waitq / `HwEncTime`（那是编码），也不要计入 VPSS `u32Depth`（截图 doneq）。编码缓存 = VENC `HwEncTime`。
