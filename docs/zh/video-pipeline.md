@@ -7,6 +7,29 @@ NanoKVM Cube（SG2002）的视频使用 **LT6911 HDMI → CSI → VI**。H.264�
 Core 走绑定 H.264/H.265，不读原始帧。改采集、绑定、释放或 HDMI 探测前先读本文。
 验收数据和试验过程记在工作区 `docs/`，不要把流水账写回这里。
 
+## 内存布局与失败清理
+
+使用 lazy-CMA 设备树时，`ion-region` 只保留 2 MiB，视频缓冲须由
+`soph_sys` 的 `ION_HEAP_TYPE_CUSTOM` 路径进入 `onekvm_lazy_cma`。
+只请求 `ION_HEAP_TYPE_CARVEOUT` 的旧模块不能配这份设备树；即使内核
+release、vermagic 和包版本前缀相同，也不表示分配接口匹配。构建、部署和
+重启验收须同时核对启动设备树、实际加载的模块和用户态后端，不能只更新
+内存中的模块后忽略磁盘及镜像里的版本。
+
+真实出画后，`/sys/devices/platform/onekvm-lazy-cma/stats` 应记录视频分配，
+`/sys/kernel/debug/ion/cvi_lazy-cma_heap_dump/summary` 应包含 VI/VPSS/VENC
+缓冲；仅看 `CmaTotal` 或模块加载成功不能证明视频用了正确的堆。
+
+VI 在首次打开设备时初始化 raw-dump 队列和 worker。`SetChnAttr` 已登记
+通道、但 VB 分配失败或尚未 `EnableChn` 时，显式停用和最后一次 close 都
+必须能够清理，不能访问未初始化的链表或 work。停流结束后先同步取消
+worker，再排空剩余释放队列；下一次 EnableChn 复用已初始化的空队列。
+
+模块包提供 `/usr/libexec/onekvm/vi-lifecycle-smoke disable|close`
+验证这两条提前退出路径。
+只在 Core、watchdog 和其他 VI 使用者停止后运行；测试设置设备和通道属性，
+不启动采集。验证后恢复 Core 和 watchdog，并核对网页实际出画及内核日志。
+
 ## 本地芯片信息
 
 PCIe 固件初始化必须先直接核对 UXC 寄存器 ID `17 04 83`，不能只凭板型或
