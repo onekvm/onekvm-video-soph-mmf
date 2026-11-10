@@ -171,6 +171,7 @@ bool capture_channel_open(int ch);
 int pause_vpss_channel(int ch);
 int resume_vpss_channel(int ch);
 int enable_vi_dma(void);
+int enable_vi_dma_for_teardown(void);
 int pause_vi_dma(void);
 int resume_vi_dma(void);
 bool vi_dma_running(void);
