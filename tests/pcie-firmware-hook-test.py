@@ -76,8 +76,20 @@ esac
         pages = dict(re.findall(r'^expect_([0-9a-f]+)="([^"]+)"', HOOK.read_text(), re.M))
         transfer.write_text('''#!/bin/sh
 echo "i2c $*" >>"$TRACE"
+case "$4" in
+  r1@0x2c) [ -n "${PRESENT_2C-}" ]; exit ;;
+  r1@0x44) [ -n "${PRESENT_44-1}" ]; exit ;;
+esac
 case "$5:$6" in
-  0x00:r3) printf '%s\\n' "${CHIP_ID-0x17 0x04 0x83}"; exit "${READ_FAILURE:-0}" ;;
+  0xff:*) printf '%s' "$6" >"$PAGES/bank" ;;
+  0x00:r2)
+    case $(cat "$PAGES/bank") in
+      0xa0) printf '%s\\n' "${C_ID-0x00 0x00}" ;;
+      0xe1) printf '%s\\n' "${D_ID-0x00 0x00}"; exit "${D_READ_FAILURE:-0}" ;;
+      *) exit 97 ;;
+    esac ;;
+  0x00:r3) [ "$(cat "$PAGES/bank")" = 0x81 ] || exit 97
+    printf '%s\\n' "${CHIP_ID-0x17 0x04 0x83}"; exit "${READ_FAILURE:-0}" ;;
   0x5f:r32) cat "$PAGES/$(cat "$PAGES/hi")$(cat "$PAGES/lo")"; exit ;;
   0x5c:*) printf '%s' "${6#0x}" >"$PAGES/hi" ;;
   0x5d:*) printf '%s' "${6#0x}" >"$PAGES/lo" ;;
@@ -94,16 +106,47 @@ esac
 
     def test_non_uxc_and_failed_reads_never_access_flash(self):
         self.enable_bridge()
-        for env in [dict(CHIP_ID='0x16 0x05 0x00'), dict(CHIP_ID='0x25 0x10 0x23'),
-                    dict(CHIP_ID=''), dict(CHIP_ID='0x17 0x04'),
-                    dict(CHIP_ID='0x17 0x04 0x83', READ_FAILURE='1')]:
+        # C, D and other UXC revisions are supported by the backend and left
+        # unchanged. Unknown silicon or failed reads still fail.
+        for env, code, text in [
+                (dict(C_ID='0x16 0x05'), 0, 'LT6911C bridge'),
+                (dict(CHIP_ID='0xff 0xff 0xff', D_ID='0x21 0x02'), 0, 'LT6911D bridge'),
+                (dict(CHIP_ID='', D_ID='0x21 0x02'), 0, 'LT6911D bridge'),
+                (dict(CHIP_ID='0x17 0x04 0x84'), 0, 'no audited PCIe image'),
+                (dict(CHIP_ID='0x25 0x10 0x23'), 1, 'unknown bridge chip'),
+                (dict(CHIP_ID='0x17 0x04'), 1, 'unknown bridge chip'),
+                (dict(CHIP_ID='0x00 0x00 0x00', D_ID='0x21 0x02', D_READ_FAILURE='1'), 1, 'unknown bridge chip'),
+                (dict(CHIP_ID='0x17 0x04 0x83', READ_FAILURE='1'), 1, 'cannot read chip ID')]:
             with self.subTest(env=env):
                 result = self.run_hook(PAGES=str(self.work), **env)
-                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertEqual(result.returncode, code, result.stdout + result.stderr)
+                self.assertIn(text, result.stdout)
+                if text == 'LT6911D bridge' and 'PRESENT_44' not in env:
+                    # D is probed only after the UXC window is closed, then its own window closes.
+                    calls = self.trace.read_text()
+                    self.assertLess(calls.index('0xee 0x00'), calls.index('0xff 0xe0'))
+                    self.assertTrue(calls.rstrip().endswith('0xee 0x00'))
                 calls = self.trace.read_text()
                 self.assertNotIn('0x5a', calls)
                 self.assertNotIn('0x5f', calls)
                 self.assertNotIn('w33@', calls)
+
+    def test_factory_d_address_map_never_opens_uxc_window(self):
+        self.enable_bridge()
+        result = self.run_hook(PAGES=str(self.work), PRESENT_44='', D_ID='0x21 0x02')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('LT6911D bridge', result.stdout)
+        calls = self.trace.read_text()
+        self.assertNotIn('0xff 0x80', calls)
+        self.assertNotIn('0xff 0x81', calls)
+        self.assertTrue(calls.rstrip().endswith('0xee 0x00'))
+        # A non-D chip on that map still gets the C/UXC identification.
+        result = self.run_hook(PAGES=str(self.work), PRESENT_44='', C_ID='0x16 0x05')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('LT6911C bridge', result.stdout)
+        result = self.run_hook(PAGES=str(self.work), PRESENT_44='', CHIP_ID='0x25 0x10 0x23')
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(self.trace.read_text().count('0xff 0xe0'), 2)
 
     def test_uxc_installed_image_does_not_program_or_reset(self):
         self.enable_bridge()

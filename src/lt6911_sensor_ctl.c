@@ -133,6 +133,12 @@ int lt6911_i2c_init(VI_PIPE pipe)
 	return CVI_SUCCESS;
 }
 
+static int lt6911_i2c_present(VI_PIPE pipe, uint8_t address)
+{
+	if (!valid_pipe(pipe)) return -EINVAL;
+	return onekvm_lt6911_bus_present(g_fd[pipe], address);
+}
+
 int lt6911_i2c_exit(VI_PIPE pipe)
 {
 	if (!valid_pipe(pipe))
@@ -274,9 +280,14 @@ static int sensor_write(void *context, uint16_t addr, uint8_t value)
     return lt6911_i2c_write(*(VI_PIPE *)context, addr, value) == CVI_SUCCESS ? 0 : -EIO;
 }
 
+static int sensor_present(void *context, uint8_t address)
+{
+    return lt6911_i2c_present(*(VI_PIPE *)context, address);
+}
+
 static int identify_chip(VI_PIPE pipe)
 {
-    struct onekvm_lt6911_io io = { &pipe, sensor_read, sensor_write };
+    struct onekvm_lt6911_io io = { &pipe, sensor_read, sensor_write, sensor_present };
     int chip = onekvm_lt6911_cached_chip();
     if (chip != ONEKVM_LT6911_UNKNOWN) return CVI_SUCCESS;
     if (onekvm_lt6911_identify(&io, &chip)) return CVI_FAILURE;
