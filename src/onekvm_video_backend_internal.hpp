@@ -107,6 +107,7 @@ struct ONEKVM_VIDEO_INTERNAL Source {
     int channel = -1;
     bool initialized = false;
     bool preserved_locked_csi = false;
+    bool initial_input_measured = false;
     bool frame_pending = false;
     bool frame_release_pending = false;
     uint64_t frame_token = 0;
