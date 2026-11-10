@@ -31,10 +31,14 @@ if [ ! -x "$I2C" ] || [ ! -c /dev/i2c-4 ]; then
   log "i2c-4 is not available"
   exit 1
 fi
-if [ "$(systemctl is-active onekvm.service 2>/dev/null || true)" = active ]; then
-  log "onekvm.service is active; refusing to touch the bridge"
-  exit 1
-fi
+core_state=$(systemctl is-active onekvm.service 2>/dev/null || true)
+case $core_state in
+  inactive|failed|unknown|'') ;;
+  *)
+    log "onekvm.service is $core_state; refusing to touch the bridge"
+    exit 1
+    ;;
+esac
 
 wr() { "$I2C" -y -f 4 w2@0x2b "$1" "$2" >/dev/null; }
 bank() { wr 0xff "$1"; }

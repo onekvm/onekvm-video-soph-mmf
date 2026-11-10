@@ -101,7 +101,7 @@ esac
             (self.work / name).write_text(content + '\n')
         (self.work / '0000').write_text('00 ' * 32 + '\n')
         systemctl = self.work / 'systemctl'
-        systemctl.write_text('#!/bin/sh\necho inactive\n')
+        systemctl.write_text('#!/bin/sh\necho "${CORE_STATE:-inactive}"\n')
         systemctl.chmod(0o755)
 
     def test_non_uxc_and_failed_reads_never_access_flash(self):
@@ -130,6 +130,15 @@ esac
                 self.assertNotIn('0x5a', calls)
                 self.assertNotIn('0x5f', calls)
                 self.assertNotIn('w33@', calls)
+
+    def test_starting_or_running_core_owns_the_bridge(self):
+        self.enable_bridge()
+        for state in ['active', 'activating', 'reloading', 'deactivating']:
+            with self.subTest(state=state):
+                result = self.run_hook(PAGES=str(self.work), CORE_STATE=state)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn(f'onekvm.service is {state}', result.stdout)
+                self.assertNotIn('i2c', self.trace.read_text() if self.trace.exists() else '')
 
     def test_factory_d_address_map_never_opens_uxc_window(self):
         self.enable_bridge()
