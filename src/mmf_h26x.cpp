@@ -263,7 +263,8 @@ static void _set_h264_vbr_attr(VENC_CHN_ATTR_S *attr, const H26xEncoderConfig *c
 {
 	/* Coda H.264 AVBR never updates MotionLv on 107, so still-QP
 	 * stays clamped and live MaxBitRate changes never retarget RC.
-	 * VBR applies Max × ChangePos on the next IDR. */
+	 * VBR applies Max × ChangePos from the next picture (soph_vc_driver
+	 * since osdrv 495d985; before, from the next GOP start). */
 	attr->stRcAttr.enRcMode = VENC_RC_MODE_H264VBR;
 	attr->stRcAttr.stH264Vbr.u32Gop = cfg->gop;
 	attr->stRcAttr.stH264Vbr.u32StatTime = MMF_VENC_AVBR_STAT_TIME;

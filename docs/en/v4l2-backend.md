@@ -181,6 +181,38 @@ taken 12 s after streaming stops; three rounds each at 1080p and 720p:
 | Startup | 0.225 s (0.21–0.25) | 0.215 s (0.20–0.25) |
 | Idle snapshot | 0.331 s (0.305–0.353) | 0.308 s (0.288–0.481) |
 
+### Bitrate cap
+
+1080p60 H.264 over WebSocket. The cap is changed through the config API
+(`video.h26x.bitrate_kbps`; explicit QPs must be cleared to 0 first), 10 ↔ 1
+Mbps six times each way at random GOP phases. Delay = from the API reply to the
+first P frame whose QP moves 3 or more toward the new target:
+
+| Backend | Direction | Before osdrv `495d985`, median (range) | After, median (range) |
+| --- | --- | --- | --- |
+| soph-v4l2.so | 10 → 1 Mbps | 3.40 s (0.84–4.50) | 0.16 s (0.02–0.33) |
+| soph-v4l2.so | 1 → 10 Mbps | 1.93 s (0.17–4.43) | 0.26 s (0.24–1.16) |
+| soph-mmf.so | 10 → 1 Mbps | 2.95 s (1.12–4.99) | 0.07 s (0.04–0.32) |
+| soph-mmf.so | 1 → 10 Mbps | 3.53 s (0.73–4.70) | 0.05 s (0.00–0.11) |
+
+Before, H.264 took a new bitrate only at the next natural GOP start (up to 5 s
+with a 300-frame GOP). After the change, soph-v4l2.so 1080p end-to-end latency
+over 2×40 samples is P50 58.6, P95 62.5, mean 58.9 ms (before, 3×40: 58.7 /
+62.3 / 58.6 ms).
+
+Steady-state bitrate with each cap held for 10 s or more (old module; the
+change does not affect the steady state):
+
+| Content | Cap | soph-mmf.so bitrate (P-frame QP) | soph-v4l2.so bitrate (P-frame QP) |
+| --- | --- | --- | --- |
+| Desktop | 10 / 3 / 1 Mbps | not measured | 2.5 / 0.79 / 0.17 Mbps (13 / 26 / 48) |
+| Moving page | 10 / 5 / 1 Mbps | 3.6 / 3.4 / 2.5 Mbps (18 / 20 / 48) | 1.1 / 1.1 / 1.9 Mbps (14 / 19 / 48) |
+
+At 1 Mbps the moving page already has QP at its 48 limit, and neither backend
+gets down to the cap. soph-v4l2.so then runs higher than with no effective cap:
+at QP 48 about 1780 of 8160 macroblocks per P frame are intra coded, against
+about 900 at QP 14.
+
 ### Function
 
 | Item | Result |

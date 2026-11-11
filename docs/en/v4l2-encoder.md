@@ -66,7 +66,7 @@ An access unit that does not fit counts as a failed frame.
 
 | Control | Range / default | Applies |
 | --- | --- | --- |
-| `MPEG_VIDEO_BITRATE` | 16 kbit/s–409.6 Mbit/s, default 4 Mbit/s | next frame |
+| `MPEG_VIDEO_BITRATE` | 16 kbit/s–409.6 Mbit/s, default 4 Mbit/s | H.264: next frame (since osdrv `495d985`; before, the next GOP start); H.265: next AVBR period (≤ 20 frames) |
 | `MPEG_VIDEO_BITRATE_MODE` | CBR / VBR (default); H.265 VBR is AVBR | session start |
 | `MPEG_VIDEO_FRAME_RC_ENABLE` | off selects fixed QP (I/P QP controls) | session start |
 | `MPEG_VIDEO_GOP_SIZE` | 1–65535, default 150 | next frame |

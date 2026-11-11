@@ -56,7 +56,7 @@ DMA-BUF 排入。CAPTURE 默认大小为 `宽 × 高 / 2`（H.26x 1–4 MiB，JP
 
 | 控制 | 范围 / 默认 | 生效 |
 | --- | --- | --- |
-| `MPEG_VIDEO_BITRATE` | 16 kbit/s–409.6 Mbit/s，默认 4 Mbit/s | 下一帧 |
+| `MPEG_VIDEO_BITRATE` | 16 kbit/s–409.6 Mbit/s，默认 4 Mbit/s | H.264 下一帧（osdrv `495d985` 起，此前等下一个 GOP 起点）；H.265 下一个 AVBR 周期（≤ 20 帧） |
 | `MPEG_VIDEO_BITRATE_MODE` | CBR / VBR（默认）；H.265 VBR 实为 AVBR | 会话开始 |
 | `MPEG_VIDEO_FRAME_RC_ENABLE` | 关闭时为固定 QP（I/P QP 控制） | 会话开始 |
 | `MPEG_VIDEO_GOP_SIZE` | 1–65535，默认 150 | 下一帧 |

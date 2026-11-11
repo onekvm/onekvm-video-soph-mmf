@@ -104,6 +104,11 @@ VBR 的 `MaxBitRate` 是码控目标，不能作为实际输出流量的硬上�
 一次实验仍有停顿时不能称已解决，也不据此改默认参数。额外取流和逐帧 RC 日志只用于
 诊断，不能代替同条件、真实播放器下的延迟收益表。
 
+H.264 的新 `MaxBitRate` 从下一帧进入码控（osdrv `495d985` 起的 `soph_vc_driver`）。
+此前要等下一个自然 GOP 起点：GOP 300 时最长 5 s，强制 IDR 还会把计数清零。H.265 AVBR
+每个统计周期（≤ 20 帧）重算。上限低于画面在 QP 48 下所需码率时压不住：107 运动页
+1 Mbps 上限下仍有 2.5 Mbps。实测见 [v4l2-backend.md](v4l2-backend.md#码率上限)。
+
 H.264 和需要缩放、镜像、翻转的输出使用 **VI→VPSS→VENC**，由 VPSS 做 UYVY→NV21。
 `SYS_Bind(VI,VENC)` 可以 ioctl 成功，但解开 VI→VPSS 后 Preraw `IntCnt` 会停在 0，
 `EncodedFrame=0`。双绑 VI→VPSS+VENC 会在几块 UYVY 池耗尽后变成 `VENC waitq is full`。
@@ -233,7 +238,7 @@ CVITEK 会把 H.264 PPS（H.265 还包括 VPS/SPS/PPS）拆成 IDR 前的独立 
 丢掉所有非 IDR 会让浏览器收到 RTP 但无法初始化解码器。
 
 只改目标 FPS、码率或 QP 时不要拆 VI/VENC 通道：reader 在两次 `GetStream` 之间改
-`u32MaxBitRate` / `SetRcParam`，并补一次 IDR。不要 `close_encoder`。
+`u32MaxBitRate` / `SetRcParam`，只在 FPS/GOP 变化时补一次 IDR。不要 `close_encoder`。
 H.264 用 VBR（Coda 的 AVBR `MotionLv` 在 107 上一直是 0，静帧 QP 钳死、live 改
 `MaxBitRate` 也不会重算 target）。H.265 仍用 AVBR：`s32MinStillPercent=90`，
 `u32MaxStillQP=40`，`u32MotionSensitivity=100`，`u32StatTime=1`，
