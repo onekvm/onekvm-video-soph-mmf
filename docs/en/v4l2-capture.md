@@ -11,7 +11,8 @@ user space, which sets the current active size with `S_FMT` before `STREAMON`.
 
 Status: experimental, validated on device 107 (6.18.57-onekvm-preempt) for
 capture, start/stop, chaining into the encoder nodes and exclusion against
-cvi_mpi. Core does not use it yet.
+cvi_mpi. The `soph-v4l2.so` backend uses this node; see
+[v4l2-backend.md](v4l2-backend.md).
 
 ## Node
 

@@ -16,7 +16,8 @@ Status: experimental. Validated on device 107 (6.18.57-onekvm-preempt) for:
 - chaining with the capture and encoder nodes;
 - running alongside the legacy Core.
 
-Core does not use it yet.
+The `soph-v4l2.so` backend uses it for scaled channels; see
+[v4l2-backend.md](v4l2-backend.md).
 
 ## Node
 

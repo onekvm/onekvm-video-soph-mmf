@@ -12,6 +12,7 @@ The default kernel is **Linux 6.18**
 | Document | Purpose |
 |----------|---------|
 | [video-pipeline.md](../zh/video-pipeline.md) (Chinese) | Cube HDMI capture, bound H.264, teardown, CSIBDG, placeholder, snapshots. Read this first when changing video. |
+| [v4l2-backend.md](v4l2-backend.md) | The V4L2 backend `soph-v4l2.so` without cvi_mpi: selection, data path, idle release, device 107 measurements |
 | [abi.md](abi.md) | Video/crypto ABI, feature bits, leases, snapshots |
 | [v4l2-decoder.md](v4l2-decoder.md) | Experimental V4L2 decoder, events, buffers and hardware resource constraints |
 | [v4l2-encoder.md](v4l2-encoder.md) | Experimental V4L2 encoders (H.264/H.265/JPEG), buffers, controls, device 107 measurements |

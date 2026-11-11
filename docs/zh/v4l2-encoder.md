@@ -6,8 +6,8 @@
 VENC 通道层，不经过 cvi_mpi。它们是后端脱离 cvi_mpi 的编码部分；采集与缩放节点
 另行实现（采集见 [v4l2-capture.md](v4l2-capture.md)）。现有 MMF 流水线（字符设备 + cvi_mpi）保持可用，两者可同时运行。
 
-状态：实验实现，已在 107（6.18.57-onekvm-preempt）完成编码、并发和码流解码验收；
-Core 尚未改用。
+状态：实验实现，已在 107（6.18.57-onekvm-preempt）完成编码、并发和码流解码验收。
+后端 `soph-v4l2.so` 使用这两个节点，见 [v4l2-backend.md](v4l2-backend.md)。
 
 ## 节点
 

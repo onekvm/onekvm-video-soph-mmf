@@ -55,13 +55,15 @@ The read-only load parameters `prealloc_bind_packs` and `prealloc_ioctl_packs`
 default to true and allow separate comparisons without changing ownership on a
 running channel.
 
-The backend is one shared library:
+The backend ships as shared libraries:
 
 ```text
-/usr/lib/onekvm/video-backends/soph-mmf.so
+/usr/lib/onekvm/video-backends/soph-mmf.so    # cvi_mpi runtime, loaded by the default descriptor
+/usr/lib/onekvm/video-backends/soph-v4l2.so   # V4L2 runtime without cvi_mpi
 ```
 
-`onekvm-video-soph-mmf` installs it. OneKVM loads it at runtime. The CMake
+`onekvm-video-soph-mmf` installs them. OneKVM loads one at runtime; see
+[v4l2-backend.md](v4l2-backend.md) for switching. The CMake
 project is standalone and does not use MaixCDK.
 
 ## Resolution handling
@@ -133,6 +135,7 @@ No SG2002 SDK and no device:
 ```sh
 cmake -S . -B build/host \
   -DONEKVM_BUILD_MMF_BACKEND=OFF \
+  -DONEKVM_BUILD_V4L2_BACKEND=OFF \
   -DBUILD_TESTING=ON \
   -DCMAKE_BUILD_TYPE=Release
 cmake --build build/host --parallel
@@ -172,8 +175,9 @@ restart `onekvm.service`. Do not change U-Boot, the kernel, or partitions
 unless that work is explicitly authorized.
 
 Device-side smoke tests (`tests/bound-reader-stress.cpp`,
-`tests/managed-snapshot-smoke.cpp`) are compiled only when both
-`ONEKVM_BUILD_MMF_BACKEND=ON` and `BUILD_TESTING=ON`. The OE recipe hard-codes
+`tests/managed-snapshot-smoke.cpp`) are compiled only when `BUILD_TESTING=ON`
+and at least one of `ONEKVM_BUILD_MMF_BACKEND` and `ONEKVM_BUILD_V4L2_BACKEND`
+is ON. The OE recipe hard-codes
 `-DBUILD_TESTING=OFF`; a debug worktree does not change that. Override
 `EXTRA_OECMAKE` if you need those binaries.
 

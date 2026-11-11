@@ -10,6 +10,7 @@
 | 文档 | 用途 |
 |------|------|
 | [video-pipeline.md](video-pipeline.md) | Cube HDMI 采集、绑定 H.264、释放、CSIBDG、占位、截图。改视频先读。 |
+| [v4l2-backend.md](v4l2-backend.md) | 不依赖 cvi_mpi 的 V4L2 后端 `soph-v4l2.so`：选择方法、通路、空闲释放与 107 实测 |
 | [abi.md](abi.md) | 动态库导出的视频/加密 ABI、特性位、租约与截图约定 |
 | [v4l2-decoder.md](v4l2-decoder.md) | 实验性 V4L2 解码接口、事件、缓冲和硬件资源边界 |
 | [v4l2-encoder.md](v4l2-encoder.md) | 实验性 V4L2 编码接口（H.264/H.265/JPEG）、缓冲、控制与 107 实测 |

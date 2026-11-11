@@ -8,7 +8,8 @@ UYVY，或由 CSI 桥写入时转换为 NV21/NV12，即 LT6911 HDMI 桥片接入
 STREAMON 前用 `S_FMT` 设置当前有效尺寸。
 
 状态：实验实现，已在 107（6.18.57-onekvm-preempt）完成采集、起停、与编码节点
-串接及与 cvi_mpi 互斥的验收；Core 尚未改用。
+串接及与 cvi_mpi 互斥的验收。后端 `soph-v4l2.so` 使用此节点，见
+[v4l2-backend.md](v4l2-backend.md)。
 
 ## 节点
 

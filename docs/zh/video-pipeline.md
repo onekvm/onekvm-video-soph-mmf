@@ -6,6 +6,8 @@ NanoKVM Cube（SG2002）的视频使用 **LT6911 HDMI → CSI → VI**。H.264�
 变换经 VPSS 再送 VENC；具备 packed-source 能力的驱动允许同尺寸 H.265 直接使用 VI 帧。
 Core 走绑定 H.264/H.265，不读原始帧。改采集、绑定、释放或 HDMI 探测前先读本文。
 验收数据和试验过程记在工作区 `docs/`，不要把流水账写回这里。
+本文描述 cvi_mpi 运行时 `soph-mmf.so`；不依赖 cvi_mpi 的 `soph-v4l2.so` 见
+[v4l2-backend.md](v4l2-backend.md)。
 
 ## 内存布局与失败清理
 

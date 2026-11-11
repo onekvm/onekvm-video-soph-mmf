@@ -9,7 +9,8 @@ separate work (capture: [v4l2-capture.md](v4l2-capture.md)). The existing MMF pi
 remains available, and both can run at the same time.
 
 Status: experimental, validated on device 107 (6.18.57-onekvm-preempt) for
-encoding, concurrency and bitstream decoding. Core does not use it yet.
+encoding, concurrency and bitstream decoding. The `soph-v4l2.so` backend uses
+both nodes; see [v4l2-backend.md](v4l2-backend.md).
 
 ## Nodes
 
