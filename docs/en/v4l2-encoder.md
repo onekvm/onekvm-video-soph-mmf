@@ -5,7 +5,7 @@
 `soph_vc_driver` registers two V4L2 memory-to-memory encoder nodes that call
 the in-kernel VENC channel layer directly, without cvi_mpi. They are the
 encoding part of moving the backend off cvi_mpi; capture and scaling nodes are
-separate work. The existing MMF pipeline (character devices plus cvi_mpi)
+separate work (capture: [v4l2-capture.md](v4l2-capture.md)). The existing MMF pipeline (character devices plus cvi_mpi)
 remains available, and both can run at the same time.
 
 Status: experimental, validated on device 107 (6.18.57-onekvm-preempt) for
@@ -100,8 +100,8 @@ before/after deltas.
 
 Draining with `ENC_CMD_STOP` returned `LAST` and `EOS` for H.264, H.265 and JPEG.
 
-Every output decoded completely with host FFmpeg without errors and matched the
-input pattern. With Core streaming 1080p60 through cvi_mpi, concurrent V4L2
+Every output decoded completely with host FFmpeg and matched the input pattern;
+for JPEG, FFmpeg warns about the empty 2-byte APP9 segment the encoder writes. With Core streaming 1080p60 through cvi_mpi, concurrent V4L2
 JPEG 1080p30 and H.265 720p30 ran with zero errors and the browser stayed at
 about 60 fps.
 

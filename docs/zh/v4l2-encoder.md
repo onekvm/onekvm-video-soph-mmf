@@ -4,7 +4,7 @@
 
 `soph_vc_driver` 注册两个 V4L2 内存到内存（m2m）编码节点，直接调用内核内的
 VENC 通道层，不经过 cvi_mpi。它们是后端脱离 cvi_mpi 的编码部分；采集与缩放节点
-另行实现。现有 MMF 流水线（字符设备 + cvi_mpi）保持可用，两者可同时运行。
+另行实现（采集见 [v4l2-capture.md](v4l2-capture.md)）。现有 MMF 流水线（字符设备 + cvi_mpi）保持可用，两者可同时运行。
 
 状态：实验实现，已在 107（6.18.57-onekvm-preempt）完成编码、并发和码流解码验收；
 Core 尚未改用。
@@ -88,7 +88,7 @@ OUTPUT 3 缓冲、CAPTURE 4 缓冲，Core 停止时测：
 
 排空（`ENC_CMD_STOP`）在 H.264、H.265、JPEG 上均收到 `LAST` 与 `EOS`。
 
-各格式输出均经主机 FFmpeg 完整解码、无错误，画面与输入图案一致。
+各格式输出均经主机 FFmpeg 完整解码，画面与输入图案一致；JPEG 输出带编码器写入的 2 字节空 APP9 段，FFmpeg 会对此告警。
 Core 以 cvi_mpi 推 1080p60 时并发 V4L2 JPEG 1080p30 与 H.265 720p30，均 0 错误，
 浏览器端仍约 60 fps。
 
