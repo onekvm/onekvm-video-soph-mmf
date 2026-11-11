@@ -7,6 +7,7 @@
 
 #include <linux/dma-buf.h>
 #include <poll.h>
+#include <pthread.h>
 #include <sys/eventfd.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
@@ -254,6 +255,7 @@ void pipeline_main()
 {
 	std::vector<struct pollfd> fds;
 
+	set_thread_name("onekvm-v4l2");
 	fds.reserve(2 + kMaxCaptureChannels);
 	while (!g_rt.stop.load(std::memory_order_acquire)) {
 		fds.clear();
@@ -604,6 +606,11 @@ bool wait_fd(int fd, int timeout_ms)
 void wake_pipeline()
 {
 	signal_fd(g_rt.wake_fd);
+}
+
+void set_thread_name(const char *name)
+{
+	(void)pthread_setname_np(pthread_self(), name);
 }
 
 void release_frame_locked(Frame *frame)

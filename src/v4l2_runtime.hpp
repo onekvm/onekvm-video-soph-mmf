@@ -127,6 +127,8 @@ extern Runtime g_rt;
 
 uint64_t steady_ns();
 void wake_pipeline();
+/* Name the calling thread so it can be told apart in /proc. */
+void set_thread_name(const char *name);
 void signal_fd(int fd);
 void drain_fd(int fd);
 /* Wait for `fd` readable up to `timeout_ms`; true if readable. */

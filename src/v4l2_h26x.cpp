@@ -352,6 +352,7 @@ void reader_main(int ch, bool request_idr)
 	uint64_t window_start = 0;
 	uint32_t window_frames = 0;
 
+	rt::set_thread_name("onekvm-venc-rd");
 	try {
 		std::vector<uint8_t> scratch = take_buffer(self);
 		AnnexBParameterSets parameter_sets;
