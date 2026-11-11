@@ -6,7 +6,9 @@ option(BUILD_TESTING "Build host-side unit tests" OFF)
 include(CTest)
 include(GNUInstallDirs)
 
-option(ONEKVM_BUILD_MMF_BACKEND "Build the NanoKVM MMF backend" ON)
+option(ONEKVM_BUILD_MMF_BACKEND "Build the NanoKVM cvi_mpi backend (soph-mmf.so)" ON)
+option(ONEKVM_BUILD_V4L2_BACKEND
+    "Build the NanoKVM V4L2 backend without cvi_mpi (soph-v4l2.so)" ON)
 option(ONEKVM_USE_VENDOR_TUNE_FLAGS
     "Build with Sophgo's vendor GCC SG2002 tune flags" ON)
 
@@ -142,26 +144,13 @@ if(BUILD_TESTING)
     add_test(NAME lt6911-info COMMAND lt6911_info_test)
 endif()
 
-if(NOT ONEKVM_BUILD_MMF_BACKEND)
+if(NOT ONEKVM_BUILD_MMF_BACKEND AND NOT ONEKVM_BUILD_V4L2_BACKEND)
     return()
 endif()
 
-set(CVI_MPI_ROOT "" CACHE PATH "Built Sophgo cvi_mpi tree")
-if(NOT CVI_MPI_ROOT)
-    message(FATAL_ERROR "CVI_MPI_ROOT must point to a built Sophgo cvi_mpi tree")
-endif()
-
-set(CVI_MPI_SENSOR_DIR
-    "${CVI_MPI_ROOT}/component/isp/sensor/cv182x/lontium_lt6911")
-
-set(MMF_SOURCES
-    src/mmf_runtime.cpp
-    src/mmf_jpeg.cpp
-    src/mmf_h26x.cpp
-    src/mmf_capture.cpp
-    src/mmf_state.cpp
-    src/lt6911_sample_platform.c
-    src/lt6911_sample_sensor.c
+# Upper layers shared by both runtimes. They reach the hardware only through
+# the onekvm::mmf interface in src/mmf.hpp.
+set(ONEKVM_BACKEND_COMMON_SOURCES
     src/lt6911_bridge.c
     src/no_signal.cpp
     src/onekvm_crypto_backend.cpp
@@ -172,102 +161,137 @@ set(MMF_SOURCES
     src/edid.cpp
     src/lt6911_edid.cpp)
 
-add_library(soph_mmf SHARED
-    ${MMF_SOURCES}
-    "${CVI_MPI_ROOT}/sample/common/sample_common_sys.c"
-    "${CVI_MPI_ROOT}/sample/common/sample_common_vpss.c"
-    "${CVI_MPI_ROOT}/sample/common/sample_common_vi.c"
-    "${CVI_MPI_ROOT}/sample/common/sample_common_isp.c"
-    "${CVI_MPI_SENSOR_DIR}/lt6911_cmos.c")
-
-target_include_directories(soph_mmf PRIVATE
-    "${CMAKE_CURRENT_SOURCE_DIR}/include"
-    "${CMAKE_CURRENT_SOURCE_DIR}"
-    "${CVI_MPI_ROOT}/component/panel/cv181x"
-    "${CVI_MPI_ROOT}/include"
-    "${CVI_MPI_ROOT}/modules/isp/include/cv181x"
-    "${CVI_MPI_ROOT}/sample/common"
-    "${CVI_MPI_ROOT}/component/isp/common"
-    "${CVI_MPI_ROOT}/3rdparty/inih"
-    "${CVI_MPI_SENSOR_DIR}")
-
-target_compile_definitions(soph_mmf PRIVATE
-    USE_USER_SEN_DRIVER=1
-    SENSOR_LONTIUM_LT6911
-    SENSOR2_TYPE=LONTIUM_LT6911_2M_60FPS_8BIT)
-if(ONEKVM_USE_VENDOR_TUNE_FLAGS)
-    target_compile_options(soph_mmf PRIVATE
-        -mcpu=c906fdv
-        -march=rv64imafdcv0p7xthead
-        -mcmodel=medany
-        -mabi=lp64d
-        -Os)
-endif()
-target_compile_features(soph_mmf PRIVATE cxx_std_17)
-onekvm_enable_warnings(soph_mmf)
-set_target_properties(soph_mmf PROPERTIES
-    C_VISIBILITY_PRESET hidden
-    CXX_VISIBILITY_PRESET hidden
-    CXX_EXTENSIONS OFF
-    OUTPUT_NAME "soph-mmf"
-    PREFIX ""
-    POSITION_INDEPENDENT_CODE ON
-    VISIBILITY_INLINES_HIDDEN ON)
-
-set(CVI_MPI_LIB_DIR "${CVI_MPI_ROOT}/lib")
-# Sophgo's cvi_mpi DSOs omit their cross-library DT_NEEDED metadata.  Keep the
-# complete runtime set attached to this backend so dlopen can resolve symbols
-# between vendor libraries regardless of their order on the link line.
-target_link_options(soph_mmf PRIVATE "-Wl,--no-as-needed")
-target_link_libraries(soph_mmf PRIVATE
-    "${CVI_MPI_LIB_DIR}/libcvi_bin.so"
-    "${CVI_MPI_LIB_DIR}/libae.so"
-    "${CVI_MPI_LIB_DIR}/libaf.so"
-    "${CVI_MPI_LIB_DIR}/libawb.so"
-    "${CVI_MPI_LIB_DIR}/libcvi_bin_isp.so"
-    "${CVI_MPI_LIB_DIR}/libisp_algo.so"
-    "${CVI_MPI_LIB_DIR}/libisp.so"
-    "${CVI_MPI_LIB_DIR}/libsys.so"
-    "${CVI_MPI_LIB_DIR}/libvi.so"
-    "${CVI_MPI_LIB_DIR}/libvpss.so"
-    "${CVI_MPI_LIB_DIR}/libvo.so"
-    "${CVI_MPI_LIB_DIR}/librgn.so"
-    "${CVI_MPI_LIB_DIR}/libgdc.so"
-    "${CVI_MPI_LIB_DIR}/libvdec.so"
-    "${CVI_MPI_LIB_DIR}/libvenc.so"
-    "${CVI_MPI_LIB_DIR}/3rd/libini.so"
-    pthread)
-
-# Keep vendor sample-common and LT6911 references bound inside this DSO. The
-# version script makes the two OneKVM query functions its only public ABI.
+# The version script makes the two OneKVM query functions the only public ABI.
 set(ONEKVM_BACKEND_VERSION_SCRIPT
     "${CMAKE_CURRENT_SOURCE_DIR}/src/onekvm_backend.map")
-target_link_options(soph_mmf PRIVATE
-    "-Wl,-Bsymbolic"
-    "-Wl,--version-script=${ONEKVM_BACKEND_VERSION_SCRIPT}"
-    "-Wl,--wrap=CVI_ISP_SensorRegCallBack"
-    "-Wl,--wrap=CVI_VI_SetChnAttr")
-set_property(TARGET soph_mmf APPEND PROPERTY
-    LINK_DEPENDS "${ONEKVM_BACKEND_VERSION_SCRIPT}")
-
-# Sophgo's GCC 10 linker places .riscv.attributes immediately after a full
-# program-header table. Newer binutils tries to add PT_RISCV_ATTRIBUTES while
-# stripping and cannot grow that table. The dynamic loader uses e_flags for
-# the RVC/double-float ABI; removing this descriptive section keeps the ELF
-# compatible with Yocto's strip and objcopy.
-if(NOT CMAKE_OBJCOPY)
-    message(FATAL_ERROR "CMAKE_OBJCOPY is required for the RISC-V ELF fixup")
-endif()
-add_custom_command(TARGET soph_mmf POST_BUILD
-    COMMAND "${CMAKE_OBJCOPY}" --remove-section=.riscv.attributes
-        "$<TARGET_FILE:soph_mmf>"
-    VERBATIM)
-
 set(ONEKVM_VIDEO_BACKEND_INSTALL_DIR
     "${CMAKE_INSTALL_LIBDIR}/onekvm/video-backends"
     CACHE STRING "Install directory for OneKVM video backend DSOs")
-install(TARGETS soph_mmf
-    LIBRARY DESTINATION "${ONEKVM_VIDEO_BACKEND_INSTALL_DIR}")
+
+function(onekvm_backend_target target output_name)
+    target_include_directories(${target} BEFORE PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+        "${CMAKE_CURRENT_SOURCE_DIR}")
+    if(ONEKVM_USE_VENDOR_TUNE_FLAGS)
+        target_compile_options(${target} PRIVATE
+            -mcpu=c906fdv
+            -march=rv64imafdcv0p7xthead
+            -mcmodel=medany
+            -mabi=lp64d
+            -Os)
+    endif()
+    target_compile_features(${target} PRIVATE cxx_std_17)
+    onekvm_enable_warnings(${target})
+    set_target_properties(${target} PROPERTIES
+        C_VISIBILITY_PRESET hidden
+        CXX_VISIBILITY_PRESET hidden
+        CXX_EXTENSIONS OFF
+        OUTPUT_NAME "${output_name}"
+        PREFIX ""
+        POSITION_INDEPENDENT_CODE ON
+        VISIBILITY_INLINES_HIDDEN ON)
+    target_link_options(${target} PRIVATE
+        "-Wl,-Bsymbolic"
+        "-Wl,--version-script=${ONEKVM_BACKEND_VERSION_SCRIPT}")
+    set_property(TARGET ${target} APPEND PROPERTY
+        LINK_DEPENDS "${ONEKVM_BACKEND_VERSION_SCRIPT}")
+    # Sophgo's GCC 10 linker places .riscv.attributes immediately after a full
+    # program-header table. Newer binutils tries to add PT_RISCV_ATTRIBUTES
+    # while stripping and cannot grow that table. The dynamic loader uses
+    # e_flags for the RVC/double-float ABI; removing this descriptive section
+    # keeps the ELF compatible with Yocto's strip and objcopy.
+    if(NOT CMAKE_OBJCOPY)
+        message(FATAL_ERROR "CMAKE_OBJCOPY is required for the RISC-V ELF fixup")
+    endif()
+    add_custom_command(TARGET ${target} POST_BUILD
+        COMMAND "${CMAKE_OBJCOPY}" --remove-section=.riscv.attributes
+            "$<TARGET_FILE:${target}>"
+        VERBATIM)
+    install(TARGETS ${target}
+        LIBRARY DESTINATION "${ONEKVM_VIDEO_BACKEND_INSTALL_DIR}")
+endfunction()
+
+if(ONEKVM_BUILD_V4L2_BACKEND)
+    # soph-vi / soph-vpss / soph-venc / soph-jpegenc nodes; no vendor runtime.
+    add_library(soph_v4l2 SHARED
+        ${ONEKVM_BACKEND_COMMON_SOURCES}
+        src/v4l2_node.cpp
+        src/v4l2_capture.cpp
+        src/v4l2_h26x.cpp
+        src/v4l2_jpeg.cpp)
+    onekvm_backend_target(soph_v4l2 soph-v4l2)
+    target_link_libraries(soph_v4l2 PRIVATE pthread)
+endif()
+
+if(ONEKVM_BUILD_MMF_BACKEND)
+    set(CVI_MPI_ROOT "" CACHE PATH "Built Sophgo cvi_mpi tree")
+    if(NOT CVI_MPI_ROOT)
+        message(FATAL_ERROR "CVI_MPI_ROOT must point to a built Sophgo cvi_mpi tree")
+    endif()
+
+    set(CVI_MPI_SENSOR_DIR
+        "${CVI_MPI_ROOT}/component/isp/sensor/cv182x/lontium_lt6911")
+
+    add_library(soph_mmf SHARED
+        ${ONEKVM_BACKEND_COMMON_SOURCES}
+        src/mmf_runtime.cpp
+        src/mmf_jpeg.cpp
+        src/mmf_h26x.cpp
+        src/mmf_capture.cpp
+        src/mmf_state.cpp
+        src/lt6911_sample_platform.c
+        src/lt6911_sample_sensor.c
+        "${CVI_MPI_ROOT}/sample/common/sample_common_sys.c"
+        "${CVI_MPI_ROOT}/sample/common/sample_common_vpss.c"
+        "${CVI_MPI_ROOT}/sample/common/sample_common_vi.c"
+        "${CVI_MPI_ROOT}/sample/common/sample_common_isp.c"
+        "${CVI_MPI_SENSOR_DIR}/lt6911_cmos.c")
+
+    target_include_directories(soph_mmf PRIVATE
+        "${CVI_MPI_ROOT}/component/panel/cv181x"
+        "${CVI_MPI_ROOT}/include"
+        "${CVI_MPI_ROOT}/modules/isp/include/cv181x"
+        "${CVI_MPI_ROOT}/sample/common"
+        "${CVI_MPI_ROOT}/component/isp/common"
+        "${CVI_MPI_ROOT}/3rdparty/inih"
+        "${CVI_MPI_SENSOR_DIR}")
+
+    target_compile_definitions(soph_mmf PRIVATE
+        USE_USER_SEN_DRIVER=1
+        SENSOR_LONTIUM_LT6911
+        SENSOR2_TYPE=LONTIUM_LT6911_2M_60FPS_8BIT)
+    onekvm_backend_target(soph_mmf soph-mmf)
+
+    set(CVI_MPI_LIB_DIR "${CVI_MPI_ROOT}/lib")
+    # Sophgo's cvi_mpi DSOs omit their cross-library DT_NEEDED metadata. Keep
+    # the complete runtime set attached to this backend so dlopen can resolve
+    # symbols between vendor libraries regardless of their order on the link
+    # line.
+    target_link_options(soph_mmf PRIVATE "-Wl,--no-as-needed")
+    target_link_libraries(soph_mmf PRIVATE
+        "${CVI_MPI_LIB_DIR}/libcvi_bin.so"
+        "${CVI_MPI_LIB_DIR}/libae.so"
+        "${CVI_MPI_LIB_DIR}/libaf.so"
+        "${CVI_MPI_LIB_DIR}/libawb.so"
+        "${CVI_MPI_LIB_DIR}/libcvi_bin_isp.so"
+        "${CVI_MPI_LIB_DIR}/libisp_algo.so"
+        "${CVI_MPI_LIB_DIR}/libisp.so"
+        "${CVI_MPI_LIB_DIR}/libsys.so"
+        "${CVI_MPI_LIB_DIR}/libvi.so"
+        "${CVI_MPI_LIB_DIR}/libvpss.so"
+        "${CVI_MPI_LIB_DIR}/libvo.so"
+        "${CVI_MPI_LIB_DIR}/librgn.so"
+        "${CVI_MPI_LIB_DIR}/libgdc.so"
+        "${CVI_MPI_LIB_DIR}/libvdec.so"
+        "${CVI_MPI_LIB_DIR}/libvenc.so"
+        "${CVI_MPI_LIB_DIR}/3rd/libini.so"
+        pthread)
+    # Keep vendor sample-common and LT6911 references bound inside this DSO.
+    target_link_options(soph_mmf PRIVATE
+        "-Wl,--wrap=CVI_ISP_SensorRegCallBack"
+        "-Wl,--wrap=CVI_VI_SetChnAttr")
+endif()
+
 install(FILES packaging/onekvm/nanokvm-device-backend.json
     DESTINATION "${CMAKE_INSTALL_DATADIR}/onekvm/device-backends"
     RENAME nanokvm.json)
