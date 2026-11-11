@@ -1,17 +1,7 @@
 #include "onekvm_video_backend_internal.hpp"
-#include "mmf_internal.hpp"
 #include "snapshot_admission.hpp"
 
 #include <chrono>
-
-namespace onekvm::mmf {
-int acquire_capture_frame_timeout(int channel, void **data, int *length,
-    int *width, int *height, int *format, int timeout_ms);
-int read_jpeg_packet_timeout(
-    int channel, uint8_t *destination, int capacity, int timeout_ms);
-int submit_jpeg_frame_timeout(int channel, uint8_t *data, int width, int height,
-    int pixel_format, int quality, int timeout_ms);
-}
 
 namespace onekvm::video_backend {
 namespace {
@@ -105,13 +95,13 @@ int32_t source_snapshot(
         return ONEKVM_VIDEO_RESOURCE_BUSY;
     }
     const int channel = source->channel;
-    if (channel < 0 || channel >= MMF_VI_MAX_CHN ||
-        !mmf::g_runtime.vi_chn_is_inited[channel]) {
+    if (channel < 0 || channel >= mmf::kMaxCaptureChannels ||
+        !mmf::capture_channel_open(channel)) {
         set_error(error, error_capacity, "snapshot capture channel is unavailable");
         return ONEKVM_VIDEO_RESOURCE_UNINITIALIZED;
     }
-    const bool channel_was_running = mmf::g_runtime.vi_chn_running[channel];
-    const bool vi_was_running = mmf::g_runtime.vi_dma_running;
+    const bool channel_was_running = mmf::capture_channel_running(channel);
+    const bool vi_was_running = mmf::vi_dma_running();
 
     /* Creating JPEG allocates its VENC buffers and can take several frame
        periods. Reserve it before borrowing the depth-1 VPSS output so the

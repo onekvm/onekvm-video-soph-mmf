@@ -1,7 +1,5 @@
 #include "onekvm_video_backend_internal.hpp"
 #include "h264_annexb.hpp"
-#include "mmf_internal.hpp"
-#include "cvi_venc.h"
 
 #pragma GCC visibility push(hidden)
 namespace onekvm::video_backend {
@@ -289,27 +287,12 @@ int configure_encoder(Encoder *encoder, int width, int height,
             g_encoder_owners[channel] = encoder;
             g_encoder_owner_generations[channel] =
                 g_mmf_generation.load(std::memory_order_acquire);
-            // The configured encoder input is DATA_BITWIDTH_8 NV21. Read VUI
-            // before binding/StartRecvFrame; never probe a live VENC from status.
-            uint32_t range = ONEKVM_VIDEO_COLOR_RANGE_UNKNOWN;
-            VENC_VUI_VIDEO_SIGNAL_S signal{};
-            bool have_vui = false;
-            if (encoder->codec_type == 1) {
-                VENC_H265_VUI_S vui{};
-                have_vui = CVI_VENC_GetH265Vui(channel, &vui) == CVI_SUCCESS;
-                signal = vui.stVuiVideoSignal;
-            } else if (encoder->codec_type == 2) {
-                VENC_H264_VUI_S vui{};
-                have_vui = CVI_VENC_GetH264Vui(channel, &vui) == CVI_SUCCESS;
-                signal = vui.stVuiVideoSignal;
-            }
-            if (have_vui) {
-                // H.264/H.265 infer video_full_range_flag=0 when it is absent.
-                // Report the effective range, including that normative default.
-                range = signal.video_signal_type_present_flag && signal.video_full_range_flag
-                    ? ONEKVM_VIDEO_COLOR_RANGE_FULL
-                    : ONEKVM_VIDEO_COLOR_RANGE_LIMITED;
-            }
+            // The configured encoder input is 8-bit NV21. Read the VUI range
+            // before binding; never probe a live encoder from status.
+            const int full = mmf::h26x_full_range(channel);
+            const uint32_t range = full < 0 ? ONEKVM_VIDEO_COLOR_RANGE_UNKNOWN
+                : full ? ONEKVM_VIDEO_COLOR_RANGE_FULL
+                       : ONEKVM_VIDEO_COLOR_RANGE_LIMITED;
             encoder->color_info.store(8u | (range << 8), std::memory_order_release);
         }
     }
@@ -1749,17 +1732,17 @@ int32_t encoder_resources(onekvm_video_encoder_resources_v1 *resources,
     resources->policy_jpeg_capacity = 1;
     resources->active_h26x = 0;
     for (int channel = kFirstVENCChannel; channel <= kLastVENCChannel; ++channel) {
-        if (mmf::g_runtime.h26x_encoders[channel].initialized)
+        if (mmf::h26x_encoder_initialized(channel))
             ++resources->active_h26x;
     }
-    resources->active_jpeg = mmf::g_runtime.jpeg_initialized ? 1u : 0u;
+    resources->active_jpeg = mmf::jpeg_encoder_initialized() ? 1u : 0u;
     resources->hardware_channel_capacity = kLastVENCChannel + 1;
     resources->input_mode_mask = ONEKVM_VIDEO_ENCODER_INPUT_MASK_MANUAL |
         ONEKVM_VIDEO_ENCODER_INPUT_MASK_BOUND;
     resources->purpose_mask = ONEKVM_VIDEO_ENCODER_PURPOSE_MASK_REALTIME |
         ONEKVM_VIDEO_ENCODER_PURPOSE_MASK_BACKGROUND;
     resources->flags = 0;
-    if (mmf::g_runtime.reference_count == 0) {
+    if (!mmf::runtime_initialized()) {
         set_error(error, error_capacity, "MMF runtime is not initialized");
         return ONEKVM_VIDEO_RESOURCE_UNINITIALIZED;
     }
@@ -1790,17 +1773,17 @@ int32_t encoder_allocate(
     const int type = codec_type(request->config.codec);
 
     MmfControlLock global_lock;
-    if (mmf::g_runtime.reference_count == 0) {
+    if (!mmf::runtime_initialized()) {
         set_error(error, error_capacity, "MMF runtime is not initialized");
         return ONEKVM_VIDEO_RESOURCE_UNINITIALIZED;
     }
-    if (type == 0 && mmf::g_runtime.jpeg_capture_channel >= 0 &&
+    if (type == 0 && mmf::jpeg_capture_channel() >= 0 &&
         mmf::close_jpeg_encoder(kJPEGChannel) != 0) {
         set_error(error, error_capacity, "JPEG input cleanup is still pending");
         return ONEKVM_VIDEO_RESOURCE_BUSY;
     }
-    if ((type == 0 && mmf::g_runtime.jpeg_initialized) ||
-        (type != 0 && mmf::g_runtime.h26x_encoder_active)) {
+    if ((type == 0 && mmf::jpeg_encoder_initialized()) ||
+        (type != 0 && mmf::h26x_encoder_active())) {
         set_error(error, error_capacity, "requested encoder resource is busy");
         return ONEKVM_VIDEO_RESOURCE_BUSY;
     }

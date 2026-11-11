@@ -253,4 +253,17 @@ int capture_use_vi_frames();
 int submit_vpss_nv21(const uint8_t *nv21, int width, int height,
                     bool content_changed = false);
 
+/* Runtime state for the upper layers, implemented by each runtime (cvi_mpi or
+   V4L2). Read under MmfControlLock, like the calls above. */
+inline constexpr int kMaxCaptureChannels = 2;
+bool runtime_initialized();
+bool capture_channel_running(int ch);
+bool h26x_encoder_initialized(int ch);
+bool h26x_encoder_active();
+bool jpeg_encoder_initialized();
+int jpeg_capture_channel();
+/* Range the opened encoder signals in its VUI: 1 full, 0 limited (also when
+   absent, the normative default), -1 unknown. Call before binding. */
+int h26x_full_range(int ch);
+
 } // namespace onekvm::mmf

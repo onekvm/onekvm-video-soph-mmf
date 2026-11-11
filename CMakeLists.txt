@@ -159,6 +159,7 @@ set(MMF_SOURCES
     src/mmf_jpeg.cpp
     src/mmf_h26x.cpp
     src/mmf_capture.cpp
+    src/mmf_state.cpp
     src/lt6911_sample_platform.c
     src/lt6911_sample_sensor.c
     src/lt6911_bridge.c
