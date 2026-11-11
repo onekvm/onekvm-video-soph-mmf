@@ -12,6 +12,7 @@ SRC_URI = " \
     file://load-onekvm-video-soph-mmf-optional-modules \
     file://prepare-onekvm-device-nanokvm-hdmi.c \
     file://v4l2-decode-smoke.c \
+    file://v4l2-encode-smoke.c \
     file://vi-lifecycle-smoke.c \
     file://99-onekvm-vdec.rules \
     file://link-onekvm-vdec \
@@ -85,6 +86,8 @@ do_compile() {
     # reproducible-package buildpaths QA check.
     ${CC} ${CFLAGS} ${CPPFLAGS} -g0 ${LDFLAGS} \
         "${UNPACKDIR}/v4l2-decode-smoke.c" -o "${B}/v4l2-decode-smoke"
+    ${CC} ${CFLAGS} ${CPPFLAGS} -g0 ${LDFLAGS} \
+        "${UNPACKDIR}/v4l2-encode-smoke.c" -o "${B}/v4l2-encode-smoke"
 
     ${CC} ${CFLAGS} ${CPPFLAGS} -g0 ${LDFLAGS} \
         -D__CV181X__ \
@@ -124,6 +127,8 @@ do_install() {
         "${D}${libexecdir}/onekvm/prepare-device-nanokvm-hdmi"
     install -Dm0755 "${B}/v4l2-decode-smoke" \
         "${D}${libexecdir}/onekvm/v4l2-decode-smoke"
+    install -Dm0755 "${B}/v4l2-encode-smoke" \
+        "${D}${libexecdir}/onekvm/v4l2-encode-smoke"
     install -Dm0755 "${B}/vi-lifecycle-smoke" \
         "${D}${libexecdir}/onekvm/vi-lifecycle-smoke"
     install -Dm0755 "${UNPACKDIR}/link-onekvm-vdec" \
