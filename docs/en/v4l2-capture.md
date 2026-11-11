@@ -56,7 +56,7 @@ and capture continues.
 | --- | --- | --- |
 | `MMAP` | Physically contiguous ION (`onekvm_lazy_cma`, carveout fallback) | write-combined, uncached by default |
 | `MMAP` + `V4L2_MEMORY_FLAG_NON_COHERENT` | same, cached | CPU reads about 3× faster; `DQBUF` invalidates the cache |
-| `EXPBUF` | exported as DMA-BUF | queue directly to the `soph-venc` / `soph-jpegenc` OUTPUT |
+| `EXPBUF` | exported as DMA-BUF | queue directly to the `soph-venc` / `soph-jpegenc` / `soph-vpss` ([v4l2-scaler.md](v4l2-scaler.md)) OUTPUT |
 
 When queuing an exported buffer to an encoder as `V4L2_MEMORY_DMABUF`, set
 `planes[0].length` to the buffer size and `bytesused` to `sizeimage`.

@@ -47,7 +47,7 @@ VI 同一时刻只属于一方：`/dev/cvi-vi` 已打开时 `STREAMON` 返回 `E
 | --- | --- | --- |
 | `MMAP` | ION（`onekvm_lazy_cma`，回退 carveout）物理连续 | 默认写合并、无缓存 |
 | `MMAP` + `V4L2_MEMORY_FLAG_NON_COHERENT` | 同上，带缓存 | CPU 读快约 3 倍，`DQBUF` 时做缓存失效 |
-| `EXPBUF` | 导出为 DMA-BUF | 直接排入 `soph-venc` / `soph-jpegenc` 的 OUTPUT |
+| `EXPBUF` | 导出为 DMA-BUF | 直接排入 `soph-venc` / `soph-jpegenc` / `soph-vpss`（[v4l2-scaler.md](v4l2-scaler.md)）的 OUTPUT |
 
 导出缓冲以 `V4L2_MEMORY_DMABUF` 排入编码节点时，`planes[0].length` 填缓冲大小，
 `bytesused` 填 `sizeimage`。

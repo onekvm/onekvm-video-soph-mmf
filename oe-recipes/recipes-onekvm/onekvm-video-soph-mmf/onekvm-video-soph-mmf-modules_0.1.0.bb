@@ -14,6 +14,7 @@ SRC_URI = " \
     file://v4l2-decode-smoke.c \
     file://v4l2-encode-smoke.c \
     file://v4l2-capture-smoke.c \
+    file://v4l2-scale-smoke.c \
     file://vi-lifecycle-smoke.c \
     file://99-onekvm-vdec.rules \
     file://link-onekvm-vdec \
@@ -91,6 +92,8 @@ do_compile() {
         "${UNPACKDIR}/v4l2-encode-smoke.c" -o "${B}/v4l2-encode-smoke"
     ${CC} ${CFLAGS} ${CPPFLAGS} -g0 ${LDFLAGS} \
         "${UNPACKDIR}/v4l2-capture-smoke.c" -o "${B}/v4l2-capture-smoke"
+    ${CC} ${CFLAGS} ${CPPFLAGS} -g0 ${LDFLAGS} \
+        "${UNPACKDIR}/v4l2-scale-smoke.c" -o "${B}/v4l2-scale-smoke"
 
     ${CC} ${CFLAGS} ${CPPFLAGS} -g0 ${LDFLAGS} \
         -D__CV181X__ \
@@ -134,6 +137,8 @@ do_install() {
         "${D}${libexecdir}/onekvm/v4l2-encode-smoke"
     install -Dm0755 "${B}/v4l2-capture-smoke" \
         "${D}${libexecdir}/onekvm/v4l2-capture-smoke"
+    install -Dm0755 "${B}/v4l2-scale-smoke" \
+        "${D}${libexecdir}/onekvm/v4l2-scale-smoke"
     install -Dm0755 "${B}/vi-lifecycle-smoke" \
         "${D}${libexecdir}/onekvm/vi-lifecycle-smoke"
     install -Dm0755 "${UNPACKDIR}/link-onekvm-vdec" \
