@@ -8,7 +8,7 @@ import subprocess
 import tempfile
 
 root = Path(__file__).resolve().parents[1]
-source = Path(os.environ.get('ONEKVM_LT6911_SENSOR', root / 'src/lt6911_sensor_ctl.c')).read_text()
+source = Path(os.environ.get('ONEKVM_LT6911_SENSOR', root / 'src/lt6911_bridge.c')).read_text()
 names = '''onekvm_lt6911_cached_chip onekvm_lt6911_cache_chip
 supported_active_size normalize_half_or_full_width lt6911_i2c_read_be16
 sensor_read sensor_write sensor_present identify_chip read_active_pair read_family_active

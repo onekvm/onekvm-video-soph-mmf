@@ -161,7 +161,7 @@ set(MMF_SOURCES
     src/mmf_capture.cpp
     src/lt6911_sample_platform.c
     src/lt6911_sample_sensor.c
-    src/lt6911_sensor_ctl.c
+    src/lt6911_bridge.c
     src/no_signal.cpp
     src/onekvm_crypto_backend.cpp
     src/onekvm_video_backend.cpp
