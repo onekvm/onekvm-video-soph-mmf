@@ -386,7 +386,8 @@ static void usage(void)
 		"usage: v4l2-scale-smoke [-t] [-s WxH] [-i FOURCC] [-S WxH] [-f FOURCC]\n"
 		"         [-c x,y,w,h] [-p x,y,w,h] [-F h|v|hv] [-n frames] [-r fps] [-b buffers]\n"
 		"         [-C] [-o out.raw [-k index]] [-e h264|hevc|jpeg -O out]\n"
-		"  -t  colour bars instead of soph-vi (input -i, default UYVY)\n"
+		"  -t  colour bars instead of soph-vi; -i input format, default UYVY\n"
+		"      (soph-vi: UYVY, NV21 or NV12)\n"
 		"  -s  source size, default 1920x1080; -S scaled size, default the source size\n"
 		"  -f  scaled format, default NV12\n"
 		"  -c  crop on the source; -p compose rectangle in the scaled frame\n"
@@ -462,13 +463,16 @@ int main(int argc, char **argv)
 
 		vi = open_node("soph-vi");
 		f.fmt.pix = (struct v4l2_pix_format){ .width = w, .height = h,
-						      .pixelformat = V4L2_PIX_FMT_UYVY };
+						      .pixelformat = in_fmt };
 		if (xioctl(vi, VIDIOC_S_FMT, &f))
 			die("VI S_FMT");
+		if (f.fmt.pix.pixelformat != in_fmt) {
+			fprintf(stderr, "soph-vi gives %s\n", fourcc_str(f.fmt.pix.pixelformat));
+			exit(1);
+		}
 		parm.parm.capture.timeperframe = (struct v4l2_fract){ 1, fps };
 		if (xioctl(vi, VIDIOC_S_PARM, &parm))
 			die("VI S_PARM");
-		in_fmt = V4L2_PIX_FMT_UYVY;
 		set_fmt(sc, OUT_MP, in_fmt, w, h, f.fmt.pix.bytesperline, &src);
 		if (src.plane_fmt[0].bytesperline != f.fmt.pix.bytesperline) {
 			fprintf(stderr, "VPSS stride %u, VI %u\n", src.plane_fmt[0].bytesperline,

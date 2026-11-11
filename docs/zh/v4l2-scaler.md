@@ -3,8 +3,9 @@
 [English](../en/v4l2-scaler.md)
 
 `soph_vpss` 注册内存到内存节点 `soph-vpss`：用 VPSS 硬件对一帧做裁剪、缩放、
-翻转和格式转换。会话通过内核内的 VPSS 层建立分组，不经过 cvi_mpi。H.264 编码只
-接受 NV12/NV21，因此 `soph-vi` 的 UYVY 需经此节点转换后再送 `soph-venc`。
+翻转和格式转换。会话通过内核内的 VPSS 层建立分组，不经过 cvi_mpi。`soph-vi` 可
+直接输出 NV21/NV12（见 [v4l2-capture.md](v4l2-capture.md#420-输出)），同尺寸编码
+不需要此节点；缩放、裁剪、翻转或其他格式才经过它。
 
 状态：实验实现，已在 107（6.18.57-onekvm-preempt）完成格式、尺寸、裁剪、翻转、
 与采集和编码节点串接，以及与旧 Core 并存的验收；Core 尚未改用。
@@ -121,7 +122,9 @@
 | 合成流运行 40 秒期间启动旧 Core | 合成流 0 错误、0 超时，平均延迟 24.5 → 26.8 ms；Core 正常启动 |
 | 这些模块下的旧 Core | 登录网页 H.264 1080p 60 FPS |
 
-- 经 VPSS 比 UYVY 直送 H.265 多约 7 ms，即 VPSS 处理整帧的时间。旧路径记录的
+- 经 VPSS 比 UYVY 直送 H.265 多约 7 ms，即 VPSS 处理整帧的时间。该时间只取决于
+  像素数：`soph-vi` 改为输出 NV21 时，到 1080p / 720p 缩放帧平均仍为 6.68 /
+  6.67 ms，720p H.264 P50 同为 11.53 ms。旧路径记录的
   VPSS `CostTime` 约 6.1 ms（见 [video-pipeline.md](video-pipeline.md)），
   与此同量级。该值来自旧文档，不是同轮实测。
 - 合成测试一次排入 4 帧，其 `QBUF` → `DQBUF` 时间含排队，应以

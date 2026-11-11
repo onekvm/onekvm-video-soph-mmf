@@ -13,7 +13,7 @@
 | [abi.md](abi.md) | 动态库导出的视频/加密 ABI、特性位、租约与截图约定 |
 | [v4l2-decoder.md](v4l2-decoder.md) | 实验性 V4L2 解码接口、事件、缓冲和硬件资源边界 |
 | [v4l2-encoder.md](v4l2-encoder.md) | 实验性 V4L2 编码接口（H.264/H.265/JPEG）、缓冲、控制与 107 实测 |
-| [v4l2-capture.md](v4l2-capture.md) | 实验性 V4L2 采集接口（VI UYVY）、与 cvi_mpi 互斥、缓冲与 107 实测 |
+| [v4l2-capture.md](v4l2-capture.md) | 实验性 V4L2 采集接口（VI UYVY 与 NV21/NV12 直出）、与 cvi_mpi 互斥、缓冲与 107 实测 |
 | [v4l2-scaler.md](v4l2-scaler.md) | 实验性 V4L2 缩放与格式转换接口（VPSS）、色彩、与 cvi_mpi 并存与 107 实测 |
 | [no-signal.md](no-signal.md) | 无信号 NV21 资源 |
 | [dynamic-ion.md](dynamic-ion.md) | 视频／NPU 动态多媒体内存设计草案、VI DisableChn 恢复分析 |

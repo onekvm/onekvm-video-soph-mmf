@@ -6,8 +6,9 @@
 flips and converts frames on the VPSS hardware. Sessions create their VPSS group
 through the in-kernel VPSS layer, without cvi_mpi.
 
-The H.264 encoder takes only NV12/NV21, so `soph-vi` UYVY goes through this node
-before `soph-venc`.
+`soph-vi` can output NV21/NV12 itself (see
+[v4l2-capture.md](v4l2-capture.md#420-output)), so same-size encoding does not
+need this node. Scaling, cropping, flipping and other formats go through it.
 
 Status: experimental. Validated on device 107 (6.18.57-onekvm-preempt) for:
 
@@ -147,7 +148,9 @@ end.
 | Legacy Core on these modules | logged-in web page H.264 1080p 60 FPS |
 
 - Going through VPSS adds about 7 ms over UYVY straight to H.265: the time VPSS
-  takes for a whole frame.
+  takes for a whole frame. It depends only on the pixel count: with `soph-vi`
+  writing NV21 instead, the scaled 1080p / 720p frames still average 6.68 /
+  6.67 ms, and 720p H.264 P50 stays at 11.53 ms.
 - The legacy path records a VPSS `CostTime` of about 6.1 ms (see
   the Chinese [video-pipeline.md](../zh/video-pipeline.md)), the same order. That figure comes from
   the older document, not from this session.

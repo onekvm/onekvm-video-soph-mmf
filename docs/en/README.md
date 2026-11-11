@@ -15,7 +15,7 @@ The default kernel is **Linux 6.18**
 | [abi.md](abi.md) | Video/crypto ABI, feature bits, leases, snapshots |
 | [v4l2-decoder.md](v4l2-decoder.md) | Experimental V4L2 decoder, events, buffers and hardware resource constraints |
 | [v4l2-encoder.md](v4l2-encoder.md) | Experimental V4L2 encoders (H.264/H.265/JPEG), buffers, controls, device 107 measurements |
-| [v4l2-capture.md](v4l2-capture.md) | Experimental V4L2 capture (VI UYVY), exclusion against cvi_mpi, buffers, device 107 measurements |
+| [v4l2-capture.md](v4l2-capture.md) | Experimental V4L2 capture (VI UYVY and direct NV21/NV12), exclusion against cvi_mpi, buffers, device 107 measurements |
 | [v4l2-scaler.md](v4l2-scaler.md) | Experimental V4L2 scaler and format converter (VPSS), colour, coexistence with cvi_mpi, device 107 measurements |
 | [no-signal.md](no-signal.md) | No-signal NV21 assets |
 | [overview.md](overview.md) | Features, resolution budget, 6.18 kernel, OE build, host tests |

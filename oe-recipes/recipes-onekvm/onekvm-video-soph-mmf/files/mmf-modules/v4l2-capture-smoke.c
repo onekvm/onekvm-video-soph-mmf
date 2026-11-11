@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
-/* Capture UYVY frames from the SG200x V4L2 VI node ("soph-vi") and optionally
- * encode them through soph-venc / soph-jpegenc by DMA-BUF, without copies.
+/* Capture frames from the SG200x V4L2 VI node ("soph-vi"): UYVY, or NV21/NV12
+ * converted by VI. Optionally encode them through soph-venc / soph-jpegenc by
+ * DMA-BUF, without copies.
  * Reports frame rate, sequence gaps and latency from the VI end-of-frame
  * timestamp to the capture dequeue, or to the encoded access unit.
  */
@@ -104,13 +105,14 @@ static int cmp_u64(const void *a, const void *b)
 static void usage(void)
 {
 	fprintf(stderr,
-		"usage: v4l2-capture-smoke [-d dev] [-s WxH] [-r fps] [-n frames] [-b buffers]\n"
-		"         [-C] [-H hold_ms] [-o frame.uyvy [-k index]] [-e hevc|jpeg -O out]\n"
-		"  -s  source size (S_FMT), default 1920x1080\n"
+		"usage: v4l2-capture-smoke [-d dev] [-s WxH] [-f uyvy|nv21|nv12] [-r fps] [-n frames]\n"
+		"         [-b buffers] [-C] [-H hold_ms] [-o frame.raw [-k index]]\n"
+		"         [-e h264|hevc|jpeg -O out]\n"
+		"  -s  source size (S_FMT), default 1920x1080; -f capture format, default uyvy\n"
 		"  -C  cached buffers (V4L2_MEMORY_FLAG_NON_COHERENT)\n"
 		"  -H  hold each frame this long before requeueing it\n"
-		"  -o  write frame -k (default 30) as raw UYVY\n"
-		"  -e  encode through soph-venc (hevc) or soph-jpegenc (jpeg) by DMA-BUF\n");
+		"  -o  write frame -k (default 30) raw\n"
+		"  -e  encode through soph-venc (h264, hevc) or soph-jpegenc (jpeg) by DMA-BUF\n");
 	exit(2);
 }
 
@@ -125,13 +127,14 @@ static int enc_open(const char *codec, const struct v4l2_pix_format *pix, unsign
 	unsigned int i;
 	int fd, type;
 
-	if (!jpeg && strcmp(codec, "hevc"))
+	if (!jpeg && strcmp(codec, "hevc") && strcmp(codec, "h264"))
 		usage();
 	fd = open_node(NULL, jpeg ? "soph-jpegenc" : "soph-venc");
 
 	memset(&f, 0, sizeof(f));
 	f.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
-	f.fmt.pix_mp.pixelformat = jpeg ? V4L2_PIX_FMT_JPEG : V4L2_PIX_FMT_HEVC;
+	f.fmt.pix_mp.pixelformat = jpeg ? V4L2_PIX_FMT_JPEG :
+				   strcmp(codec, "hevc") ? V4L2_PIX_FMT_H264 : V4L2_PIX_FMT_HEVC;
 	f.fmt.pix_mp.width = pix->width;
 	f.fmt.pix_mp.height = pix->height;
 	f.fmt.pix_mp.num_planes = 1;
@@ -140,16 +143,19 @@ static int enc_open(const char *codec, const struct v4l2_pix_format *pix, unsign
 
 	memset(&f, 0, sizeof(f));
 	f.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
-	f.fmt.pix_mp.pixelformat = V4L2_PIX_FMT_UYVY;
+	f.fmt.pix_mp.pixelformat = pix->pixelformat;
 	f.fmt.pix_mp.width = pix->width;
 	f.fmt.pix_mp.height = pix->height;
 	f.fmt.pix_mp.num_planes = 1;
 	f.fmt.pix_mp.plane_fmt[0].bytesperline = pix->bytesperline;
 	if (xioctl(fd, VIDIOC_S_FMT, &f))
 		die("encoder S_FMT output");
-	if (f.fmt.pix_mp.plane_fmt[0].bytesperline != pix->bytesperline) {
-		fprintf(stderr, "encoder stride %u, capture %u\n",
-			f.fmt.pix_mp.plane_fmt[0].bytesperline, pix->bytesperline);
+	if (f.fmt.pix_mp.plane_fmt[0].bytesperline != pix->bytesperline ||
+	    f.fmt.pix_mp.pixelformat != pix->pixelformat) {
+		fprintf(stderr, "encoder takes %.4s stride %u, capture %.4s stride %u\n",
+			(const char *)&f.fmt.pix_mp.pixelformat,
+			f.fmt.pix_mp.plane_fmt[0].bytesperline, (const char *)&pix->pixelformat,
+			pix->bytesperline);
 		exit(1);
 	}
 
@@ -220,17 +226,24 @@ int main(int argc, char **argv)
 	unsigned int hold_ms = 0, cached = 0, i, done = 0, gaps = 0, enc_errors = 0;
 	uint64_t *lat, first_ts = 0, last_ts = 0, prev_ts = 0, ivl_min = ~0ull, ivl_max = 0;
 	uint64_t read_ns = 0, bytes = 0, t_start;
-	uint32_t prev_seq = 0;
+	uint32_t prev_seq = 0, fourcc = V4L2_PIX_FMT_UYVY;
 	struct v4l2_requestbuffers rb;
 	struct v4l2_streamparm parm;
 	struct v4l2_format f;
 	FILE *enc_file = NULL;
 	int fd, enc = -1, type, opt;
 
-	while ((opt = getopt(argc, argv, "d:s:r:n:b:CH:o:k:e:O:h")) != -1) {
+	while ((opt = getopt(argc, argv, "d:s:f:r:n:b:CH:o:k:e:O:h")) != -1) {
 		switch (opt) {
 		case 'd': dev = optarg; break;
 		case 's': if (sscanf(optarg, "%ux%u", &w, &h) != 2) usage(); break;
+		case 'f':
+			fourcc = !strcmp(optarg, "nv21") ? V4L2_PIX_FMT_NV21 :
+				 !strcmp(optarg, "nv12") ? V4L2_PIX_FMT_NV12 :
+				 !strcmp(optarg, "uyvy") ? V4L2_PIX_FMT_UYVY : 0;
+			if (!fourcc)
+				usage();
+			break;
 		case 'r': fps = strtoul(optarg, NULL, 0); break;
 		case 'n': frames = strtoul(optarg, NULL, 0); break;
 		case 'b': nbufs = strtoul(optarg, NULL, 0); break;
@@ -254,9 +267,13 @@ int main(int argc, char **argv)
 	f.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 	f.fmt.pix.width = w;
 	f.fmt.pix.height = h;
-	f.fmt.pix.pixelformat = V4L2_PIX_FMT_UYVY;
+	f.fmt.pix.pixelformat = fourcc;
 	if (xioctl(fd, VIDIOC_S_FMT, &f))
 		die("S_FMT");
+	if (f.fmt.pix.pixelformat != fourcc) {
+		fprintf(stderr, "soph-vi gives %.4s\n", (const char *)&f.fmt.pix.pixelformat);
+		exit(1);
+	}
 	memset(&parm, 0, sizeof(parm));
 	parm.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 	parm.parm.capture.timeperframe.numerator = 1;
@@ -301,7 +318,8 @@ int main(int argc, char **argv)
 		}
 		cap_qbuf(fd, i);
 	}
-	printf("capture %ux%u stride %u size %u, %u buffers%s\n", f.fmt.pix.width,
+	printf("capture %.4s %ux%u stride %u size %u, %u buffers%s\n",
+	       (const char *)&f.fmt.pix.pixelformat, f.fmt.pix.width,
 	       f.fmt.pix.height, f.fmt.pix.bytesperline, f.fmt.pix.sizeimage, nbufs,
 	       cached ? " (cached)" : "");
 
