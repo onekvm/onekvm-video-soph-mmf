@@ -111,9 +111,19 @@ ION on device 107 (lazy-cma, 1080p60 H.264):
 | Streaming 1080p60 | 39.2 MB | 32.5 MB / 12 buffers |
 | Idle after streaming | 8.3 MB (VENC buffers) | 0 (3 rounds in a row) |
 
-After an MJPEG client disconnects, the upper layers do not pause VI. Both
-backends keep their capture buffers (soph-mmf.so 32.2 MB, soph-v4l2.so
-24.9 MB) until H.26x is used again or the service restarts.
+With MJPEG as the primary codec, the upper layers unbind the primary JPEG
+encoder's source when the last MJPEG client disconnects, and the backend
+then pauses VI and the scaling channel. That call used to do nothing: both
+backends kept their capture buffers until H.26x was used again or the
+service restarted. Unbinding a JPEG encoder that VNC bound logically leaves
+capture running (no VNC on device 107; not measured).
+
+Device 107 (1080p60, one HTTP MJPEG client for 8 s, lazy-cma ION):
+
+| Backend | Streaming | 15 s / 30 s after disconnect (before) | 15 s / 30 s after disconnect (after) |
+| --- | --- | --- | --- |
+| soph-v4l2.so | 25.5 MB / 8 buffers | 25.5 / 25.5 MB | 0 / 0 |
+| soph-mmf.so | 32.2 MB / 5 buffers | 32.2 / 32.2 MB | 1.3 / 1.3 MB |
 
 ## Device 107 measurements
 

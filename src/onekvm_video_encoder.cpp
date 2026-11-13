@@ -1370,9 +1370,19 @@ int32_t encoder_unbind_source(void *opaque, char *error, uint32_t error_capacity
     }
     std::lock_guard<std::mutex> lock(encoder->mutex);
     if (encoder->codec_type == 0) {
+        /* Core's primary MJPEG encoder is never logically bound; unbinding it
+           is the idle signal after the last MJPEG client leaves. A logically
+           bound JPEG (VNC) may share capture with a live H.26x stream, so its
+           unbind leaves capture running. */
+        const bool logical_bound = encoder->source_bound || encoder->bound_source != nullptr;
         encoder->source_bound = false;
         encoder->bound_source = nullptr;
         encoder->reset_source = nullptr;
+        if (!logical_bound) {
+            MmfControlLock global_lock;
+            mmf::park_unbound_vpss_channels();
+            (void)mmf::pause_vi_dma();
+        }
         return 0;
     }
     if (!encoder->source_bound && encoder->bound_source == nullptr) {
