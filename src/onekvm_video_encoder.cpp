@@ -309,22 +309,34 @@ int configure_encoder(Encoder *encoder, int width, int height,
     return 0;
 }
 
-bool valid_encoder_config(const onekvm_video_encoder_config_v1 *config) {
+/* nullptr when valid, otherwise the reason reported to Core. */
+const char *encoder_config_error(const onekvm_video_encoder_config_v1 *config) {
     constexpr size_t base_size = offsetof(onekvm_video_encoder_config_v1, bitrate_kbps);
-    if (config == nullptr || config->struct_size < base_size ||
-        codec_type(config->codec) < 0 || !std::isfinite(config->quality_factor) ||
-        config->quality_factor < 0 || config->quality_factor > 1 ||
-        config->fps < 0 || config->gop < 0)
-        return false;
-    if (config->struct_size < sizeof(*config)) return true;
+    if (config == nullptr || config->struct_size < base_size)
+        return "missing encoder configuration";
+    if (codec_type(config->codec) < 0) return "unsupported codec";
+    if (!std::isfinite(config->quality_factor) ||
+        config->quality_factor < 0 || config->quality_factor > 1)
+        return "quality_factor must be 0-1";
+    if (config->fps < 0 || config->gop < 0) return "fps and gop must not be negative";
+    if (config->struct_size < sizeof(*config)) return nullptr;
     if (config->bitrate_kbps != 0 &&
-        (config->bitrate_kbps < 100 || config->bitrate_kbps > 50000)) return false;
+        (config->bitrate_kbps < 100 || config->bitrate_kbps > 50000))
+        return "bitrate_kbps must be 0 or 100-50000";
     if (config->initial_qp < 0 || config->initial_qp > 51 ||
         config->min_qp < 0 || config->min_qp > 51 ||
-        config->max_qp < 0 || config->max_qp > 51) return false;
+        config->max_qp < 0 || config->max_qp > 51)
+        return "QP values must be 0-51";
     if (config->bitrate_kbps != 0 &&
-        (config->initial_qp != 0 || config->min_qp != 0 || config->max_qp != 0)) return false;
-    return config->min_qp == 0 || config->max_qp == 0 || config->min_qp <= config->max_qp;
+        (config->initial_qp != 0 || config->min_qp != 0 || config->max_qp != 0))
+        return "a manual bitrate_kbps needs initial_qp, min_qp and max_qp set to 0";
+    if (config->min_qp != 0 && config->max_qp != 0 && config->min_qp > config->max_qp)
+        return "min_qp must not exceed max_qp";
+    return nullptr;
+}
+
+bool valid_encoder_config(const onekvm_video_encoder_config_v1 *config) {
+    return encoder_config_error(config) == nullptr;
 }
 
 onekvm_video_encoder_config_v1 normalized_encoder_config(
@@ -338,8 +350,10 @@ onekvm_video_encoder_config_v1 normalized_encoder_config(
 
 int32_t encoder_create(const onekvm_video_encoder_config_v1 *config, void **result,
                        char *error, uint32_t error_capacity) {
-    if (result == nullptr || !valid_encoder_config(config)) {
-        set_error(error, error_capacity, "invalid encoder configuration");
+    const char *invalid = encoder_config_error(config);
+    if (result == nullptr || invalid != nullptr) {
+        set_error(error, error_capacity, "invalid encoder configuration: %s",
+                  invalid != nullptr ? invalid : "missing result");
         return -1;
     }
     *result = nullptr;
@@ -357,8 +371,10 @@ int32_t encoder_create(const onekvm_video_encoder_config_v1 *config, void **resu
 int32_t encoder_reset(void *opaque, const onekvm_video_encoder_config_v1 *config,
                       char *error, uint32_t error_capacity) {
     auto *encoder = static_cast<Encoder *>(opaque);
-    if (encoder == nullptr || !valid_encoder_config(config)) {
-        set_error(error, error_capacity, "invalid encoder reset");
+    const char *invalid = encoder_config_error(config);
+    if (encoder == nullptr || invalid != nullptr) {
+        set_error(error, error_capacity, "invalid encoder reset: %s",
+                  invalid != nullptr ? invalid : "missing encoder");
         return -1;
     }
     std::lock_guard<std::mutex> lock(encoder->mutex);
