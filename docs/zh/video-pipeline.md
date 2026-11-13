@@ -106,8 +106,12 @@ VBR 的 `MaxBitRate` 是码控目标，不能作为实际输出流量的硬上�
 
 H.264 的新 `MaxBitRate` 从下一帧进入码控（osdrv `495d985` 起的 `soph_vc_driver`）。
 此前要等下一个自然 GOP 起点：GOP 300 时最长 5 s，强制 IDR 还会把计数清零。H.265 AVBR
-每个统计周期（≤ 20 帧）重算。上限低于画面在 QP 48 下所需码率时压不住：107 运动页
-1 Mbps 上限下仍有 2.5 Mbps。实测见 [v4l2-backend.md](v4l2-backend.md#码率上限)。
+每个统计周期（≤ 20 帧）重算。上限低于画面在 QP 48 下所需码率时，只靠 QP 压不住
+（107 运动页 1 Mbps 上限下仍有 2.5 Mbps），所以有上限（手动码率或自动码率给出的上限）
+时开启厂商 PSKIP 跳帧：码率缓冲超出约 1.1 s（H.264）/ 1.2 s（H.265）的上限码量就编
+跳过帧，代价是编码帧率下降。跳过帧只能计入码率缓冲，不能进 RC 模型（osdrv `ed61172`），
+否则模型把它当成省下的预算，QP 降到 18–20，变成约 1 帧/s。实测见
+[v4l2-backend.md](v4l2-backend.md#码率上限)。
 
 H.264 和需要缩放、镜像、翻转的输出使用 **VI→VPSS→VENC**，由 VPSS 做 UYVY→NV21。
 `SYS_Bind(VI,VENC)` 可以 ioctl 成功，但解开 VI→VPSS 后 Preraw `IntCnt` 会停在 0，

@@ -70,6 +70,7 @@ An access unit that does not fit counts as a failed frame.
 | `MPEG_VIDEO_BITRATE_MODE` | CBR / VBR (default); H.265 VBR is AVBR | session start |
 | `MPEG_VIDEO_FRAME_RC_ENABLE` | off selects fixed QP (I/P QP controls) | session start |
 | `MPEG_VIDEO_GOP_SIZE` | 1–65535, default 150 | next frame |
+| `MPEG_VIDEO_FRAME_SKIP_MODE` (H.26x only) | Disabled (default) / Buffer limit; Level limit is not supported. Buffer limit codes a skipped P picture whenever the rate-control buffer holds more than about 1.1 s (H.264) / 1.2 s (H.265) of the target bitrate, with no limit on consecutive skips; needs rate control on | next frame; the threshold follows the bitrate |
 | `MPEG_VIDEO_FORCE_KEY_FRAME` | — | next frame |
 | `MPEG_VIDEO_H264_PROFILE` | Baseline (CAVLC, default) / Main / High (CABAC) | session start |
 | `MPEG_VIDEO_{H264,HEVC}_{MIN,MAX,I_FRAME,P_FRAME}_QP` | 0–51, default 12 / 48 / 22 / 24 | next frame |

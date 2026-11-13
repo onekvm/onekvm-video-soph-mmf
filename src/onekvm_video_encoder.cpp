@@ -259,6 +259,7 @@ int configure_encoder(Encoder *encoder, int width, int height,
             config.bitrate_kbps = encoder->config.bitrate_kbps > 0
                 ? encoder->config.bitrate_kbps
                 : bitrate(width, height, encoder->config.quality_factor, fps);
+            config.frame_skip = encoder->config.bitrate_kbps > 0;
             mmf::RateControl rc{};
             rc.initial_qp = encoder->config.initial_qp;
             rc.min_qp = encoder->config.min_qp;
@@ -448,7 +449,8 @@ int32_t encoder_reset(void *opaque, const onekvm_video_encoder_config_v1 *config
             : bitrate(encoder->width, encoder->height, next.quality_factor, fps);
         if (mmf::set_h26x_rate_control(
                 encoder->channel, fps, gop, bitrate_kbps,
-                next.initial_qp, next.min_qp, next.max_qp) != 0) {
+                next.initial_qp, next.min_qp, next.max_qp,
+                next.bitrate_kbps > 0) != 0) {
             set_error(error, error_capacity,
                       "queue VENC rate control failed");
             return -1;
@@ -1078,7 +1080,8 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
             : bitrate(encoder->width, encoder->height, config.quality_factor, effective_fps);
         if (mmf::set_h26x_rate_control(encoder->channel, effective_fps,
                 normalized_gop(config.gop, effective_fps), bitrate_kbps,
-                config.initial_qp, config.min_qp, config.max_qp) != 0) {
+                config.initial_qp, config.min_qp, config.max_qp,
+                config.bitrate_kbps > 0) != 0) {
             set_error(error, error_capacity, "queue input cadence update failed");
             return -1;
         }
@@ -1615,7 +1618,7 @@ int32_t encoder_set_quality(void *opaque, double quality,
     if (mmf::set_h26x_rate_control(
             encoder->channel, fps, gop, bitrate_kbps,
             encoder->config.initial_qp, encoder->config.min_qp,
-            encoder->config.max_qp) != 0) {
+            encoder->config.max_qp, encoder->config.bitrate_kbps > 0) != 0) {
         set_error(error, error_capacity, "queue VENC quality bitrate failed");
         return -1;
     }

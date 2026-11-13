@@ -60,6 +60,7 @@ DMA-BUF 排入。CAPTURE 默认大小为 `宽 × 高 / 2`（H.26x 1–4 MiB，JP
 | `MPEG_VIDEO_BITRATE_MODE` | CBR / VBR（默认）；H.265 VBR 实为 AVBR | 会话开始 |
 | `MPEG_VIDEO_FRAME_RC_ENABLE` | 关闭时为固定 QP（I/P QP 控制） | 会话开始 |
 | `MPEG_VIDEO_GOP_SIZE` | 1–65535，默认 150 | 下一帧 |
+| `MPEG_VIDEO_FRAME_SKIP_MODE`（仅 H.26x） | Disabled（默认）/ Buffer limit；不支持 Level limit。Buffer limit：码控缓冲超过约 1.1 秒（H.264）/ 1.2 秒（H.265）的目标码率时输出跳过帧（P-skip），不限连续次数；需开码控 | 下一帧，阈值随码率更新 |
 | `MPEG_VIDEO_FORCE_KEY_FRAME` | — | 下一帧 |
 | `MPEG_VIDEO_H264_PROFILE` | Baseline（CAVLC，默认）/ Main / High（CABAC） | 会话开始 |
 | `MPEG_VIDEO_{H264,HEVC}_{MIN,MAX,I_FRAME,P_FRAME}_QP` | 0–51，默认 12 / 48 / 22 / 24 | 下一帧 |

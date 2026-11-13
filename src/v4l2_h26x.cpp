@@ -58,6 +58,7 @@ struct Reader {
 	std::atomic<int> pending_output_fps{0};
 	std::atomic<int> pending_gop{0};
 	std::atomic<int> pending_bitrate_kbps{0};
+	std::atomic<bool> pending_frame_skip{false};
 	std::atomic<int> pending_initial_qp{0};
 	std::atomic<int> pending_min_qp{0};
 	std::atomic<int> pending_max_qp{0};
@@ -245,6 +246,17 @@ int apply_qp(Session &s, const RateControl &rc)
 	return ret;
 }
 
+int set_frame_skip(Session &s, bool skip)
+{
+	const int ret = s.node.set_control(V4L2_CID_MPEG_VIDEO_FRAME_SKIP_MODE,
+					   skip ? V4L2_MPEG_VIDEO_FRAME_SKIP_MODE_BUF_LIMIT :
+						  V4L2_MPEG_VIDEO_FRAME_SKIP_MODE_DISABLED);
+	if (ret < 0 && skip)
+		std::fprintf(stderr, "OneKVM: VENC frame skip unavailable: %s\n",
+			     std::strerror(-ret));
+	return ret;
+}
+
 /* Reader thread, between dequeues. 1: frame timing changed. */
 int apply_rate_control(int ch, uint32_t mask)
 {
@@ -263,8 +275,10 @@ int apply_rate_control(int ch, uint32_t mask)
 		if (gop <= 0)
 			gop = default_gop_frames(fps);
 	}
+	bool skip = cfg.frame_skip;
 	if (mask & kRcBitrate) {
 		kbps = r.pending_bitrate_kbps.load(std::memory_order_relaxed);
+		skip = r.pending_frame_skip.load(std::memory_order_relaxed);
 		if (kbps <= 0)
 			return -1;
 	}
@@ -281,9 +295,14 @@ int apply_rate_control(int ch, uint32_t mask)
 		cfg.bitrate_kbps = kbps;
 		changed = true;
 	}
+	if (skip != cfg.frame_skip && set_frame_skip(s, skip) == 0) {
+		cfg.frame_skip = skip;
+		changed = true;
+	}
 	if (timing || changed)
-		std::printf("OneKVM: VENC ch %d fps %d gop %d bitrate %d kbps\n", ch, cfg.output_fps,
-			    cfg.gop, cfg.bitrate_kbps);
+		std::printf("OneKVM: VENC ch %d fps %d gop %d bitrate %d kbps%s\n", ch,
+			    cfg.output_fps, cfg.gop, cfg.bitrate_kbps,
+			    cfg.frame_skip ? " (skip over cap)" : "");
 	if (mask & kRcQp) {
 		RateControl rc{};
 		rc.initial_qp = r.pending_initial_qp.load(std::memory_order_relaxed);
@@ -518,6 +537,9 @@ int start_session(Session &s, const H26xEncoderConfig &cfg, const RateControl &r
 		ret = s.node.set_control(V4L2_CID_MPEG_VIDEO_BITRATE, cfg.bitrate_kbps * 1000);
 	if (ret == 0)
 		ret = s.node.set_control(V4L2_CID_MPEG_VIDEO_GOP_SIZE, cfg.gop);
+	/* Older soph_vc_driver lacks the control: encode without skipping. */
+	if (ret == 0 && set_frame_skip(s, cfg.frame_skip) < 0)
+		s.cfg.frame_skip = false;
 	if (ret == 0 && cfg.codec == H26xCodec::H264)
 		ret = s.node.set_control(V4L2_CID_MPEG_VIDEO_H264_PROFILE,
 					 V4L2_MPEG_VIDEO_H264_PROFILE_BASELINE);
@@ -962,7 +984,7 @@ int request_h26x_idr(int ch)
 }
 
 int set_h26x_rate_control(int ch, int output_fps, int gop, int bitrate_kbps, int initial_qp,
-			  int min_qp, int max_qp)
+			  int min_qp, int max_qp, bool frame_skip)
 {
 	if (!valid_channel(ch) || output_fps <= 0)
 		return -1;
@@ -971,8 +993,10 @@ int set_h26x_rate_control(int ch, int output_fps, int gop, int bitrate_kbps, int
 	Reader &r = g_readers[ch];
 	r.pending_gop.store(gop, std::memory_order_relaxed);
 	r.pending_output_fps.store(output_fps, std::memory_order_relaxed);
-	if (bitrate_kbps > 0)
+	if (bitrate_kbps > 0) {
 		r.pending_bitrate_kbps.store(bitrate_kbps, std::memory_order_relaxed);
+		r.pending_frame_skip.store(frame_skip, std::memory_order_relaxed);
+	}
 	r.pending_initial_qp.store(initial_qp, std::memory_order_relaxed);
 	r.pending_min_qp.store(min_qp, std::memory_order_relaxed);
 	r.pending_max_qp.store(max_qp, std::memory_order_relaxed);

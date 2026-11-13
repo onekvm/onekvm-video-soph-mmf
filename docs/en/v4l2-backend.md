@@ -80,6 +80,7 @@ H.264 and H.265 rate control use the values of the cvi_mpi runtime:
 | VBR/AVBR details | ChangePos 90, I/P ratio 1–100, MaxIQp = MaxQp − 2, IPQpDelta 2 |
 | Default QP | min 12, max 48, initial 22 |
 | Runtime changes | The reader thread applies frame rate/GOP, bitrate and QP between frames; IDR uses `FORCE_KEY_FRAME` |
+| Frame skip | `FRAME_SKIP_MODE` Buffer limit is on whenever a bitrate cap is set (manual bitrate or the cap from automatic bitrate) |
 
 On static content `soph-venc` emits skip blocks (P frames of about a dozen
 bytes) where the cvi_mpi runtime emits about 9.6 KB per P frame. Both decode to
@@ -212,6 +213,48 @@ At 1 Mbps the moving page already has QP at its 48 limit, and neither backend
 gets down to the cap. soph-v4l2.so then runs higher than with no effective cap:
 at QP 48 about 1780 of 8160 macroblocks per P frame are intra coded, against
 about 900 at QP 14.
+
+Both backends now turn on frame skip whenever a cap is set: once the bitrate
+buffer exceeds about 1.1 s (H.264) / 1.2 s (H.265) of the cap, the next frame
+is coded as a skipped picture. The vendor rate control used to count skipped
+pictures as coded ones, so QP dropped to 18–20 instead, at about 1 frame/s
+with runs of 100–210 skipped pictures. Since osdrv `ed61172` skipped pictures
+count only toward the bitrate buffer.
+
+Quality test page (text and shapes moving every frame), 1080p60 H.264 over
+WebSocket, each cap held 15 s with the last 10 s used, 2 rounds each; before =
+a backend without frame skip:
+
+| Backend | Cap | Bitrate before | Bitrate after | Coded frame rate after | P-frame QP after | Longest skip run after |
+| --- | --- | --- | --- | --- | --- | --- |
+| soph-v4l2.so | 10 Mbps | 7.70–8.02 Mbps | 7.98–8.27 Mbps | 60 | 18–23 | 0 |
+| soph-v4l2.so | 3 Mbps | 2.32–2.45 Mbps | 2.30–2.48 Mbps | 60 | 40 | 0–1 |
+| soph-v4l2.so | 1 Mbps | 1.29–1.48 Mbps | 0.90–0.91 Mbps | 6.1–6.2 | 48 | 20 |
+| soph-v4l2.so | 500 kbps | 1.33–1.67 Mbps | 0.46–0.47 Mbps | 3.0 | 48 | 33–43 |
+| soph-mmf.so | 10 Mbps | 7.70–8.05 Mbps | 7.94–8.47 Mbps | 60 | 20–24 | 0 |
+| soph-mmf.so | 3 Mbps | 2.26–2.42 Mbps | 2.39–2.53 Mbps | 60 | 45–46 | 0 |
+| soph-mmf.so | 1 Mbps | 1.66–1.72 Mbps | 0.91 Mbps | 6.0–6.2 | 48 | 17–19 |
+| soph-mmf.so | 500 kbps | 1.70–1.97 Mbps | 0.46 Mbps | 2.9 | 48 | 34–38 |
+
+The cost: with heavy motion and a low cap the coded frame rate falls to a few
+frames per second, and the frame after a skip carries more accumulated change,
+so it is larger.
+
+Automatic bitrate over a throttled link: the WebSocket client link is shaped to
+10 s unlimited, 30 s at 1.5 Mbps, 20 s unlimited, on the quality test page;
+soph-v4l2.so before and after, 2 alternating rounds each. The throttled figures
+use its last 20 s:
+
+| Item | Before (no frame skip) | After |
+| --- | --- | --- |
+| Bitrate | 1.47 Mbps (fills the link) | 0.96–1.01 Mbps |
+| Coded frame rate | 55–63 FPS | 7.8–8.2 FPS |
+| Queueing delay P50 | 2.6 / 4.9 s | 0–1 ms |
+| Queueing delay P95 (max) | 2.8 / 5.5 s (2.9 / 6.0 s) | 0.16 / 3.3 s (1.0 / 4.0 s) |
+| Backlog | never clears while throttled | clears 10–12 s after throttling starts |
+
+The first 10 s of throttling look alike: the backlog grows to 3–6 s before
+automatic bitrate lowers the cap.
 
 ### Function
 
