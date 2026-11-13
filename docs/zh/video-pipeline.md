@@ -139,7 +139,12 @@ VENC 的 FPS 仍描述转换后的实际输出；不得丢弃编码后的 P 帧�
 `GetStream` 必须使用正的有界等待完成硬件中断；沿用绑定模式的零超时会反复返回 BUSY。
 RC／IDR 请求只能由 reader 在整帧完成后执行；单独参数集不是硬件完成边界。
 独立参数集暂存到首个 VCL AU；`ReleaseStream` 成功且确认该帧完成后才归还 VI lease。
-即使发送超时也不能提前释放可能仍由硬件读取的帧；关闭时须成功 ResetChn 后才能归还。
+即使发送超时也不能提前释放可能仍由硬件读取的帧；关闭或切回 VPSS 时须成功 ResetChn 后才能归还。
+厂商 `ResetChn` 拒绝仍在接收的通道（`Chn N is not stopped`），对 H.26x 也只检查状态；未完成的帧
+先 `StopRecvFrame` 再 `ResetChn`，按丢帧处理并清掉暂存的参数集。直通是手动送帧，没有 SYS bind
+worker，提前停止不会留下 worker。若直接 ResetChn 失败就返回，会跳过整个拆除、VI lease 不还，
+后端只能反复重置 HDMI，H.265 停在 0 fps，直到重启 Core。送帧后必须取回码流才释放 vcodec 锁：
+只送不取会让同一进程和下一个进程都卡在 `EnterVcodecLock`，重启 Core 也无效，只能重启设备。
 网络、加密和慢客户端只持有复制出的压缩 AU，不持有原始 VI 缓冲。
 
 截图、JPEG、CPU 像素读取或无信号占位先停止并 join 直通 reader，再切回 VPSS，

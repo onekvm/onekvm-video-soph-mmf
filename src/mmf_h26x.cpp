@@ -105,6 +105,27 @@ static int release_direct_vi_frame(H26xReader &reader)
     return 0;
 }
 
+/* Give up a VI-direct picture that never produced its VCL AU, so its VI lease
+ * can return. The vendor ResetChn refuses a started channel, so stop the manual
+ * receiver first; VI-direct has no SYS bind worker that this could strand. */
+static int abandon_direct_vi_picture(int ch, H26xEncoderState *info,
+                                     H26xReader &reader)
+{
+    if (!reader.vi_submitted || reader.vi_picture_complete) return CVI_SUCCESS;
+    std::fprintf(stderr,
+        "OneKVM: VENC %d dropping an unfinished VI-direct picture\n", ch);
+    if (info->receiver_started) {
+        const CVI_S32 ret = CVI_VENC_StopRecvFrame(ch);
+        if (ret != CVI_SUCCESS) return ret;
+        info->receiver_started = 0;
+    }
+    const CVI_S32 ret = CVI_VENC_ResetChn(ch);
+    if (ret != CVI_SUCCESS) return ret;
+    reader.vi_picture_complete = true;
+    reader.vi_headers.clear();
+    return CVI_SUCCESS;
+}
+
 static void wake_idle_h26x_reader(H26xReader &reader)
 {
     const int fd = reader.idle_event_fd.load(std::memory_order_acquire);
@@ -495,11 +516,14 @@ int close_h26x_encoder(int ch) {
 	stop_h26x_reader(ch);
 
     CVI_S32 s32Ret = CVI_SUCCESS;
-    if (info->bound_to_vi && g_readers[ch].vi_submitted &&
-        !g_readers[ch].vi_picture_complete) {
-        s32Ret = CVI_VENC_ResetChn(ch);
-        if (s32Ret != CVI_SUCCESS) return s32Ret;
-        g_readers[ch].vi_picture_complete = true;
+    if (info->bound_to_vi) {
+        s32Ret = abandon_direct_vi_picture(ch, info, g_readers[ch]);
+        if (s32Ret != CVI_SUCCESS) {
+            std::fprintf(stderr,
+                "OneKVM: closing VENC channel %d failed to drop the VI-direct picture %#x\n",
+                ch, s32Ret);
+            return s32Ret;
+        }
     }
     if (info->bound_to_vi && release_direct_vi_frame(g_readers[ch]) != 0)
         return -EBUSY;
@@ -1343,9 +1367,13 @@ int unbind_h26x_from_capture(int ch) {
     CVI_S32 ret = CVI_SUCCESS;
     if (info->bound_to_vi) {
         stop_h26x_reader(ch);
-        if (release_direct_vi_frame(g_readers[ch]) != 0) return -EBUSY;
-        ret = CVI_VENC_StopRecvFrame(ch);
-        if (ret == CVI_SUCCESS) info->receiver_started = false;
+        ret = abandon_direct_vi_picture(ch, info, g_readers[ch]);
+        if (ret == CVI_SUCCESS && release_direct_vi_frame(g_readers[ch]) != 0)
+            return -EBUSY;
+        if (ret == CVI_SUCCESS && info->receiver_started) {
+            ret = CVI_VENC_StopRecvFrame(ch);
+            if (ret == CVI_SUCCESS) info->receiver_started = false;
+        }
     } else {
         ret = SAMPLE_COMM_VPSS_UnBind_VENC(vpss_group, vpss_channel, ch);
     }

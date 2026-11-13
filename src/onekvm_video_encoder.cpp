@@ -115,8 +115,10 @@ int close_encoder(Encoder *encoder) {
         if (encoder->codec_type == 0) {
             if (mmf::close_jpeg_encoder(encoder->channel) != 0)
                 return -1;
-        } else {
-            mmf::close_h26x_encoder(encoder->channel);
+        } else if (const int ret = mmf::close_h26x_encoder(encoder->channel);
+                   ret != 0) {
+            std::fprintf(stderr, "OneKVM: VENC %d teardown incomplete (%d)\n",
+                         encoder->channel, ret);
         }
     }
     if (encoder->channel >= 0 && encoder->channel <= kLastVENCChannel &&
