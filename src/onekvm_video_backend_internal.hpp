@@ -188,6 +188,8 @@ struct ONEKVM_VIDEO_INTERNAL Encoder {
     bool placeholder_need_key = false;
     unsigned placeholder_idr_tries = 0;
     bool placeholder_logged = false;
+    /* Monotonic time the next no-signal still may be submitted. */
+    uint64_t placeholder_due_ns = 0;
     bool request_keyframe = false;
     bool frame_pending = false;
     bool packet_borrowed = false;

@@ -136,6 +136,7 @@ int close_encoder(Encoder *encoder) {
     encoder->placeholder_need_key = false;
     encoder->placeholder_idr_tries = 0;
     encoder->placeholder_logged = false;
+    encoder->placeholder_due_ns = 0;
     encoder->packet_borrowed = false;
     encoder->pending_pts_ns = 0;
     encoder->prepared_size = 0;
@@ -169,6 +170,7 @@ void invalidate_stale_encoder(Encoder *encoder) {
     encoder->placeholder_need_key = false;
     encoder->placeholder_idr_tries = 0;
     encoder->placeholder_logged = false;
+    encoder->placeholder_due_ns = 0;
     encoder->request_keyframe = true;
     encoder->frame_pending = false;
     encoder->packet_borrowed = false;
@@ -686,6 +688,12 @@ bool placeholder_au_usable(const Encoder *encoder, const uint8_t *data,
     return annexb_h264_geometry_matches(parsed_w, parsed_h, want_w, want_h);
 }
 
+static uint64_t placeholder_interval_ns(const Encoder *encoder) {
+    const int fps = encoder->output_fps > 0
+        ? encoder->output_fps : mmf::kDefaultInputFps;
+    return 1000000000ull / static_cast<uint64_t>(fps);
+}
+
 int encode_bound_placeholder(Encoder *encoder, Source *source,
                              onekvm_video_packet_v1 *packet,
                              char *error, uint32_t error_capacity) {
@@ -734,6 +742,15 @@ int encode_bound_placeholder(Encoder *encoder, Source *source,
         source->no_signal_mtime_nsec != previous_mtime_nsec;
     if (artwork_changed)
         encoder->placeholder_need_key = true;
+    {
+        /* Keep the cadence; start over after a gap (new episode, stall). */
+        const uint64_t now = monotonic_ns();
+        const uint64_t interval = placeholder_interval_ns(encoder);
+        const uint64_t due = encoder->placeholder_due_ns;
+        encoder->placeholder_due_ns =
+            due != 0 && now >= due && now - due < interval
+            ? due + interval : now + interval;
+    }
     {
         MmfControlLock global_lock;
         if (mmf::h26x_bound_to_vi(encoder->channel) &&
@@ -1325,7 +1342,29 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
     /* Host mode changes often stop both VI and VENC. Keep VPSS→VENC bound
        and feed the no-signal still into VPSS from userspace (VI unbound).
        Do not CVI_VENC_SendFrame: UnBind does not clear currBindMode and
-       deadlocks the VPU. WAVE4 then emits a normal IDR/P stream. */
+       deadlocks the VPU. WAVE4 then emits a normal IDR/P stream.
+       The still has no capture clock: unpaced, every call submitted another
+       copy as soon as VENC returned one (about 100 fps, about 300 fps with
+       skipped pictures under a cap), overrunning the rate control's
+       per-frame budget and the bitrate cap. Hold it to the output rate. */
+    if (encoder->placeholder_frames) {
+        const uint64_t now = monotonic_ns();
+        if (now < encoder->placeholder_due_ns) {
+            const uint64_t wait_ns = std::min(
+                encoder->placeholder_due_ns - now,
+                placeholder_interval_ns(encoder));
+            const int codec = encoder->codec_type;
+            source_lock.unlock();
+            lock.unlock();
+            std::this_thread::sleep_for(std::chrono::nanoseconds(wait_ns));
+            packet->data = nullptr;
+            packet->data_size = 0;
+            packet->codec = public_codec(codec);
+            packet->key_frame = 0;
+            packet->pts_ns = monotonic_ns();
+            return 0;
+        }
+    }
     source->failures++;
     const int rebuilt = maybe_rebuild_for_hdmi_change(
         source, error, error_capacity);

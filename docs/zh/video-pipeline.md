@@ -314,6 +314,8 @@ MMF 初始化失败的回滚按所有权执行：`SAMPLE_PLAT_VI_INIT()` 负责�
 
 无信号期间保持 VPSS→VENC 绑定，只解开 **VI→VPSS**，把 NV21 占位转成 UYVY 后 `CVI_VPSS_SendFrame` 送到 group 0。WAVE4 按平常绑定路径出 IDR/P。输入恢复后重新 `VI_Bind_VPSS`。前端控制台不要叠 Vue 占位图。
 
+占位静帧没有采集时钟，每帧按编码器输出帧率送入，不能随上层调用频率送：soph-v4l2.so 原先编码器一返回就送下一帧，无信号时跑到 100–320 fps，码控按输出帧率分配的每帧预算失效，码率上限也守不住。实测见 [no-signal.md](no-signal.md)。
+
 `StartRecvFrame` 发生在 1.5 s live grace 里。无 HDMI 时 WAVE4 随后把静帧编成 P/skip，reader 若仍在等「自然第一帧 IDR」会把 `RequestIDR` 合并掉，WebRTC 拿不到可解码的 AU。进入占位后必须 `h26x_reader_force_idr`（清队含残留关键帧，并在 reader 线程发 ioctl），且在匹配当前 VENC 宽高的 IDR 到达前不要把 AU 交给 Core。H.264 再按 SPS 尺寸丢掉残留 CSI 包。
 
 超过几何范围的 HDMI 模式仍在 status 中提供 `hdmi_error=out_of_range` 和实测 `input_width/height`，UI 显示「不支持的分辨率」；绑定视频同样走 VPSS 上游静帧。合法的 2560×1440 输入配合 60 FPS 设置时自动限制到 30 FPS，不能因此显示越界占位。
