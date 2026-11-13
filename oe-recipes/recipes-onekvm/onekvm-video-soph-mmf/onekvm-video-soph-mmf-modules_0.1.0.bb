@@ -1,7 +1,7 @@
 SUMMARY = "Sophgo SG2002 multimedia kernel modules"
 HOMEPAGE = "https://github.com/onekvm/osdrv-sg200x"
 LICENSE = "CLOSED"
-PR = "r35"
+PR = "r37"
 
 FILESEXTRAPATHS:prepend := "${THISDIR}/files/mmf-modules:"
 
@@ -25,7 +25,7 @@ SRC_URI = " \
     file://onekvm-video-soph-mmf-modules.conf \
     file://onekvm-device-nanokvm-npu.service \
 "
-SRCREV = "7edaf6379381587efca109b23240e44598590cae"
+SRCREV = "ed611728cceb90205f7e417a47640d649c99c9a1"
 BB_GIT_SHALLOW = "1"
 BB_GIT_SHALLOW_DEPTH = "1"
 B = "${WORKDIR}/build"
