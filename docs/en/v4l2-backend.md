@@ -155,11 +155,21 @@ in ms.
   (0% vs 4%).
 - The soph-mmf.so 1080p keyboard closed-loop P95 includes a stall in one run
   (max 351 ms); the video P95 is unaffected.
-- The extra time on the scaled path comes from two hand-offs through the
-  pipeline thread between VI → `soph-vpss` → `soph-venc`. VPSS itself is not
-  slower: queue to completion is 6.44 ms, of which the hardware takes 6.19 ms.
-  Raising the pipeline thread to nice -20 gave a 3×40 mean of 57.2 ms, no
-  improvement, so it was not kept.
+- Device-side stages (2 runs each): from the end of the VI frame to
+  `soph-venc` taking the frame is 0.4 ms at 1080p (direct) and 7.5 ms at 720p.
+  Of the latter, `soph-vpss` takes 6.4 ms from queueing to completion (6.2 ms
+  in hardware) and the two hand-offs through the pipeline thread about 1 ms
+  together. Encoding at 720p is 4.9 ms shorter (4.8 vs 9.7 ms), so the device
+  side adds only about 2 ms in total. Raising the pipeline thread to nice -20
+  gave a 3×40 mean of 57.2 ms, no improvement, so it was not kept.
+- Re-measured with the backends alternating: soph-v4l2.so 720p 4×40 mean
+  58.5 ms (low mode 14%, P95 63.7 ms), 1080p 2×40 mean 58.5 ms (1%, P95
+  62.6 ms); soph-mmf.so 720p 4×40 mean 56.7 ms (21%, P95 63.4 ms). At 720p
+  soph-v4l2.so is still about 2 ms slower, and the difference is VPSS:
+  soph-v4l2.so starts scaling only after the whole frame is captured (6.2 ms),
+  while soph-mmf.so runs VPSS online behind VI. The hand-offs take about 1 ms
+  together, which is the most a restructure could save, so the structure
+  stays.
 
 The device-side items of the Web UI performance panel are measured differently
 by the two backends and are for reference only (soph-v4l2.so vs soph-mmf.so):
@@ -181,6 +191,25 @@ samples 15 s; three alternating runs per backend:
 
 The bitrates differ, so the CPU difference includes the difference in what
 Core sends.
+
+### Picture quality
+
+Automatic bitrate (LAN, 10 Mbps cap), quality test page, 1080p60 H.264 over
+WebSocket. Each backend switch restarts the service; 15 s recordings, 2
+alternating rounds each. The reference is a recording at a manual 40 Mbps
+(P-frame QP 12), one per backend; the two references are about 56 dB PSNR
+apart. Frames are aligned by the on-screen barcodes, luma is compared with the
+barcode bands excluded, and values are the mean against both references:
+
+| Backend | Bitrate | Median P-frame QP | PSNR full frame | PSNR text area | PSNR 5th percentile | SSIM full frame |
+| --- | --- | --- | --- | --- | --- | --- |
+| soph-mmf.so | 8.17 / 7.94 Mbps | 24 / 22 | 46.9 / 49.2 dB | 45.0 / 47.3 dB | 43.8 / 45.9 dB | 0.9988 / 0.9992 |
+| soph-v4l2.so | 8.34 / 7.90 Mbps | 15 / 16 | 53.0 / 53.3 dB | 51.2 / 51.6 dB | 49.2 / 51.7 dB | 0.9995 / 0.9995 |
+
+At the same bitrate soph-v4l2.so runs 7–8 QP lower and 4–6 dB higher in PSNR.
+Both have 1–4% repeated frames (the same barcode on consecutive frames). The
+recordings contain no skipped pictures; the repeats come from host rendering
+and capture.
 
 ### Startup and snapshots
 
