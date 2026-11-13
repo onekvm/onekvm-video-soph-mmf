@@ -1,7 +1,5 @@
 #include "onekvm_video_backend_internal.hpp"
 #include "h264_annexb.hpp"
-#include "mmf_internal.hpp"
-#include "cvi_venc.h"
 
 #pragma GCC visibility push(hidden)
 namespace onekvm::video_backend {
@@ -138,6 +136,7 @@ int close_encoder(Encoder *encoder) {
     encoder->placeholder_need_key = false;
     encoder->placeholder_idr_tries = 0;
     encoder->placeholder_logged = false;
+    encoder->placeholder_due_ns = 0;
     encoder->packet_borrowed = false;
     encoder->pending_pts_ns = 0;
     encoder->prepared_size = 0;
@@ -171,6 +170,7 @@ void invalidate_stale_encoder(Encoder *encoder) {
     encoder->placeholder_need_key = false;
     encoder->placeholder_idr_tries = 0;
     encoder->placeholder_logged = false;
+    encoder->placeholder_due_ns = 0;
     encoder->request_keyframe = true;
     encoder->frame_pending = false;
     encoder->packet_borrowed = false;
@@ -261,6 +261,7 @@ int configure_encoder(Encoder *encoder, int width, int height,
             config.bitrate_kbps = encoder->config.bitrate_kbps > 0
                 ? encoder->config.bitrate_kbps
                 : bitrate(width, height, encoder->config.quality_factor, fps);
+            config.frame_skip = encoder->config.bitrate_kbps > 0;
             mmf::RateControl rc{};
             rc.initial_qp = encoder->config.initial_qp;
             rc.min_qp = encoder->config.min_qp;
@@ -289,27 +290,12 @@ int configure_encoder(Encoder *encoder, int width, int height,
             g_encoder_owners[channel] = encoder;
             g_encoder_owner_generations[channel] =
                 g_mmf_generation.load(std::memory_order_acquire);
-            // The configured encoder input is DATA_BITWIDTH_8 NV21. Read VUI
-            // before binding/StartRecvFrame; never probe a live VENC from status.
-            uint32_t range = ONEKVM_VIDEO_COLOR_RANGE_UNKNOWN;
-            VENC_VUI_VIDEO_SIGNAL_S signal{};
-            bool have_vui = false;
-            if (encoder->codec_type == 1) {
-                VENC_H265_VUI_S vui{};
-                have_vui = CVI_VENC_GetH265Vui(channel, &vui) == CVI_SUCCESS;
-                signal = vui.stVuiVideoSignal;
-            } else if (encoder->codec_type == 2) {
-                VENC_H264_VUI_S vui{};
-                have_vui = CVI_VENC_GetH264Vui(channel, &vui) == CVI_SUCCESS;
-                signal = vui.stVuiVideoSignal;
-            }
-            if (have_vui) {
-                // H.264/H.265 infer video_full_range_flag=0 when it is absent.
-                // Report the effective range, including that normative default.
-                range = signal.video_signal_type_present_flag && signal.video_full_range_flag
-                    ? ONEKVM_VIDEO_COLOR_RANGE_FULL
-                    : ONEKVM_VIDEO_COLOR_RANGE_LIMITED;
-            }
+            // The configured encoder input is 8-bit NV21. Read the VUI range
+            // before binding; never probe a live encoder from status.
+            const int full = mmf::h26x_full_range(channel);
+            const uint32_t range = full < 0 ? ONEKVM_VIDEO_COLOR_RANGE_UNKNOWN
+                : full ? ONEKVM_VIDEO_COLOR_RANGE_FULL
+                       : ONEKVM_VIDEO_COLOR_RANGE_LIMITED;
             encoder->color_info.store(8u | (range << 8), std::memory_order_release);
         }
     }
@@ -326,22 +312,34 @@ int configure_encoder(Encoder *encoder, int width, int height,
     return 0;
 }
 
-bool valid_encoder_config(const onekvm_video_encoder_config_v1 *config) {
+/* nullptr when valid, otherwise the reason reported to Core. */
+const char *encoder_config_error(const onekvm_video_encoder_config_v1 *config) {
     constexpr size_t base_size = offsetof(onekvm_video_encoder_config_v1, bitrate_kbps);
-    if (config == nullptr || config->struct_size < base_size ||
-        codec_type(config->codec) < 0 || !std::isfinite(config->quality_factor) ||
-        config->quality_factor < 0 || config->quality_factor > 1 ||
-        config->fps < 0 || config->gop < 0)
-        return false;
-    if (config->struct_size < sizeof(*config)) return true;
+    if (config == nullptr || config->struct_size < base_size)
+        return "missing encoder configuration";
+    if (codec_type(config->codec) < 0) return "unsupported codec";
+    if (!std::isfinite(config->quality_factor) ||
+        config->quality_factor < 0 || config->quality_factor > 1)
+        return "quality_factor must be 0-1";
+    if (config->fps < 0 || config->gop < 0) return "fps and gop must not be negative";
+    if (config->struct_size < sizeof(*config)) return nullptr;
     if (config->bitrate_kbps != 0 &&
-        (config->bitrate_kbps < 100 || config->bitrate_kbps > 50000)) return false;
+        (config->bitrate_kbps < 100 || config->bitrate_kbps > 50000))
+        return "bitrate_kbps must be 0 or 100-50000";
     if (config->initial_qp < 0 || config->initial_qp > 51 ||
         config->min_qp < 0 || config->min_qp > 51 ||
-        config->max_qp < 0 || config->max_qp > 51) return false;
+        config->max_qp < 0 || config->max_qp > 51)
+        return "QP values must be 0-51";
     if (config->bitrate_kbps != 0 &&
-        (config->initial_qp != 0 || config->min_qp != 0 || config->max_qp != 0)) return false;
-    return config->min_qp == 0 || config->max_qp == 0 || config->min_qp <= config->max_qp;
+        (config->initial_qp != 0 || config->min_qp != 0 || config->max_qp != 0))
+        return "a manual bitrate_kbps needs initial_qp, min_qp and max_qp set to 0";
+    if (config->min_qp != 0 && config->max_qp != 0 && config->min_qp > config->max_qp)
+        return "min_qp must not exceed max_qp";
+    return nullptr;
+}
+
+bool valid_encoder_config(const onekvm_video_encoder_config_v1 *config) {
+    return encoder_config_error(config) == nullptr;
 }
 
 onekvm_video_encoder_config_v1 normalized_encoder_config(
@@ -355,8 +353,10 @@ onekvm_video_encoder_config_v1 normalized_encoder_config(
 
 int32_t encoder_create(const onekvm_video_encoder_config_v1 *config, void **result,
                        char *error, uint32_t error_capacity) {
-    if (result == nullptr || !valid_encoder_config(config)) {
-        set_error(error, error_capacity, "invalid encoder configuration");
+    const char *invalid = encoder_config_error(config);
+    if (result == nullptr || invalid != nullptr) {
+        set_error(error, error_capacity, "invalid encoder configuration: %s",
+                  invalid != nullptr ? invalid : "missing result");
         return -1;
     }
     *result = nullptr;
@@ -374,8 +374,10 @@ int32_t encoder_create(const onekvm_video_encoder_config_v1 *config, void **resu
 int32_t encoder_reset(void *opaque, const onekvm_video_encoder_config_v1 *config,
                       char *error, uint32_t error_capacity) {
     auto *encoder = static_cast<Encoder *>(opaque);
-    if (encoder == nullptr || !valid_encoder_config(config)) {
-        set_error(error, error_capacity, "invalid encoder reset");
+    const char *invalid = encoder_config_error(config);
+    if (encoder == nullptr || invalid != nullptr) {
+        set_error(error, error_capacity, "invalid encoder reset: %s",
+                  invalid != nullptr ? invalid : "missing encoder");
         return -1;
     }
     std::lock_guard<std::mutex> lock(encoder->mutex);
@@ -449,7 +451,8 @@ int32_t encoder_reset(void *opaque, const onekvm_video_encoder_config_v1 *config
             : bitrate(encoder->width, encoder->height, next.quality_factor, fps);
         if (mmf::set_h26x_rate_control(
                 encoder->channel, fps, gop, bitrate_kbps,
-                next.initial_qp, next.min_qp, next.max_qp) != 0) {
+                next.initial_qp, next.min_qp, next.max_qp,
+                next.bitrate_kbps > 0) != 0) {
             set_error(error, error_capacity,
                       "queue VENC rate control failed");
             return -1;
@@ -685,6 +688,12 @@ bool placeholder_au_usable(const Encoder *encoder, const uint8_t *data,
     return annexb_h264_geometry_matches(parsed_w, parsed_h, want_w, want_h);
 }
 
+static uint64_t placeholder_interval_ns(const Encoder *encoder) {
+    const int fps = encoder->output_fps > 0
+        ? encoder->output_fps : mmf::kDefaultInputFps;
+    return 1000000000ull / static_cast<uint64_t>(fps);
+}
+
 int encode_bound_placeholder(Encoder *encoder, Source *source,
                              onekvm_video_packet_v1 *packet,
                              char *error, uint32_t error_capacity) {
@@ -733,6 +742,15 @@ int encode_bound_placeholder(Encoder *encoder, Source *source,
         source->no_signal_mtime_nsec != previous_mtime_nsec;
     if (artwork_changed)
         encoder->placeholder_need_key = true;
+    {
+        /* Keep the cadence; start over after a gap (new episode, stall). */
+        const uint64_t now = monotonic_ns();
+        const uint64_t interval = placeholder_interval_ns(encoder);
+        const uint64_t due = encoder->placeholder_due_ns;
+        encoder->placeholder_due_ns =
+            due != 0 && now >= due && now - due < interval
+            ? due + interval : now + interval;
+    }
     {
         MmfControlLock global_lock;
         if (mmf::h26x_bound_to_vi(encoder->channel) &&
@@ -1079,7 +1097,8 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
             : bitrate(encoder->width, encoder->height, config.quality_factor, effective_fps);
         if (mmf::set_h26x_rate_control(encoder->channel, effective_fps,
                 normalized_gop(config.gop, effective_fps), bitrate_kbps,
-                config.initial_qp, config.min_qp, config.max_qp) != 0) {
+                config.initial_qp, config.min_qp, config.max_qp,
+                config.bitrate_kbps > 0) != 0) {
             set_error(error, error_capacity, "queue input cadence update failed");
             return -1;
         }
@@ -1323,7 +1342,29 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
     /* Host mode changes often stop both VI and VENC. Keep VPSS→VENC bound
        and feed the no-signal still into VPSS from userspace (VI unbound).
        Do not CVI_VENC_SendFrame: UnBind does not clear currBindMode and
-       deadlocks the VPU. WAVE4 then emits a normal IDR/P stream. */
+       deadlocks the VPU. WAVE4 then emits a normal IDR/P stream.
+       The still has no capture clock: unpaced, every call submitted another
+       copy as soon as VENC returned one (about 100 fps, about 300 fps with
+       skipped pictures under a cap), overrunning the rate control's
+       per-frame budget and the bitrate cap. Hold it to the output rate. */
+    if (encoder->placeholder_frames) {
+        const uint64_t now = monotonic_ns();
+        if (now < encoder->placeholder_due_ns) {
+            const uint64_t wait_ns = std::min(
+                encoder->placeholder_due_ns - now,
+                placeholder_interval_ns(encoder));
+            const int codec = encoder->codec_type;
+            source_lock.unlock();
+            lock.unlock();
+            std::this_thread::sleep_for(std::chrono::nanoseconds(wait_ns));
+            packet->data = nullptr;
+            packet->data_size = 0;
+            packet->codec = public_codec(codec);
+            packet->key_frame = 0;
+            packet->pts_ns = monotonic_ns();
+            return 0;
+        }
+    }
     source->failures++;
     const int rebuilt = maybe_rebuild_for_hdmi_change(
         source, error, error_capacity);
@@ -1368,9 +1409,19 @@ int32_t encoder_unbind_source(void *opaque, char *error, uint32_t error_capacity
     }
     std::lock_guard<std::mutex> lock(encoder->mutex);
     if (encoder->codec_type == 0) {
+        /* Core's primary MJPEG encoder is never logically bound; unbinding it
+           is the idle signal after the last MJPEG client leaves. A logically
+           bound JPEG (VNC) may share capture with a live H.26x stream, so its
+           unbind leaves capture running. */
+        const bool logical_bound = encoder->source_bound || encoder->bound_source != nullptr;
         encoder->source_bound = false;
         encoder->bound_source = nullptr;
         encoder->reset_source = nullptr;
+        if (!logical_bound) {
+            MmfControlLock global_lock;
+            mmf::park_unbound_vpss_channels();
+            (void)mmf::pause_vi_dma();
+        }
         return 0;
     }
     if (!encoder->source_bound && encoder->bound_source == nullptr) {
@@ -1616,7 +1667,7 @@ int32_t encoder_set_quality(void *opaque, double quality,
     if (mmf::set_h26x_rate_control(
             encoder->channel, fps, gop, bitrate_kbps,
             encoder->config.initial_qp, encoder->config.min_qp,
-            encoder->config.max_qp) != 0) {
+            encoder->config.max_qp, encoder->config.bitrate_kbps > 0) != 0) {
         set_error(error, error_capacity, "queue VENC quality bitrate failed");
         return -1;
     }
@@ -1749,17 +1800,17 @@ int32_t encoder_resources(onekvm_video_encoder_resources_v1 *resources,
     resources->policy_jpeg_capacity = 1;
     resources->active_h26x = 0;
     for (int channel = kFirstVENCChannel; channel <= kLastVENCChannel; ++channel) {
-        if (mmf::g_runtime.h26x_encoders[channel].initialized)
+        if (mmf::h26x_encoder_initialized(channel))
             ++resources->active_h26x;
     }
-    resources->active_jpeg = mmf::g_runtime.jpeg_initialized ? 1u : 0u;
+    resources->active_jpeg = mmf::jpeg_encoder_initialized() ? 1u : 0u;
     resources->hardware_channel_capacity = kLastVENCChannel + 1;
     resources->input_mode_mask = ONEKVM_VIDEO_ENCODER_INPUT_MASK_MANUAL |
         ONEKVM_VIDEO_ENCODER_INPUT_MASK_BOUND;
     resources->purpose_mask = ONEKVM_VIDEO_ENCODER_PURPOSE_MASK_REALTIME |
         ONEKVM_VIDEO_ENCODER_PURPOSE_MASK_BACKGROUND;
     resources->flags = 0;
-    if (mmf::g_runtime.reference_count == 0) {
+    if (!mmf::runtime_initialized()) {
         set_error(error, error_capacity, "MMF runtime is not initialized");
         return ONEKVM_VIDEO_RESOURCE_UNINITIALIZED;
     }
@@ -1790,17 +1841,17 @@ int32_t encoder_allocate(
     const int type = codec_type(request->config.codec);
 
     MmfControlLock global_lock;
-    if (mmf::g_runtime.reference_count == 0) {
+    if (!mmf::runtime_initialized()) {
         set_error(error, error_capacity, "MMF runtime is not initialized");
         return ONEKVM_VIDEO_RESOURCE_UNINITIALIZED;
     }
-    if (type == 0 && mmf::g_runtime.jpeg_capture_channel >= 0 &&
+    if (type == 0 && mmf::jpeg_capture_channel() >= 0 &&
         mmf::close_jpeg_encoder(kJPEGChannel) != 0) {
         set_error(error, error_capacity, "JPEG input cleanup is still pending");
         return ONEKVM_VIDEO_RESOURCE_BUSY;
     }
-    if ((type == 0 && mmf::g_runtime.jpeg_initialized) ||
-        (type != 0 && mmf::g_runtime.h26x_encoder_active)) {
+    if ((type == 0 && mmf::jpeg_encoder_initialized()) ||
+        (type != 0 && mmf::h26x_encoder_active())) {
         set_error(error, error_capacity, "requested encoder resource is busy");
         return ONEKVM_VIDEO_RESOURCE_BUSY;
     }

@@ -6,6 +6,8 @@ NanoKVM Cube（SG2002）的视频使用 **LT6911 HDMI → CSI → VI**。H.264�
 变换经 VPSS 再送 VENC；具备 packed-source 能力的驱动允许同尺寸 H.265 直接使用 VI 帧。
 Core 走绑定 H.264/H.265，不读原始帧。改采集、绑定、释放或 HDMI 探测前先读本文。
 验收数据和试验过程记在工作区 `docs/`，不要把流水账写回这里。
+本文描述 cvi_mpi 运行时 `soph-mmf.so`；不依赖 cvi_mpi 的 `soph-v4l2.so` 见
+[v4l2-backend.md](v4l2-backend.md)。
 
 ## 内存布局与失败清理
 
@@ -37,6 +39,9 @@ PCIe 固件初始化必须先直接核对 UXC 寄存器 ID `17 04 83`，不能�
 核对前 `0x6000` 字节 SHA-256，持久备份后才写。未知程序保持原样；写后再次
 双读整片，核对目标程序哈希和其余区域不变，才允许复位桥片。已经匹配的五页
 只读检查后返回，不重复刷写。该路径不适用于 Pro 或 LT6911C/D。
+hook 按后端相同的地址特征和顺序识别 C、UXC、D：C、D 和其他 UXC 修订不碰 Flash 并返回成功，
+交给后端驱动；只有读取失败或未知硅片才使初始化失败。初始化失败只让采集不可用，
+`onekvm.service` 以 `Wants` 依赖它，Core、网页和 SSH 照常启动。
 
 Cube／Lite／PCIe 的 LT6911 由 MMF 用户态后端访问。完成芯片探测后，将实际
 `chip_id`、`board_id`、`driver` 原子发布到 `/run/onekvm/lt6911_info/`，文件只读，
@@ -47,7 +52,11 @@ Cube／Lite／PCIe 的 LT6911 由 MMF 用户态后端访问。完成芯片探测
 
 停止采集时按实际硅片 ID 探测 C（A000/A001 `16 05`）、UXC（8100/8101
 `17 04`）、D（E100/E101 `21 02`），每次探测均关闭对应寄存器窗口；错误或未知
-ID 不启动采集、不开放 EDID 写入。D 的 E080..83 是固件版本，不能用来识别硅片。
+ID 不启动采集、不开放 EDID 写入。i2c-4 上 `0x2b` 应答而 `0x2c`、`0x44` 均不应答
+是原厂的 D 地址特征：此时先开 E0EE 探测 D，确认后不再写 C/UXC 的 80EE；否则
+仍按 C、UXC、D 顺序。地址只决定顺序，型号仍以寄存器 ID 为准。Core 启动 15 秒后
+仍打不开采集源时，状态 `hdmi_error` 为 `video_unavailable`，网页显示视频后端不可用，
+之后每 5 秒重试一次。D 的 E080..83 是固件版本，不能用来识别硅片。
 探测结果供传感器、EDID 与信息缓存共用；状态请求和活流不重复读取内部 ID。
 
 时序快照按硅片选择单独寄存器图，不再混读后选取最大尺寸。C 使用 D2 HDMI、
@@ -95,6 +104,15 @@ VBR 的 `MaxBitRate` 是码控目标，不能作为实际输出流量的硬上�
 一次实验仍有停顿时不能称已解决，也不据此改默认参数。额外取流和逐帧 RC 日志只用于
 诊断，不能代替同条件、真实播放器下的延迟收益表。
 
+H.264 的新 `MaxBitRate` 从下一帧进入码控（osdrv `495d985` 起的 `soph_vc_driver`）。
+此前要等下一个自然 GOP 起点：GOP 300 时最长 5 s，强制 IDR 还会把计数清零。H.265 AVBR
+每个统计周期（≤ 20 帧）重算。上限低于画面在 QP 48 下所需码率时，只靠 QP 压不住
+（107 运动页 1 Mbps 上限下仍有 2.5 Mbps），所以有上限（手动码率或自动码率给出的上限）
+时开启厂商 PSKIP 跳帧：码率缓冲超出约 1.1 s（H.264）/ 1.2 s（H.265）的上限码量就编
+跳过帧，代价是编码帧率下降。跳过帧只能计入码率缓冲，不能进 RC 模型（osdrv `ed61172`），
+否则模型把它当成省下的预算，QP 降到 18–20，变成约 1 帧/s。实测见
+[v4l2-backend.md](v4l2-backend.md#码率上限)。
+
 H.264 和需要缩放、镜像、翻转的输出使用 **VI→VPSS→VENC**，由 VPSS 做 UYVY→NV21。
 `SYS_Bind(VI,VENC)` 可以 ioctl 成功，但解开 VI→VPSS 后 Preraw `IntCnt` 会停在 0，
 `EncodedFrame=0`。双绑 VI→VPSS+VENC 会在几块 UYVY 池耗尽后变成 `VENC waitq is full`。
@@ -136,9 +154,9 @@ VPSS 的原运行状态，不能把直通时关闭的 scaler 当作整个视频�
 - 首 AU 到达前不要因 VI `FrameRate=0` 走 `maybe_rebuild` 或打 LT6911 `80ee`。
 - HDMI watcher 的初始信号可能晚于 WebRTC 建链。source 重开（包括 EDID 操作）、新绑定，以及同一 VENC 从占位切回 VI 时，都要建立独立的 5 秒首帧窗口；旧 `cached_signal=0`、旧 reader 时间戳或恢复中的 timing 样本不能缩短它。窗口内 watcher 不探测 LT6911、不重建 VI，包路径等待新 AU；超时后才回到有界失锁恢复。1.5 秒只用于已证明活流的停顿。从占位恢复仍须至少三包新 AU、跨越 30 ms，再请求新 IDR 后发布；不能用窗口或时序样本替代真实帧确认。
 - 独占 VI→VENC 超过首帧窗口仍完全没有 AU 时，必须撤销绑定时乐观设置的 `cached_signal=1` 并启动静默失锁探测；不能无限期只请求 IDR。连续 CSI `0x0`、HDMI 仍报当前尺寸时，仅在有绑定消费者且 VI DMA 运行时累计软件重武装样本，不能把参数固定成 `false` 导致恢复门永远打不开。软件恢复重开 source 时不能用旧的 HDMI active-size 计数推断 CSI 已锁定并跳过 `lt6911_start_csi()`。完整 PCIe GPIO 复位后的重开则可以保留真正恢复的桥片锁定。
-- PCIe 冷启动在 CSI 武装前探测 HDMI 2.5 s。优先用窗口内稳定/最大的合法 timing，其次用 `/run/onekvm/last-hdmi-input` 记住的活路分辨率，再才回退 640×480。绑定 640/720×480 bootstrap 时不要把 `cached_signal` 设成 live，否则 watcher 要等占位路径才会 grow 到 1080p，WebRTC 会先锁在 640 SPS。
+- PCIe 冷启动在 CSI 武装前探测 HDMI 2.5 s，并采纳 UXC 接收端 `0x8680/0x867e` 的早期尺寸（`0x86a3` 尚未报 `0x55` 锁定时就已有效；VI 未启动，读取安全；仍要求两次一致）。只读 0x85 计数时，这一阶段恒为 `0x0`，开机必然回退 640×480 再盲扩，冷启动约 12–37 次 `isp_err_chk`；改后 107 信源 1080p／640×480 冷启动均直接按实际尺寸启动，0 次。优先用窗口内稳定/最大的合法 timing，其次用 `/run/onekvm/last-hdmi-input` 记住的活路分辨率，再才回退 640×480。绑定 640/720×480 bootstrap 时不要把 `cached_signal` 设成 live，否则 watcher 要等占位路径才会 grow 到 1080p，WebRTC 会先锁在 640 SPS。
 - 活路 HDMI watcher 用静默探测：只读 0xd28b/0x85ea/0xe08c 计数，不写 `0x80ee`、不打 `D283`。PCIe 640/720×480 bootstrap 在还没有消费者时也静默探测。完整快照用于 CSI/VI 启动前，以及已进入占位、VI 不再接收真实帧的断信号恢复期；C 和 UXC 都必须核对占位阶段及 MMF 实际已解绑 VI→VPSS，不能单靠 `awaiting_hdmi_timing` 或 PCIe 的等待标志推断安全。重新绑定即停止完整快照，先给新采集首帧窗口。
-- 冷启动若已经读到桥片锁定的合法时序，无消费者时不要仅凭静默计数暂时为零就把接收端盲目升到 1080p；这会破坏已锁定的 720×480 输入。只有 fallback bootstrap 才需要空闲 grow 探测，或者等绑定消费者后以真实 AU 判断。
+- 冷启动若已经读到桥片锁定的合法时序，无消费者时不要仅凭静默计数暂时为零就把接收端盲目升到 1080p；这会破坏已锁定的 720×480 输入。只有 fallback bootstrap 才需要空闲 grow 探测，或者等绑定消费者后以真实 AU 判断。冷启动实测得到的 640×480（`initial_input_measured`）同理不得盲扩：107 信源 640×480 时盲扩到 1080 会持续报宽度不足，直到消费者到来才缩回。
 - Cube WAVE4 进程里只有一个 H.264/H.265 worker。绑定后不要 `DestroyChn` / `StopRecvFrame` 切换 H.264↔H.265。要换编码走设备视频设置的 `ResetVideo`（先 unbind）。
 - RustDesk/RTSP 共用绑定主路；info 报实际 codec。
 
@@ -224,7 +242,7 @@ CVITEK 会把 H.264 PPS（H.265 还包括 VPS/SPS/PPS）拆成 IDR 前的独立 
 丢掉所有非 IDR 会让浏览器收到 RTP 但无法初始化解码器。
 
 只改目标 FPS、码率或 QP 时不要拆 VI/VENC 通道：reader 在两次 `GetStream` 之间改
-`u32MaxBitRate` / `SetRcParam`，并补一次 IDR。不要 `close_encoder`。
+`u32MaxBitRate` / `SetRcParam`，只在 FPS/GOP 变化时补一次 IDR。不要 `close_encoder`。
 H.264 用 VBR（Coda 的 AVBR `MotionLv` 在 107 上一直是 0，静帧 QP 钳死、live 改
 `MaxBitRate` 也不会重算 target）。H.265 仍用 AVBR：`s32MinStillPercent=90`，
 `u32MaxStillQP=40`，`u32MotionSensitivity=100`，`u32StatTime=1`，
@@ -296,6 +314,8 @@ MMF 初始化失败的回滚按所有权执行：`SAMPLE_PLAT_VI_INIT()` 负责�
 
 无信号期间保持 VPSS→VENC 绑定，只解开 **VI→VPSS**，把 NV21 占位转成 UYVY 后 `CVI_VPSS_SendFrame` 送到 group 0。WAVE4 按平常绑定路径出 IDR/P。输入恢复后重新 `VI_Bind_VPSS`。前端控制台不要叠 Vue 占位图。
 
+占位静帧没有采集时钟，每帧按编码器输出帧率送入，不能随上层调用频率送：soph-v4l2.so 原先编码器一返回就送下一帧，无信号时跑到 100–320 fps，码控按输出帧率分配的每帧预算失效，码率上限也守不住。实测见 [no-signal.md](no-signal.md)。
+
 `StartRecvFrame` 发生在 1.5 s live grace 里。无 HDMI 时 WAVE4 随后把静帧编成 P/skip，reader 若仍在等「自然第一帧 IDR」会把 `RequestIDR` 合并掉，WebRTC 拿不到可解码的 AU。进入占位后必须 `h26x_reader_force_idr`（清队含残留关键帧，并在 reader 线程发 ioctl），且在匹配当前 VENC 宽高的 IDR 到达前不要把 AU 交给 Core。H.264 再按 SPS 尺寸丢掉残留 CSI 包。
 
 超过几何范围的 HDMI 模式仍在 status 中提供 `hdmi_error=out_of_range` 和实测 `input_width/height`，UI 显示「不支持的分辨率」；绑定视频同样走 VPSS 上游静帧。合法的 2560×1440 输入配合 60 FPS 设置时自动限制到 30 FPS，不能因此显示越界占位。
@@ -304,7 +324,7 @@ VI `FrameRate` 列开机约 1 秒是 0，不能单靠这一列判无信号。已
 
 ## 空闲与释放
 
-无消费者时 Core `videoLoop` 停在 `waitForConsumer`。空闲先 `CVI_VPSS_DisableChn` 停 scaler（`CVI_VIP_SCL`），再 `CVI_VI_DisableChn` 停 VI（只释放 128 KiB `vi_cmdq_buf`，VB 池仍在），保持 VI→VPSS 绑定。消费者到来时 `enable_vi_dma()` 依次 `lt6911_start_csi`、`SetChnAttr`、`EnableChn`，不调用 `EnableDev`。这要求 osdrv `382c705` 及以后的 VI 模块（保留设备计数并重置每轮出流状态，见 [dynamic-ion.md](dynamic-ion.md)）；MMF 与视频模块随同一批更新发布，不兼容旧模块。H.265 VI 直通在空闲时由 reader 持有 VI lease，暂不关闭 VI；`pause_vi_dma()` 在仍有未进入 discard 的直通 reader 或持有采集帧时不关闭 VI，避免解绑无关编码器时停掉直通输入。空闲期间 HDMI 改变尺寸后，下一个消费者先在旧几何上启用 VI 并进入占位；占位探测连续两次得到同一受支持、但与当前接收几何不同的 HDMI 模式时，直接按新模式重开 source，不再以旧几何试 VI。旧几何试 VI 时 LT6911 读数为 0x0，会清零 dead-VI follow 计数，导致永远等不到缩小重开（107 实测 1080p→640×480 循环占位，旧模块基线同样复现）。保留 VPSS→VENC、VENC bind worker 和唯一的用户态 VENC reader；reader 进入 discard 模式，以有界 fd poll 排空停 scaler 后的迟到 AU。直接解绑而不先排空在途帧，会让无输入的 worker 在最终 `StopRecvFrame` 时卡进厂商锁。重新绑定先 `EnableChn` VPSS。
+无消费者时 Core `videoLoop` 停在 `waitForConsumer`。空闲先 `CVI_VPSS_DisableChn` 停 scaler（`CVI_VIP_SCL`），再 `CVI_VI_DisableChn` 停 VI（只释放 128 KiB `vi_cmdq_buf`，VB 池仍在），保持 VI→VPSS 绑定。消费者到来时 `enable_vi_dma()` 依次 `lt6911_start_csi`、`SetChnAttr`、`EnableChn`，不调用 `EnableDev`。拆除采集通道前也要先恢复 VI DMA（空闲 `DisableChn` 后直接停会挂住），但这里用 `enable_vi_dma_for_teardown()`，不重新 arm CSI：640 bootstrap 扩到 1080 时，重新 arm 会让旧 640 CSIBDG 一直收到 1080 帧，直到新 VI 建好（640 bootstrap 扩到 1080 的那段从约 32 次降到 6 次）。实时切换信源分辨率：107 在网页观看时 640↔1080 切换 20 次全部出图，`isp_err_chk` 共 26 次，多数每次 1 条，出现在旧 VI 已停、新 VI 未起的空档；偶尔 3–5 条（watcher 发现晚、桥片已输出新模式）。拆除本身约 0.65 s（VENC 0.1–0.2 s、`DestroyIsp` 0.25–0.4 s、VI 停 0.1–0.3 s），无输入时 `vi_stop_streaming` 等满后正常结束。拆除前写 `0x805a=0x88` 关 CSI 输出无效：UXC 固件锁定新模式后会自行恢复输出，同测 25 次，不要再试。这要求 osdrv `382c705` 及以后的 VI 模块（保留设备计数并重置每轮出流状态，见 [dynamic-ion.md](dynamic-ion.md)）；MMF 与视频模块随同一批更新发布，不兼容旧模块。H.265 VI 直通在空闲时由 reader 持有 VI lease，暂不关闭 VI；`pause_vi_dma()` 在仍有未进入 discard 的直通 reader 或持有采集帧时不关闭 VI，避免解绑无关编码器时停掉直通输入。空闲期间 HDMI 改变尺寸后，下一个消费者先在旧几何上启用 VI 并进入占位；占位探测连续两次得到同一受支持、但与当前接收几何不同的 HDMI 模式时，直接按新模式重开 source，不再以旧几何试 VI。旧几何试 VI 时 LT6911 读数为 0x0，会清零 dead-VI follow 计数，导致永远等不到缩小重开（107 实测 1080p→640×480 循环占位，旧模块基线同样复现）。保留 VPSS→VENC、VENC bind worker 和唯一的用户态 VENC reader；reader 进入 discard 模式，以有界 fd poll 排空停 scaler 后的迟到 AU。直接解绑而不先排空在途帧，会让无输入的 worker 在最终 `StopRecvFrame` 时卡进厂商锁。重新绑定先 `EnableChn` VPSS。
 
 `unbind_h26x_from_capture` 只断开 SYS bind，不停 VI。不要因为 CSI `0x0` + HDMI 仍是 1080 就 `reopen_source`（空闲停 VI 和占位都会出现这个读数）。从空闲恢复走 `resume_vi_dma()` + `resume_vpss_channel`，不重开 source。
 

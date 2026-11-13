@@ -5,6 +5,7 @@
 #include "packet-buffer-pool.hpp"
 #include "vi_direct_policy.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
@@ -45,6 +46,7 @@ struct H26xReader {
 	std::atomic<int> pending_output_fps{0};
 	std::atomic<int> pending_gop{0};
 	std::atomic<int> pending_bitrate_kbps{0};
+	std::atomic<bool> pending_frame_skip{false};
 	std::atomic<int> pending_initial_qp{0};
 	std::atomic<int> pending_min_qp{0};
 	std::atomic<int> pending_max_qp{0};
@@ -263,7 +265,8 @@ static void _set_h264_vbr_attr(VENC_CHN_ATTR_S *attr, const H26xEncoderConfig *c
 {
 	/* Coda H.264 AVBR never updates MotionLv on 107, so still-QP
 	 * stays clamped and live MaxBitRate changes never retarget RC.
-	 * VBR applies Max × ChangePos on the next IDR. */
+	 * VBR applies Max × ChangePos from the next picture (soph_vc_driver
+	 * since osdrv 495d985; before, from the next GOP start). */
 	attr->stRcAttr.enRcMode = VENC_RC_MODE_H264VBR;
 	attr->stRcAttr.stH264Vbr.u32Gop = cfg->gop;
 	attr->stRcAttr.stH264Vbr.u32StatTime = MMF_VENC_AVBR_STAT_TIME;
@@ -381,6 +384,25 @@ static CVI_S32 _set_h264_entropy(int ch)
 	return ret;
 }
 
+/* Under a hard cap the vendor RC codes skipped P pictures while its leaky
+ * bucket (bits over the per-frame target) exceeds 1.1 s (H.264) / 1.2 s
+ * (H.265) of the cap: the vendor default thresholds. */
+static CVI_S32 _set_venc_frame_lost(int ch, const H26xEncoderConfig *cfg)
+{
+	VENC_FRAMELOST_S fl{};
+	const CVI_U32 per_kbps = cfg->codec == H26xCodec::H265 ? 1200 : 1100;
+
+	fl.bFrmLostOpen = cfg->frame_skip ? CVI_TRUE : CVI_FALSE;
+	fl.enFrmLostMode = FRMLOST_PSKIP;
+	fl.u32EncFrmGaps = 0; /* no limit on consecutive skips */
+	fl.u32FrmLostBpsThr = std::max<CVI_U32>(
+		64000, static_cast<CVI_U32>(cfg->bitrate_kbps) * per_kbps);
+	const CVI_S32 ret = CVI_VENC_SetFrameLostStrategy(ch, &fl);
+	if (ret != CVI_SUCCESS)
+		printf("CVI_VENC_SetFrameLostStrategy [%d] failed with %#x\n", ch, ret);
+	return ret;
+}
+
 static int create_h26x_channel(int ch, const H26xEncoderConfig &config,
 	const RateControl &rate_control)
 {
@@ -412,6 +434,7 @@ static int create_h26x_channel(int ch, const H26xEncoderConfig &config,
 	}
 	if ((ret = _set_venc_rc_param(ch, cfg, rc)) != CVI_SUCCESS)
 		goto fail_channel;
+	(void)_set_venc_frame_lost(ch, cfg);
 	if (cfg->codec == H26xCodec::H264 &&
 		(ret = _set_h264_entropy(ch)) != CVI_SUCCESS)
 		goto fail_channel;
@@ -1418,7 +1441,8 @@ constexpr uint32_t kH26xRcBitrate = 1u << 1;
 constexpr uint32_t kH26xRcQp = 1u << 2;
 
 static int apply_h26x_rate_control(int ch, int output_fps, int gop,
-	int bitrate_kbps, int initial_qp, int min_qp, int max_qp, uint32_t mask)
+	int bitrate_kbps, int initial_qp, int min_qp, int max_qp, bool frame_skip,
+	uint32_t mask)
 {
 	if (ch < 0 || ch >= MMF_VENC_MAX_CHN || !g_runtime.h26x_encoders[ch].initialized)
 		return -1;
@@ -1437,8 +1461,10 @@ static int apply_h26x_rate_control(int ch, int output_fps, int gop,
 	}
 	if ((mask & kH26xRcBitrate) != 0 && bitrate_kbps <= 0)
 		return -1;
-	if ((mask & kH26xRcBitrate) == 0)
+	if ((mask & kH26xRcBitrate) == 0) {
 		bitrate_kbps = cfg.bitrate_kbps;
+		frame_skip = cfg.frame_skip;
+	}
 
 	if ((mask & (kH26xRcFpsGop | kH26xRcBitrate)) != 0) {
 		VENC_CHN_ATTR_S attr{};
@@ -1471,9 +1497,18 @@ static int apply_h26x_rate_control(int ch, int output_fps, int gop,
 		}
 		cfg.output_fps = output_fps;
 		cfg.gop = gop;
+		/* The skip threshold follows the bitrate. */
+		if (bitrate_kbps != cfg.bitrate_kbps || frame_skip != cfg.frame_skip) {
+			H26xEncoderConfig next = cfg;
+			next.bitrate_kbps = bitrate_kbps;
+			next.frame_skip = frame_skip;
+			if (_set_venc_frame_lost(ch, &next) == CVI_SUCCESS)
+				cfg.frame_skip = frame_skip;
+		}
 		cfg.bitrate_kbps = bitrate_kbps;
-		printf("OneKVM: VENC ch %d fps %d gop %d bitrate %d kbps\n",
-			ch, output_fps, gop, bitrate_kbps);
+		printf("OneKVM: VENC ch %d fps %d gop %d bitrate %d kbps%s\n",
+			ch, output_fps, gop, bitrate_kbps,
+			cfg.frame_skip ? " (skip over cap)" : "");
 	}
 
 	const auto &current_rc = g_runtime.h26x_encoders[ch].rate_control;
@@ -1508,7 +1543,7 @@ int set_h26x_output_fps(int ch, int output_fps, int gop)
 }
 
 int set_h26x_rate_control(int ch, int output_fps, int gop, int bitrate_kbps,
-	int initial_qp, int min_qp, int max_qp)
+	int initial_qp, int min_qp, int max_qp, bool frame_skip)
 {
 	if (ch < 0 || ch >= MMF_VENC_MAX_CHN)
 		return -1;
@@ -1519,8 +1554,10 @@ int set_h26x_rate_control(int ch, int output_fps, int gop, int bitrate_kbps,
 	H26xReader &reader = g_readers[ch];
 	reader.pending_gop.store(gop, std::memory_order_relaxed);
 	reader.pending_output_fps.store(output_fps, std::memory_order_relaxed);
-	if (bitrate_kbps > 0)
+	if (bitrate_kbps > 0) {
 		reader.pending_bitrate_kbps.store(bitrate_kbps, std::memory_order_relaxed);
+		reader.pending_frame_skip.store(frame_skip, std::memory_order_relaxed);
+	}
 	reader.pending_initial_qp.store(initial_qp, std::memory_order_relaxed);
 	reader.pending_min_qp.store(min_qp, std::memory_order_relaxed);
 	reader.pending_max_qp.store(max_qp, std::memory_order_relaxed);
@@ -1673,6 +1710,7 @@ int start_h26x_reader(int ch, bool request_idr)
 					    self.pending_initial_qp.load(std::memory_order_relaxed),
 					    self.pending_min_qp.load(std::memory_order_relaxed),
 					    self.pending_max_qp.load(std::memory_order_relaxed),
+					    self.pending_frame_skip.load(std::memory_order_relaxed),
 					    rc_mask) == 0 && timing_changed)
 					self.want_idr.store(true, std::memory_order_relaxed);
 			}

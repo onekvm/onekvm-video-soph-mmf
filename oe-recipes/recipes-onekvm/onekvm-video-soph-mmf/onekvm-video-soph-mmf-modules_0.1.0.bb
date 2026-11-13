@@ -1,7 +1,7 @@
 SUMMARY = "Sophgo SG2002 multimedia kernel modules"
 HOMEPAGE = "https://github.com/onekvm/osdrv-sg200x"
 LICENSE = "CLOSED"
-PR = "r35"
+PR = "r37"
 
 FILESEXTRAPATHS:prepend := "${THISDIR}/files/mmf-modules:"
 
@@ -12,6 +12,9 @@ SRC_URI = " \
     file://load-onekvm-video-soph-mmf-optional-modules \
     file://prepare-onekvm-device-nanokvm-hdmi.c \
     file://v4l2-decode-smoke.c \
+    file://v4l2-encode-smoke.c \
+    file://v4l2-capture-smoke.c \
+    file://v4l2-scale-smoke.c \
     file://vi-lifecycle-smoke.c \
     file://99-onekvm-vdec.rules \
     file://link-onekvm-vdec \
@@ -22,7 +25,7 @@ SRC_URI = " \
     file://onekvm-video-soph-mmf-modules.conf \
     file://onekvm-device-nanokvm-npu.service \
 "
-SRCREV = "7edaf6379381587efca109b23240e44598590cae"
+SRCREV = "ed611728cceb90205f7e417a47640d649c99c9a1"
 BB_GIT_SHALLOW = "1"
 BB_GIT_SHALLOW_DEPTH = "1"
 B = "${WORKDIR}/build"
@@ -85,6 +88,12 @@ do_compile() {
     # reproducible-package buildpaths QA check.
     ${CC} ${CFLAGS} ${CPPFLAGS} -g0 ${LDFLAGS} \
         "${UNPACKDIR}/v4l2-decode-smoke.c" -o "${B}/v4l2-decode-smoke"
+    ${CC} ${CFLAGS} ${CPPFLAGS} -g0 ${LDFLAGS} \
+        "${UNPACKDIR}/v4l2-encode-smoke.c" -o "${B}/v4l2-encode-smoke"
+    ${CC} ${CFLAGS} ${CPPFLAGS} -g0 ${LDFLAGS} \
+        "${UNPACKDIR}/v4l2-capture-smoke.c" -o "${B}/v4l2-capture-smoke"
+    ${CC} ${CFLAGS} ${CPPFLAGS} -g0 ${LDFLAGS} \
+        "${UNPACKDIR}/v4l2-scale-smoke.c" -o "${B}/v4l2-scale-smoke"
 
     ${CC} ${CFLAGS} ${CPPFLAGS} -g0 ${LDFLAGS} \
         -D__CV181X__ \
@@ -124,6 +133,12 @@ do_install() {
         "${D}${libexecdir}/onekvm/prepare-device-nanokvm-hdmi"
     install -Dm0755 "${B}/v4l2-decode-smoke" \
         "${D}${libexecdir}/onekvm/v4l2-decode-smoke"
+    install -Dm0755 "${B}/v4l2-encode-smoke" \
+        "${D}${libexecdir}/onekvm/v4l2-encode-smoke"
+    install -Dm0755 "${B}/v4l2-capture-smoke" \
+        "${D}${libexecdir}/onekvm/v4l2-capture-smoke"
+    install -Dm0755 "${B}/v4l2-scale-smoke" \
+        "${D}${libexecdir}/onekvm/v4l2-scale-smoke"
     install -Dm0755 "${B}/vi-lifecycle-smoke" \
         "${D}${libexecdir}/onekvm/vi-lifecycle-smoke"
     install -Dm0755 "${UNPACKDIR}/link-onekvm-vdec" \

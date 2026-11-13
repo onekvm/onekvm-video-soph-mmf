@@ -2,14 +2,13 @@
 
 [简体中文](../zh/v4l2-decoder.md)
 
-This interface accepts compressed access units and outputs raw frames. HDMI
-capture, VPSS scaling, hardware encoding and Core's encoding backend retain
-their MMF pipeline. It does not add a V4L2 encoder node.
+This interface accepts compressed access units and outputs raw frames. The
+encoder nodes are described in [v4l2-encoder.md](v4l2-encoder.md); HDMI capture
+and VPSS scaling still use the MMF pipeline.
 
 Status: experimental implementation, with basic validation completed on device
-107 running 6.18.45-onekvm-preempt. It is not a replacement for the encoding
-path; a successful build or registered node does not establish all stream
-formats or resource cleanup.
+107 running 6.18.45-onekvm-preempt. A successful build or registered node does
+not establish all stream formats or resource cleanup.
 
 ## Interface
 

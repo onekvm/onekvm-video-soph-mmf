@@ -31,10 +31,14 @@ if [ ! -x "$I2C" ] || [ ! -c /dev/i2c-4 ]; then
   log "i2c-4 is not available"
   exit 1
 fi
-if [ "$(systemctl is-active onekvm.service 2>/dev/null || true)" = active ]; then
-  log "onekvm.service is active; refusing to touch the bridge"
-  exit 1
-fi
+core_state=$(systemctl is-active onekvm.service 2>/dev/null || true)
+case $core_state in
+  inactive|failed|unknown|'') ;;
+  *)
+    log "onekvm.service is $core_state; refusing to touch the bridge"
+    exit 1
+    ;;
+esac
 
 wr() { "$I2C" -y -f 4 w2@0x2b "$1" "$2" >/dev/null; }
 bank() { wr 0xff "$1"; }
@@ -117,21 +121,60 @@ normalize() {
   printf '%s\n' "$1" | tr 'A-F' 'a-f' | tr '\n' ' ' | sed 's/0x//g; s/  */ /g; s/^ //; s/ $//'
 }
 
-# A board label is not a chip identity. Check the actual UXC register ID
-# before issuing any flash/FIFO commands; never use a previous Core cache.
+# A board label is not a chip identity. Identify the silicon as the capture
+# backend does before any flash/FIFO command; never use a previous Core cache.
+# C and D boards are supported by the backend and have no PCIe image here, so
+# they are left unchanged. Factory detection maps 0x2b without 0x2c/0x44 to D
+# and never opens the C/UXC 80EE window there, so D is tried first on that map.
+read_id() {
+  bank "$1"
+  "$I2C" -y -f 4 w1@0x2b 0x00 "r$2"
+}
+present() { "$I2C" -y -f 4 "r1@$1" >/dev/null 2>&1; }
+# 0 is D, 1 another chip; both close the E0 window. Read failures are not D.
+probe_d() {
+  bank 0xe0
+  wr 0xee 0x01
+  d_id=$(read_id 0xe1 2) || d_id=
+  bank 0xe0
+  wr 0xee 0x00
+  [ "$(normalize "$d_id")" = '21 02' ]
+}
+d_first=false
+if ! present 0x2c && ! present 0x44; then
+  d_first=true
+  if probe_d; then
+    log "LT6911D bridge; no PCIe firmware update needed"
+    exit 0
+  fi
+fi
 bank 0x80
 wr 0xee 0x01
 trap close_flash EXIT
-bank 0x81
-chip_id=$("$I2C" -y -f 4 w1@0x2b 0x00 r3) || {
-  log "cannot read chip ID; refusing firmware access"
-  exit 1
-}
-chip_id=$(normalize "$chip_id")
-if [ "$chip_id" != '17 04 83' ]; then
-  log "chip ID '$chip_id' is not LT6911UXC; refusing firmware access"
-  exit 1
+c_id=$(read_id 0xa0 2) || { log "cannot read chip ID; refusing firmware access"; exit 1; }
+if [ "$(normalize "$c_id")" = '16 05' ]; then
+  log "LT6911C bridge; no PCIe firmware update needed"
+  exit 0
 fi
+chip_id=$(read_id 0x81 3) || { log "cannot read chip ID; refusing firmware access"; exit 1; }
+chip_id=$(normalize "$chip_id")
+case $chip_id in
+  '17 04 83') ;;
+  17\ 04\ [0-9a-f][0-9a-f])
+    log "LT6911UXC revision '$chip_id' has no audited PCIe image; left unchanged"
+    exit 0
+    ;;
+  *)
+    close_flash
+    trap - EXIT
+    if [ "$d_first" = false ] && probe_d; then
+      log "LT6911D bridge; no PCIe firmware update needed"
+      exit 0
+    fi
+    log "unknown bridge chip (UXC '$chip_id', D '$(normalize "${d_id-}")'); refusing firmware access"
+    exit 1
+    ;;
+esac
 
 expect_1a60="22 12 52 a6 7f 24 7e 00 12 54 de 90 b0 02 e0 44 08 f0 12 1f 84 90 02 7b e0 70 03 02 1b c9 7f 32"
 expect_1a80="7e 00 12 54 de 90 b0 04 e0 44 20 f0 12 57 30 90 b0 04 e0 54 df f0 7f 24 7e 00 12 54 de 12 57 30"

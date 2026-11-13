@@ -489,9 +489,12 @@ int close_capture_channel(int ch) {
 
 	CVI_S32 s32Ret = CVI_SUCCESS;
 	/* Teardown needs the scaler and VI DMA enabled; DisableChn while idle
-	   leaves VI Stop* hanging. */
+	   leaves VI Stop* hanging.  Do not re-arm LT6911 CSI here: a resize
+	   tears down the old geometry, and a larger live frame would trip the
+	   CSIBDG width checker until the new VI starts. */
 	(void)resume_vpss_channel(ch);
-	(void)resume_vi_dma();
+	if (yield_h26x_vi_direct() == 0 && enable_vi_dma_for_teardown() == 0)
+		(void)capture_use_vi_frames();
 	s32Ret = SAMPLE_COMM_VI_UnBind_VPSS(0, 0, 0);
 	if (s32Ret != CVI_SUCCESS) {
 		SAMPLE_PRT("vi unbind vpss failed. s32Ret: 0x%x !\n", s32Ret);
@@ -604,7 +607,7 @@ int resume_vpss_channel(int ch)
 	return 0;
 }
 
-int enable_vi_dma(void)
+static int enable_vi_dma_impl(bool arm_csi)
 {
 	if (g_runtime.vi_dma_running)
 		return 0;
@@ -613,7 +616,7 @@ int enable_vi_dma(void)
 	   run before the SoC RX starts again. StartViChn also SetChnAttr
 	   first: Disable clears the proc channel, so Enable without attr
 	   leaves VI CHN ATTR empty and Preraw at 0. */
-	if (lt6911_start_csi() != 0)
+	if (arm_csi && lt6911_start_csi() != 0)
 		SAMPLE_PRT("LT6911 CSI re-arm before EnableChn failed\n");
 	if (g_runtime.vi_chn_attr_valid) {
 		const CVI_S32 attr = CVI_VI_SetChnAttr(0, 0, &g_runtime.vi_chn_attr);
@@ -630,8 +633,19 @@ int enable_vi_dma(void)
 		return ret;
 	}
 	g_runtime.vi_dma_running = true;
-	std::fprintf(stderr, "OneKVM: VI DMA resumed\n");
+	std::fprintf(stderr, "OneKVM: VI DMA resumed%s\n",
+		     arm_csi ? "" : " for teardown");
 	return 0;
+}
+
+int enable_vi_dma(void)
+{
+	return enable_vi_dma_impl(true);
+}
+
+int enable_vi_dma_for_teardown(void)
+{
+	return enable_vi_dma_impl(false);
 }
 
 int pause_vi_dma(void)

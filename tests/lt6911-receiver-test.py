@@ -8,10 +8,10 @@ import subprocess
 import tempfile
 
 root = Path(__file__).resolve().parents[1]
-source = Path(os.environ.get('ONEKVM_LT6911_SENSOR', root / 'src/lt6911_sensor_ctl.c')).read_text()
+source = Path(os.environ.get('ONEKVM_LT6911_SENSOR', root / 'src/lt6911_bridge.c')).read_text()
 names = '''onekvm_lt6911_cached_chip onekvm_lt6911_cache_chip
 supported_active_size normalize_half_or_full_width lt6911_i2c_read_be16
-sensor_read sensor_write identify_chip read_active_pair read_family_active
+sensor_read sensor_write sensor_present identify_chip read_active_pair read_family_active
 lt6911_get_input_timing_silent lt6911_get_input_timing_impl
 lt6911_kick_hdmi lt6911_start_csi_impl'''.split()
 parts = []
@@ -33,7 +33,12 @@ prefix = r'''
 typedef int VI_PIPE;
 #define CVI_SUCCESS 0
 #define CVI_FAILURE -1
-static int g_chip, g_i2c_lock, calls, fail_at, writes, wrong_read, mixed;
+static int g_chip, g_i2c_lock, calls, fail_at, writes, wrong_read, mixed, uxc_gate;
+static int present_2c = -1, present_44 = -1;
+static int lt6911_i2c_present(int pipe, uint8_t address) {
+    (void)pipe;
+    return address == 0x2c ? present_2c : address == 0x44 ? present_44 : -1;
+}
 static uint8_t regs[65536];
 static int valid_pipe(int pipe) { return pipe == 0; }
 static void configure_pinmux_once(void) {}
@@ -55,6 +60,7 @@ static int lt6911_i2c_write(int pipe, int addr, int value) {
     (void)pipe;
     assert(g_i2c_lock);
     writes++;
+    if (addr == 0x80ee) uxc_gate++;
     if (fault()) return -EIO;
     regs[addr] = value;
     return 0;
@@ -126,6 +132,38 @@ int main(void) {
     pthread_mutex_lock(&g_i2c_lock);
     assert(identify_chip(0) != 0 && !g_chip);
     pthread_mutex_unlock(&g_i2c_lock);
+    /* Factory D address map: D is identified without opening the 80EE window. */
+    present_2c = present_44 = 0;
+    for (int chip = ONEKVM_LT6911_UXC; chip <= ONEKVM_LT6911_D; ++chip) {
+        reset(0); uxc_gate = 0;
+        if (chip == ONEKVM_LT6911_UXC) { regs[0x8100]=0x17; regs[0x8101]=4; }
+        if (chip == ONEKVM_LT6911_C) { regs[0xa000]=0x16; regs[0xa001]=5; }
+        if (chip == ONEKVM_LT6911_D) { regs[0xe100]=0x21; regs[0xe101]=2; }
+        pthread_mutex_lock(&g_i2c_lock);
+        assert(!identify_chip(0) && g_chip == chip);
+        pthread_mutex_unlock(&g_i2c_lock);
+        assert(regs[0x80ee] == 0 && regs[0xe0ee] == 0);
+        if (chip == ONEKVM_LT6911_D) assert(!uxc_gate);
+        unsigned transfers=calls;
+        for(unsigned n=1;n<=transfers;++n) {
+            g_chip=0; calls=0; fail_at=n;
+            pthread_mutex_lock(&g_i2c_lock);
+            assert(identify_chip(0) != 0 && g_chip == 0);
+            pthread_mutex_unlock(&g_i2c_lock);
+        }
+        fail_at=0; regs[0x80ee]=regs[0xe0ee]=0;
+    }
+    /* An unknown chip on that map is probed once per family, then rejected. */
+    reset(0); uxc_gate = 0;
+    pthread_mutex_lock(&g_i2c_lock);
+    assert(identify_chip(0) != 0 && !g_chip && uxc_gate == 2);
+    pthread_mutex_unlock(&g_i2c_lock);
+    /* UXC map (0x44 present) keeps the original C/UXC-first order. */
+    present_44 = 1; reset(0); regs[0xe100]=0x21; regs[0xe101]=2; uxc_gate = 0;
+    pthread_mutex_lock(&g_i2c_lock);
+    assert(!identify_chip(0) && g_chip == ONEKVM_LT6911_D && uxc_gate == 2);
+    pthread_mutex_unlock(&g_i2c_lock);
+    present_2c = present_44 = -1;
     puts("MMF C/UXC/D: silicon IDs, isolated maps, coherent samples, no D control writes and fault cleanup passed");
 }
 '''

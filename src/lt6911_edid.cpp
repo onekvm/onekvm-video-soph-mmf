@@ -319,11 +319,15 @@ int identity_write(void *, uint16_t address, uint8_t value)
 {
     return write_reg(address >> 8, address & 0xff, value);
 }
+int identity_present(void *, uint8_t address)
+{
+    return onekvm_lt6911_bus_present(g_fd, address);
+}
 Lt6911Chip detect_chip()
 {
     int chip = onekvm_lt6911_cached_chip();
     if (chip != ONEKVM_LT6911_UNKNOWN) return static_cast<Lt6911Chip>(chip);
-    const onekvm_lt6911_io io{nullptr, identity_read, identity_write};
+    const onekvm_lt6911_io io{nullptr, identity_read, identity_write, identity_present};
     if (onekvm_lt6911_identify(&io, &chip)) return Lt6911Chip::Unknown;
     onekvm_lt6911_cache_chip(chip);
     return static_cast<Lt6911Chip>(chip);

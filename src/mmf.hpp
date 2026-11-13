@@ -79,6 +79,9 @@ struct H26xEncoderConfig {
     int input_fps;
     int output_fps;
     int bitrate_kbps;
+    /* bitrate_kbps is a hard cap (manual or Core's automatic limit): code
+       skipped P pictures while the encoder runs over it. */
+    bool frame_skip;
 };
 
 struct RateControl {
@@ -171,6 +174,7 @@ bool capture_channel_open(int ch);
 int pause_vpss_channel(int ch);
 int resume_vpss_channel(int ch);
 int enable_vi_dma(void);
+int enable_vi_dma_for_teardown(void);
 int pause_vi_dma(void);
 int resume_vi_dma(void);
 bool vi_dma_running(void);
@@ -235,7 +239,7 @@ int release_h26x_packet(int ch);
 int request_h26x_idr(int ch);
 int set_h26x_output_fps(int ch, int output_fps, int gop);
 int set_h26x_rate_control(int ch, int output_fps, int gop, int bitrate_kbps,
-	int initial_qp, int min_qp, int max_qp);
+	int initial_qp, int min_qp, int max_qp, bool frame_skip);
 int bind_h26x_to_capture(int ch, int vpss_group, int vpss_channel);
 int rebind_h26x_to_vpss(int ch);
 bool h26x_bound_to_vi(int ch);
@@ -251,5 +255,18 @@ bool capture_uses_user_frames();
 int capture_use_vi_frames();
 int submit_vpss_nv21(const uint8_t *nv21, int width, int height,
                     bool content_changed = false);
+
+/* Runtime state for the upper layers, implemented by each runtime (cvi_mpi or
+   V4L2). Read under MmfControlLock, like the calls above. */
+inline constexpr int kMaxCaptureChannels = 2;
+bool runtime_initialized();
+bool capture_channel_running(int ch);
+bool h26x_encoder_initialized(int ch);
+bool h26x_encoder_active();
+bool jpeg_encoder_initialized();
+int jpeg_capture_channel();
+/* Range the opened encoder signals in its VUI: 1 full, 0 limited (also when
+   absent, the normative default), -1 unknown. Call before binding. */
+int h26x_full_range(int ch);
 
 } // namespace onekvm::mmf

@@ -10,15 +10,12 @@
 #include <sys/ioctl.h>
 #include <unistd.h>
 
-#ifdef ARCH_CV182X
-#include <linux/cvi_vip_snsr.h>
-#include "cvi_comm_video.h"
-#else
-#include <linux/vi_snsr.h>
-#include <linux/cvi_comm_video.h>
-#endif
-#include "cvi_sns_ctrl.h"
 #include "lt6911_receiver.h"
+
+/* LT6911 bridge control over i2c-dev. Plain C: both the cvi_mpi sensor glue
+ * and the V4L2 backend use it. Functions return 0 or -1. */
+#define LT6911_MAX_PIPE 1
+#define LT6911_ERR(...) fprintf(stderr, "lt6911: " __VA_ARGS__)
 
 void onekvm_lt6911_get_active_size(uint32_t *width, uint32_t *height);
 
@@ -30,11 +27,11 @@ void onekvm_lt6911_get_active_size(uint32_t *width, uint32_t *height);
 
 /* Linux i2c-dev takes a 7-bit address.  The vendor source used 0x56, which is
  * the wire-format address including the R/W bit. */
-CVI_U8 lt6911_i2c_addr = 0x2b;
-const CVI_U32 lt6911_addr_byte = 1;
-const CVI_U32 lt6911_data_byte = 1;
+uint8_t lt6911_i2c_addr = 0x2b;
+const uint32_t lt6911_addr_byte = 1;
+const uint32_t lt6911_data_byte = 1;
 
-static int g_fd[VI_MAX_PIPE_NUM] = {[0 ... (VI_MAX_PIPE_NUM - 1)] = -1};
+static int g_fd[LT6911_MAX_PIPE] = {-1};
 static int g_pinmux_configured;
 static int g_chip;
 
@@ -59,9 +56,9 @@ void onekvm_lt6911_i2c_unlock(void)
 	pthread_mutex_unlock(&g_i2c_lock);
 }
 
-static int valid_pipe(VI_PIPE pipe)
+static int valid_pipe(int pipe)
 {
-	return pipe >= 0 && pipe < VI_MAX_PIPE_NUM;
+	return pipe >= 0 && pipe < LT6911_MAX_PIPE;
 }
 
 static int supported_active_size(uint32_t width, uint32_t height)
@@ -101,150 +98,156 @@ static void configure_pinmux_once(void)
 		return;
 	for (i = 0; i < sizeof(commands) / sizeof(commands[0]); ++i) {
 		if (system(commands[i]) != 0)
-			CVI_TRACE_SNS(CVI_DBG_ERR, "LT6911 pinmux command failed: %s\n", commands[i]);
+			LT6911_ERR("LT6911 pinmux command failed: %s\n", commands[i]);
 	}
 }
 
-int lt6911_i2c_init(VI_PIPE pipe)
+int lt6911_i2c_init(int pipe)
 {
 	char path[16];
 	int fd;
 
 	if (!valid_pipe(pipe)) {
-		CVI_TRACE_SNS(CVI_DBG_ERR, "invalid VI pipe %d\n", pipe);
-		return CVI_FAILURE;
+		LT6911_ERR("invalid VI pipe %d\n", pipe);
+		return -1;
 	}
 	if (g_fd[pipe] >= 0)
-		return CVI_SUCCESS;
+		return 0;
 
 	snprintf(path, sizeof(path), "/dev/i2c-%u", LT6911_I2C_DEV);
 	fd = open(path, O_RDWR | O_CLOEXEC);
 	if (fd < 0) {
-		CVI_TRACE_SNS(CVI_DBG_ERR, "open %s failed: %s\n", path, strerror(errno));
-		return CVI_FAILURE;
+		LT6911_ERR("open %s failed: %s\n", path, strerror(errno));
+		return -1;
 	}
 	if (ioctl(fd, I2C_SLAVE_FORCE, lt6911_i2c_addr) < 0) {
-		CVI_TRACE_SNS(CVI_DBG_ERR, "select LT6911 at 0x%02x failed: %s\n",
+		LT6911_ERR("select LT6911 at 0x%02x failed: %s\n",
 			lt6911_i2c_addr, strerror(errno));
 		close(fd);
-		return CVI_FAILURE;
+		return -1;
 	}
 	g_fd[pipe] = fd;
-	return CVI_SUCCESS;
+	return 0;
 }
 
-int lt6911_i2c_exit(VI_PIPE pipe)
+static int lt6911_i2c_present(int pipe, uint8_t address)
+{
+	if (!valid_pipe(pipe)) return -EINVAL;
+	return onekvm_lt6911_bus_present(g_fd[pipe], address);
+}
+
+int lt6911_i2c_exit(int pipe)
 {
 	if (!valid_pipe(pipe))
-		return CVI_FAILURE;
+		return -1;
 	if (g_fd[pipe] >= 0) {
 		close(g_fd[pipe]);
 		g_fd[pipe] = -1;
 	}
-	return CVI_SUCCESS;
+	return 0;
 }
 
-int lt6911_read_register(VI_PIPE pipe, int addr)
+int lt6911_read_register(int pipe, int addr)
 {
 	uint8_t reg = (uint8_t)addr;
 	uint8_t data;
 	ssize_t count;
 
 	if (!valid_pipe(pipe) || g_fd[pipe] < 0)
-		return CVI_FAILURE;
+		return -1;
 	count = write(g_fd[pipe], &reg, sizeof(reg));
 	if (count != (ssize_t)sizeof(reg)) {
-		CVI_TRACE_SNS(CVI_DBG_ERR, "LT6911 register select 0x%02x failed: %s\n",
+		LT6911_ERR("LT6911 register select 0x%02x failed: %s\n",
 			reg, count < 0 ? strerror(errno) : "short write");
-		return CVI_FAILURE;
+		return -1;
 	}
 	count = read(g_fd[pipe], &data, sizeof(data));
 	if (count != (ssize_t)sizeof(data)) {
-		CVI_TRACE_SNS(CVI_DBG_ERR, "LT6911 register read 0x%02x failed: %s\n",
+		LT6911_ERR("LT6911 register read 0x%02x failed: %s\n",
 			reg, count < 0 ? strerror(errno) : "short read");
-		return CVI_FAILURE;
+		return -1;
 	}
 	return data;
 }
 
-int lt6911_write_register(VI_PIPE pipe, int addr, int data)
+int lt6911_write_register(int pipe, int addr, int data)
 {
 	uint8_t transaction[2] = {(uint8_t)addr, (uint8_t)data};
 	ssize_t count;
 
 	if (!valid_pipe(pipe) || g_fd[pipe] < 0)
-		return CVI_FAILURE;
+		return -1;
 	count = write(g_fd[pipe], transaction, sizeof(transaction));
 	if (count != (ssize_t)sizeof(transaction)) {
-		CVI_TRACE_SNS(CVI_DBG_ERR, "LT6911 register write 0x%02x failed: %s\n",
+		LT6911_ERR("LT6911 register write 0x%02x failed: %s\n",
 			transaction[0], count < 0 ? strerror(errno) : "short write");
-		return CVI_FAILURE;
+		return -1;
 	}
-	return CVI_SUCCESS;
+	return 0;
 }
 
-static int lt6911_i2c_read(VI_PIPE pipe, int reg_addr)
+static int lt6911_i2c_read(int pipe, int reg_addr)
 {
 	if (lt6911_write_register(pipe, LT6911_I2C_BANK_ADDR,
-		(uint8_t)(reg_addr >> 8)) != CVI_SUCCESS)
-		return CVI_FAILURE;
+		(uint8_t)(reg_addr >> 8)) != 0)
+		return -1;
 	return lt6911_read_register(pipe, reg_addr & 0xff);
 }
 
-static int lt6911_i2c_write(VI_PIPE pipe, int reg_addr, int data)
+static int lt6911_i2c_write(int pipe, int reg_addr, int data)
 {
 	if (lt6911_write_register(pipe, LT6911_I2C_BANK_ADDR,
-		(uint8_t)(reg_addr >> 8)) != CVI_SUCCESS)
-		return CVI_FAILURE;
+		(uint8_t)(reg_addr >> 8)) != 0)
+		return -1;
 	return lt6911_write_register(pipe, reg_addr & 0xff, data);
 }
 
-static int lt6911_i2c_read_be16(VI_PIPE pipe, int reg_addr, uint32_t *value)
+static int lt6911_i2c_read_be16(int pipe, int reg_addr, uint32_t *value)
 {
 	int high = lt6911_i2c_read(pipe, reg_addr);
 	int low = lt6911_i2c_read(pipe, reg_addr + 1);
 
 	if (high < 0 || low < 0)
-		return CVI_FAILURE;
+		return -1;
 	*value = ((uint32_t)high << 8) | (uint32_t)low;
-	return CVI_SUCCESS;
+	return 0;
 }
 
-int lt6911_read(VI_PIPE pipe, int addr)
+int lt6911_read(int pipe, int addr)
 {
 	int data;
 	int cleanup;
 
 	pthread_mutex_lock(&g_i2c_lock);
-	if (lt6911_i2c_write(pipe, 0x80ee, 0x01) != CVI_SUCCESS)
+	if (lt6911_i2c_write(pipe, 0x80ee, 0x01) != 0)
 		goto error;
 	data = lt6911_i2c_read(pipe, addr);
 	cleanup = lt6911_i2c_write(pipe, 0x80ee, 0x00);
-	if (data < 0 || cleanup != CVI_SUCCESS)
+	if (data < 0 || cleanup != 0)
 		goto error;
 	pthread_mutex_unlock(&g_i2c_lock);
 	return data;
 
 error:
 	pthread_mutex_unlock(&g_i2c_lock);
-	return CVI_FAILURE;
+	return -1;
 }
 
-int lt6911_write(VI_PIPE pipe, int addr, int data)
+int lt6911_write(int pipe, int addr, int data)
 {
 	int result;
 	int cleanup;
 
 	pthread_mutex_lock(&g_i2c_lock);
-	if (lt6911_i2c_write(pipe, 0x80ee, 0x01) != CVI_SUCCESS) {
+	if (lt6911_i2c_write(pipe, 0x80ee, 0x01) != 0) {
 		pthread_mutex_unlock(&g_i2c_lock);
-		return CVI_FAILURE;
+		return -1;
 	}
 	result = lt6911_i2c_write(pipe, addr, data);
 	cleanup = lt6911_i2c_write(pipe, 0x80ee, 0x00);
 	pthread_mutex_unlock(&g_i2c_lock);
-	return result == CVI_SUCCESS && cleanup == CVI_SUCCESS
-		? CVI_SUCCESS : CVI_FAILURE;
+	return result == 0 && cleanup == 0
+		? 0 : -1;
 }
 
 struct onekvm_lt6911_input_timing {
@@ -260,7 +263,7 @@ struct onekvm_lt6911_input_timing {
 /* Caller owns g_i2c_lock. Never select a family from stale geometry. */
 static int sensor_read(void *context, uint16_t addr, uint8_t *data, size_t size)
 {
-    VI_PIPE pipe = *(VI_PIPE *)context;
+    int pipe = *(int *)context;
     for (size_t i = 0; i < size; ++i) {
         int value = lt6911_i2c_read(pipe, addr + i);
         if (value < 0) return -EIO;
@@ -271,21 +274,26 @@ static int sensor_read(void *context, uint16_t addr, uint8_t *data, size_t size)
 
 static int sensor_write(void *context, uint16_t addr, uint8_t value)
 {
-    return lt6911_i2c_write(*(VI_PIPE *)context, addr, value) == CVI_SUCCESS ? 0 : -EIO;
+    return lt6911_i2c_write(*(int *)context, addr, value) == 0 ? 0 : -EIO;
 }
 
-static int identify_chip(VI_PIPE pipe)
+static int sensor_present(void *context, uint8_t address)
 {
-    struct onekvm_lt6911_io io = { &pipe, sensor_read, sensor_write };
+    return lt6911_i2c_present(*(int *)context, address);
+}
+
+static int identify_chip(int pipe)
+{
+    struct onekvm_lt6911_io io = { &pipe, sensor_read, sensor_write, sensor_present };
     int chip = onekvm_lt6911_cached_chip();
-    if (chip != ONEKVM_LT6911_UNKNOWN) return CVI_SUCCESS;
-    if (onekvm_lt6911_identify(&io, &chip)) return CVI_FAILURE;
+    if (chip != ONEKVM_LT6911_UNKNOWN) return 0;
+    if (onekvm_lt6911_identify(&io, &chip)) return -1;
     onekvm_lt6911_cache_chip(chip);
-    return CVI_SUCCESS;
+    return 0;
 }
 
 /* Recheck both dimensions so a failed/torn sample never replaces geometry. */
-static int read_active_pair(VI_PIPE pipe, int width_reg, int height_reg,
+static int read_active_pair(int pipe, int width_reg, int height_reg,
                            uint32_t *width, uint32_t *height)
 {
     uint32_t w, h, verify_w, verify_h;
@@ -294,12 +302,12 @@ static int read_active_pair(VI_PIPE pipe, int width_reg, int height_reg,
         lt6911_i2c_read_be16(pipe, height_reg, &verify_h) ||
         lt6911_i2c_read_be16(pipe, width_reg, &verify_w) ||
         w != verify_w || h != verify_h)
-        return CVI_FAILURE;
+        return -1;
     *width = w; *height = h;
-    return CVI_SUCCESS;
+    return 0;
 }
 
-static int read_family_active(VI_PIPE pipe, int chip,
+static int read_family_active(int pipe, int chip,
                              struct onekvm_lt6911_input_timing *timing)
 {
     uint32_t w = 0, h = 0;
@@ -317,24 +325,24 @@ static int read_family_active(VI_PIPE pipe, int chip,
         w *= 2; /* D's capture geometry uses half-pixel horizontal units. */
         break;
     default:
-        return CVI_FAILURE;
+        return -1;
     }
     if (ret) return ret;
     /* A single nonzero dimension does not prove a live D/C/UXC input. */
     if (w && h) { timing->hdmi_width = w; timing->hdmi_height = h; }
-    return CVI_SUCCESS;
+    return 0;
 }
 
-int lt6911_get_input_timing_silent(VI_PIPE pipe,
+int lt6911_get_input_timing_silent(int pipe,
                                    struct onekvm_lt6911_input_timing *timing)
 {
     struct onekvm_lt6911_input_timing sample = {0};
     int ret;
-    if (!timing || !valid_pipe(pipe)) return CVI_FAILURE;
+    if (!timing || !valid_pipe(pipe)) return -1;
     memset(timing, 0, sizeof(*timing));
     if (onekvm_lt6911_cached_chip() == ONEKVM_LT6911_UNKNOWN)
-        return CVI_FAILURE; /* Discovery must finish before live polling. */
-    if (lt6911_i2c_init(pipe) != CVI_SUCCESS) return CVI_FAILURE;
+        return -1; /* Discovery must finish before live polling. */
+    if (lt6911_i2c_init(pipe) != 0) return -1;
     pthread_mutex_lock(&g_i2c_lock);
     ret = read_family_active(pipe, onekvm_lt6911_cached_chip(), &sample);
     if (!ret) *timing = sample;
@@ -342,16 +350,16 @@ int lt6911_get_input_timing_silent(VI_PIPE pipe,
     return ret;
 }
 
-static int lt6911_get_input_timing_impl(VI_PIPE pipe,
+static int lt6911_get_input_timing_impl(int pipe,
         struct onekvm_lt6911_input_timing *timing, int pcie_rx)
 {
     struct onekvm_lt6911_input_timing sample = {0};
-    int chip, ret = CVI_FAILURE, cleanup = 0;
+    int chip, ret = -1, cleanup = 0;
     uint32_t rx_half_width = 0;
-    if (!timing || !valid_pipe(pipe)) return CVI_FAILURE;
+    if (!timing || !valid_pipe(pipe)) return -1;
     memset(timing, 0, sizeof(*timing));
     configure_pinmux_once();
-    if (lt6911_i2c_init(pipe) != CVI_SUCCESS) return CVI_FAILURE;
+    if (lt6911_i2c_init(pipe) != 0) return -1;
     pthread_mutex_lock(&g_i2c_lock);
     if (identify_chip(pipe)) goto out;
     chip = onekvm_lt6911_cached_chip();
@@ -370,7 +378,7 @@ static int lt6911_get_input_timing_impl(VI_PIPE pipe,
                               &rx_half_width, &sample.uxc_rx_height);
         if (!ret) {
             int signal = lt6911_i2c_read(pipe, 0x86a3);
-            if (signal < 0) ret = CVI_FAILURE;
+            if (signal < 0) ret = -1;
             else { sample.uxc_rx_width = rx_half_width * 2;
                    sample.uxc_rx_signal = (uint32_t)signal; }
         }
@@ -379,25 +387,25 @@ close:
     if (chip != ONEKVM_LT6911_D)
         cleanup = lt6911_i2c_write(pipe, 0x80ee, 0);
     if (!ret && !cleanup) *timing = sample;
-    else ret = CVI_FAILURE;
+    else ret = -1;
 out:
     pthread_mutex_unlock(&g_i2c_lock);
     return ret;
 }
 
-int lt6911_get_input_timing(VI_PIPE pipe,
+int lt6911_get_input_timing(int pipe,
 			    struct onekvm_lt6911_input_timing *timing)
 {
 	return lt6911_get_input_timing_impl(pipe, timing, 0);
 }
 
-int lt6911_get_input_timing_pcie(VI_PIPE pipe,
+int lt6911_get_input_timing_pcie(int pipe,
 				 struct onekvm_lt6911_input_timing *timing)
 {
 	return lt6911_get_input_timing_impl(pipe, timing, 1);
 }
 
-int lt6911_get_input_size(VI_PIPE pipe, uint32_t *width, uint32_t *height)
+int lt6911_get_input_size(int pipe, uint32_t *width, uint32_t *height)
 {
 	struct onekvm_lt6911_input_timing timing;
 	int csi_ok;
@@ -406,9 +414,9 @@ int lt6911_get_input_size(VI_PIPE pipe, uint32_t *width, uint32_t *height)
 	uint64_t hdmi_px;
 
 	if (width == NULL || height == NULL)
-		return CVI_FAILURE;
-	if (lt6911_get_input_timing(pipe, &timing) != CVI_SUCCESS)
-		return CVI_FAILURE;
+		return -1;
+	if (lt6911_get_input_timing(pipe, &timing) != 0)
+		return -1;
 
 	csi_ok = supported_active_size(timing.csi_width, timing.csi_height);
 	hdmi_ok = supported_active_size(timing.hdmi_width, timing.hdmi_height);
@@ -418,25 +426,25 @@ int lt6911_get_input_size(VI_PIPE pipe, uint32_t *width, uint32_t *height)
 		if (hdmi_px > csi_px) {
 			*width = timing.hdmi_width;
 			*height = timing.hdmi_height;
-			return CVI_SUCCESS;
+			return 0;
 		}
 		*width = timing.csi_width;
 		*height = timing.csi_height;
-		return CVI_SUCCESS;
+		return 0;
 	}
 	if (hdmi_ok) {
 		*width = timing.hdmi_width;
 		*height = timing.hdmi_height;
-		return CVI_SUCCESS;
+		return 0;
 	}
 	if (csi_ok) {
 		*width = timing.csi_width;
 		*height = timing.csi_height;
-		return CVI_SUCCESS;
+		return 0;
 	}
 	*width = 0;
 	*height = 0;
-	return CVI_SUCCESS;
+	return 0;
 }
 
 int lt6911_get_capture_size(uint32_t *width, uint32_t *height)
@@ -446,82 +454,82 @@ int lt6911_get_capture_size(uint32_t *width, uint32_t *height)
 
 int lt6911_kick_hdmi(void)
 {
-	const VI_PIPE pipe = 0;
+	const int pipe = 0;
 	int cleanup;
 
 	configure_pinmux_once();
-	if (lt6911_i2c_init(pipe) != CVI_SUCCESS)
-		return CVI_FAILURE;
+	if (lt6911_i2c_init(pipe) != 0)
+		return -1;
 	/* D283=0x11 starts HDMI timing measurement.  Do this once when
 	   opening VI, never from the live watcher. */
 	pthread_mutex_lock(&g_i2c_lock);
 	if (identify_chip(pipe)) {
 		pthread_mutex_unlock(&g_i2c_lock);
-		return CVI_FAILURE;
+		return -1;
 	}
 	if (onekvm_lt6911_cached_chip() == ONEKVM_LT6911_D) {
 		pthread_mutex_unlock(&g_i2c_lock);
-		return CVI_SUCCESS;
+		return 0;
 	}
-	if (lt6911_i2c_write(pipe, 0x80ee, 0x01) != CVI_SUCCESS)
+	if (lt6911_i2c_write(pipe, 0x80ee, 0x01) != 0)
 		goto error;
-	if (lt6911_i2c_write(pipe, 0xd283, 0x11) != CVI_SUCCESS)
+	if (lt6911_i2c_write(pipe, 0xd283, 0x11) != 0)
 		goto error;
 	usleep(50000);
 	cleanup = lt6911_i2c_write(pipe, 0x80ee, 0x00);
 	pthread_mutex_unlock(&g_i2c_lock);
-	return cleanup == CVI_SUCCESS ? CVI_SUCCESS : CVI_FAILURE;
+	return cleanup == 0 ? 0 : -1;
 error:
 	(void)lt6911_i2c_write(pipe, 0x80ee, 0x00);
 	pthread_mutex_unlock(&g_i2c_lock);
-	return CVI_FAILURE;
+	return -1;
 }
 
 static int lt6911_start_csi_impl(int remeasure)
 {
-	const VI_PIPE pipe = 0;
+	const int pipe = 0;
 	int cleanup;
 
 	configure_pinmux_once();
-	if (lt6911_i2c_init(pipe) != CVI_SUCCESS)
-		return CVI_FAILURE;
-	/* Arm CSI before SAMPLE_PLAT_VI_INIT. A normal PCIe mode change has
+	if (lt6911_i2c_init(pipe) != 0)
+		return -1;
+	/* Arm CSI before VI starts. A normal PCIe mode change has
 	   already measured two matching receiver timings, so do not restart
 	   HDMI measurement with D283. Cold start and recovery still measure.
 	   Do not write 0x805a=0x88 after StartViChn: that zeros CSIBDG width. */
 	pthread_mutex_lock(&g_i2c_lock);
 	if (identify_chip(pipe)) {
 		pthread_mutex_unlock(&g_i2c_lock);
-		return CVI_FAILURE;
+		return -1;
 	}
 	if (onekvm_lt6911_cached_chip() == ONEKVM_LT6911_D) {
 		pthread_mutex_unlock(&g_i2c_lock);
-		return CVI_SUCCESS;
+		return 0;
 	}
-	if (lt6911_i2c_write(pipe, 0x80ee, 0x01) != CVI_SUCCESS)
+	if (lt6911_i2c_write(pipe, 0x80ee, 0x01) != 0)
 		goto error;
-	if (lt6911_i2c_write(pipe, 0x805a, 0x80) != CVI_SUCCESS)
+	if (lt6911_i2c_write(pipe, 0x805a, 0x80) != 0)
 		goto error;
-	if (lt6911_i2c_write(pipe, 0x8010, 0x00) != CVI_SUCCESS)
+	if (lt6911_i2c_write(pipe, 0x8010, 0x00) != 0)
 		goto error;
 	/* The cold/recovery measurement keeps its vendor settling intervals.
 	 * A measured mode can close the gate and start VI immediately. */
 	if (remeasure) {
 		usleep(100000);
-		if (lt6911_i2c_write(pipe, 0xd283, 0x11) != CVI_SUCCESS)
+		if (lt6911_i2c_write(pipe, 0xd283, 0x11) != 0)
 			goto error;
 		usleep(50000);
 	}
 	cleanup = lt6911_i2c_write(pipe, 0x80ee, 0x00);
 	pthread_mutex_unlock(&g_i2c_lock);
-	if (cleanup != CVI_SUCCESS)
-		return CVI_FAILURE;
+	if (cleanup != 0)
+		return -1;
 	fprintf(stderr, "OneKVM: LT6911 CSI armed\n");
-	return CVI_SUCCESS;
+	return 0;
 error:
 	(void)lt6911_i2c_write(pipe, 0x80ee, 0x00);
 	pthread_mutex_unlock(&g_i2c_lock);
-	return CVI_FAILURE;
+	return -1;
 }
 
 int lt6911_start_csi(void)
@@ -534,23 +542,23 @@ int lt6911_start_csi_with_cached_timing(void)
 	return lt6911_start_csi_impl(0);
 }
 
-int lt6911_probe(VI_PIPE pipe)
+int lt6911_probe(int pipe)
 {
     int ret;
     configure_pinmux_once();
-    if (lt6911_i2c_init(pipe) != CVI_SUCCESS) return CVI_FAILURE;
+    if (lt6911_i2c_init(pipe) != 0) return -1;
     pthread_mutex_lock(&g_i2c_lock);
     ret = identify_chip(pipe);
     pthread_mutex_unlock(&g_i2c_lock);
     return ret;
 }
 
-void lt6911_init(VI_PIPE pipe)
+void lt6911_init(int pipe)
 {
 	(void)lt6911_i2c_init(pipe);
 }
 
-void lt6911_exit(VI_PIPE pipe)
+void lt6911_exit(int pipe)
 {
 	(void)lt6911_i2c_exit(pipe);
 }

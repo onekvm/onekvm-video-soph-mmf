@@ -159,11 +159,19 @@ bool pcie_hdmi_blank_after_stall(Source *source) {
     return ++source->early_blank_samples >= 2;
 }
 
-bool read_hdmi_input(onekvm::InputResolution *resolution) {
+bool read_hdmi_input(onekvm::InputResolution *resolution,
+                     bool accept_early_rx = false,
+                     onekvm::InputResolution *raw_csi = nullptr,
+                     onekvm::InputResolution *raw_hdmi = nullptr) {
     onekvm::InputResolution csi{};
     onekvm::InputResolution hdmi{};
-    if (resolution == nullptr || !read_hdmi_timing(&csi, &hdmi))
+    if (resolution == nullptr ||
+        !read_hdmi_timing(&csi, &hdmi, false, accept_early_rx))
         return false;
+    if (raw_csi != nullptr)
+        *raw_csi = csi;
+    if (raw_hdmi != nullptr)
+        *raw_hdmi = hdmi;
     const auto chosen = onekvm::choose_vi_receiver_size(csi, hdmi, {});
     if (chosen.width != 0) {
         *resolution = chosen;
@@ -178,9 +186,11 @@ bool read_hdmi_input(onekvm::InputResolution *resolution) {
 }
 
 bool read_supported_input_resolution(onekvm::InputResolution *resolution,
-                                     int fps) {
+                                     int fps, bool accept_early_rx = false,
+                                     onekvm::InputResolution *raw_csi = nullptr,
+                                     onekvm::InputResolution *raw_hdmi = nullptr) {
     onekvm::InputResolution value{};
-    if (!read_hdmi_input(&value) ||
+    if (!read_hdmi_input(&value, accept_early_rx, raw_csi, raw_hdmi) ||
         !onekvm::supported_input_request(value, fps))
         return false;
     *resolution = value;
@@ -217,22 +227,33 @@ void remember_hdmi_input(onekvm::InputResolution value) {
     std::fclose(file);
 }
 
-onekvm::InputResolution initial_input_resolution(int fps) {
+onekvm::InputResolution initial_input_resolution(int fps, bool *measured) {
+    *measured = false;
     const bool pcie = probe_edid_board().board == NanoKVMBoard::PCIe;
     const auto deadline = std::chrono::steady_clock::now() +
         kInitialResolutionProbeWindow;
     onekvm::InputResolution previous{};
     onekvm::InputResolution best{};
+    onekvm::InputResolution raw_csi{};
+    onekvm::InputResolution raw_hdmi{};
     unsigned stable_samples = 0;
+    unsigned samples = 0;
     do {
         onekvm::InputResolution sample{};
-        if (read_supported_input_resolution(&sample, fps)) {
+        ++samples;
+        /* VI has not started yet, so the PCIe receiver's early active size
+           is safe to use here; it appears before 0x86a3 reports a lock. Two
+           matching samples are still required below. */
+        if (read_supported_input_resolution(&sample, fps, pcie,
+                                            &raw_csi, &raw_hdmi)) {
             if (onekvm::resolution_pixels(sample) >
                 onekvm::resolution_pixels(best))
                 best = sample;
             if (sample == previous) {
-                if (++stable_samples >= 2)
+                if (++stable_samples >= 2) {
+                    *measured = true;
                     return sample;
+                }
             } else {
                 previous = sample;
                 stable_samples = 1;
@@ -247,6 +268,10 @@ onekvm::InputResolution initial_input_resolution(int fps) {
     const onekvm::InputResolution stable =
         (previous.width != 0 && stable_samples >= 2) ? previous
                                                      : onekvm::InputResolution{};
+    std::fprintf(stderr,
+                 "OneKVM: initial HDMI probe found no stable timing after %u samples; last CSI %ux%u HDMI %ux%u\n",
+                 samples, raw_csi.width, raw_csi.height,
+                 raw_hdmi.width, raw_hdmi.height);
     /* The PCIe fixture is commonly fed by a splitter while the source is
        still in BIOS.  That source mode is 640x480; LT6911 can report zero
        counters until its CSI receiver is armed with the same geometry.  A
@@ -254,6 +279,7 @@ onekvm::InputResolution initial_input_resolution(int fps) {
        no-frame state.  Prefer a HDMI reading from this probe, then the last
        live mode from this boot, then 640x480.  Cube/Lite still default to
        1080p.  If a real timing appears later, the HDMI watcher rebuilds. */
+    *measured = onekvm::supported_input_resolution(best);
     return onekvm::pick_initial_vi_resolution(
         pcie, stable, best, recalled_hdmi_input());
 }
@@ -357,6 +383,7 @@ int close_source(Source *source) {
     source->capture_live.store(false, std::memory_order_relaxed);
     source->capture_startup.reset();
     source->preserved_locked_csi = false;
+    source->initial_input_measured = false;
     source->no_signal_frame.clear();
     return 0;
 }
@@ -418,11 +445,12 @@ int open_source(Source *source, const onekvm_video_source_config_v1 *config,
                      "OneKVM: preserving locked LT6911 CSI %ux%u\n",
                      locked_receiver.width, locked_receiver.height);
     }
+    bool input_measured = false;
     const onekvm::InputResolution input = requested_input != nullptr &&
         onekvm::supported_input_request(*requested_input, requested_fps)
         ? *requested_input
         : preserve_locked_csi ? locked_receiver
-        : initial_input_resolution(requested_fps);
+        : initial_input_resolution(requested_fps, &input_measured);
     const auto output = config->resolution == 0 && placeholder_output != nullptr &&
             onekvm::supported_output_resolution(*placeholder_output)
         ? *placeholder_output
@@ -482,6 +510,7 @@ int open_source(Source *source, const onekvm_video_source_config_v1 *config,
     source->channel = channel;
     source->initialized = true;
     source->preserved_locked_csi = preserve_locked_csi;
+    source->initial_input_measured = input_measured;
     source->capture_width = width;
     source->capture_height = height;
     source->config = *config;
@@ -781,7 +810,10 @@ int rebuild_for_hdmi_timing(Source *source, bool force_probe, char *error,
     /* Blank counters alone cannot justify replacing a geometry obtained
        after a full bridge reset. The LT6911UXC reports 0x0 when VI is
        detached for the placeholder, even with a valid 640/720 input. */
+    /* Only a guessed 640x480 bootstrap may grow blindly. A cold-start
+       probe that measured 640x480 is a real BIOS/VGA source. */
     const bool allow_blank_bootstrap_grow =
+        !source->initial_input_measured &&
         source->hdmi_blank_reset_count == 0 &&
         !source->hdmi_blank_rearm_attempted &&
         onekvm::is_pcie_bootstrap_resolution(current);

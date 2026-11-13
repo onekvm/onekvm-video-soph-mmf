@@ -107,6 +107,7 @@ struct ONEKVM_VIDEO_INTERNAL Source {
     int channel = -1;
     bool initialized = false;
     bool preserved_locked_csi = false;
+    bool initial_input_measured = false;
     bool frame_pending = false;
     bool frame_release_pending = false;
     uint64_t frame_token = 0;
@@ -187,6 +188,8 @@ struct ONEKVM_VIDEO_INTERNAL Encoder {
     bool placeholder_need_key = false;
     unsigned placeholder_idr_tries = 0;
     bool placeholder_logged = false;
+    /* Monotonic time the next no-signal still may be submitted. */
+    uint64_t placeholder_due_ns = 0;
     bool request_keyframe = false;
     bool frame_pending = false;
     bool packet_borrowed = false;

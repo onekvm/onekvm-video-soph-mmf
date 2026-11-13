@@ -23,13 +23,15 @@ OneKVM Backend ABI，并把厂商 MMF 实现留在独立动态库里，避免 `o
 [docs/zh/video-pipeline.md](docs/zh/video-pipeline.md)。ABI 见
 [docs/zh/abi.md](docs/zh/abi.md)。
 
-后端以单个动态库部署：
+后端以动态库部署：
 
 ```text
-/usr/lib/onekvm/video-backends/soph-mmf.so
+/usr/lib/onekvm/video-backends/soph-mmf.so    # cvi_mpi 运行时，设备描述符默认加载
+/usr/lib/onekvm/video-backends/soph-v4l2.so   # V4L2 运行时，不依赖 cvi_mpi
 ```
 
-由 `onekvm-video-soph-mmf` 安装，OneKVM 在需要时动态加载。本项目使用独立
+由 `onekvm-video-soph-mmf` 安装，OneKVM 在需要时动态加载。切换方法见
+[v4l2-backend.md](docs/zh/v4l2-backend.md)。本项目使用独立
 CMake，不依赖 MaixCDK。
 
 ## 分辨率处理
@@ -86,6 +88,7 @@ bind 线程回收以及 5.15/6.18 兼容补丁在模块配方里，不在本仓�
 ```sh
 cmake -S . -B build/host \
   -DONEKVM_BUILD_MMF_BACKEND=OFF \
+  -DONEKVM_BUILD_V4L2_BACKEND=OFF \
   -DBUILD_TESTING=ON \
   -DCMAKE_BUILD_TYPE=Release
 cmake --build build/host --parallel
@@ -128,8 +131,8 @@ ONEKVM_DEBUG_WORKTREES=onekvm-video-soph-mmf \
 `onekvm.service`。未经明确授权不要改 U-Boot、内核或分区。
 
 设备端 smoke（`tests/bound-reader-stress.cpp`、
-`tests/managed-snapshot-smoke.cpp`）只有同时打开 `ONEKVM_BUILD_MMF_BACKEND`
-和 `BUILD_TESTING` 才会编。OE 配方把 `-DBUILD_TESTING=OFF` 写死，debug
+`tests/managed-snapshot-smoke.cpp`）只有打开 `BUILD_TESTING` 且至少打开
+`ONEKVM_BUILD_MMF_BACKEND`、`ONEKVM_BUILD_V4L2_BACKEND` 之一才会编。OE 配方把 `-DBUILD_TESTING=OFF` 写死，debug
 worktree 不会改这个开关。需要这两份二进制时再覆盖 `EXTRA_OECMAKE`。
 
 `tools/lt6911-resolution-probe.c` 不是 CMake 目标。量产 `.so` 除两个 query
