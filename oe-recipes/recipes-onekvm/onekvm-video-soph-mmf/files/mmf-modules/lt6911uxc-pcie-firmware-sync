@@ -31,14 +31,20 @@ if [ ! -x "$I2C" ] || [ ! -c /dev/i2c-4 ]; then
   log "i2c-4 is not available"
   exit 1
 fi
-core_state=$(systemctl is-active onekvm.service 2>/dev/null || true)
-case $core_state in
-  inactive|failed|unknown|'') ;;
-  *)
-    log "onekvm.service is $core_state; refusing to touch the bridge"
-    exit 1
-    ;;
-esac
+# Core owns the bridge while it runs. Look for its process instead of asking
+# PID 1, which answers slowly while it starts units at boot.
+core_running() {
+  for comm in /proc/[0-9]*/comm; do
+    IFS= read -r name 2>/dev/null <"$comm" || continue
+    [ "$name" != onekvm-server ] || return 0
+  done
+  return 1
+}
+if core_running; then
+  log "onekvm-server is running; refusing to touch the bridge"
+  exit 1
+fi
+dump=/usr/libexec/onekvm/lt6911-flash-dump
 
 wr() { "$I2C" -y -f 4 w2@0x2b "$1" "$2" >/dev/null; }
 bank() { wr 0xff "$1"; }
@@ -117,8 +123,16 @@ reload_bridge() {
   sleep 1
 }
 
+# Sets $normalized to the bytes as "aa bb ..." without forking at boot.
 normalize() {
-  printf '%s\n' "$1" | tr 'A-F' 'a-f' | tr '\n' ' ' | sed 's/0x//g; s/  */ /g; s/^ //; s/ $//'
+  normalized=
+  for byte in $1; do
+    byte=${byte#0[xX]}
+    case $byte in
+      *[A-F]*) byte=$(printf '%s' "$byte" | tr 'A-F' 'a-f') ;;
+    esac
+    normalized="$normalized${normalized:+ }$byte"
+  done
 }
 
 # A board label is not a chip identity. Identify the silicon as the capture
@@ -138,7 +152,8 @@ probe_d() {
   d_id=$(read_id 0xe1 2) || d_id=
   bank 0xe0
   wr 0xee 0x00
-  [ "$(normalize "$d_id")" = '21 02' ]
+  normalize "$d_id"
+  [ "$normalized" = '21 02' ]
 }
 d_first=false
 if ! present 0x2c && ! present 0x44; then
@@ -152,12 +167,14 @@ bank 0x80
 wr 0xee 0x01
 trap close_flash EXIT
 c_id=$(read_id 0xa0 2) || { log "cannot read chip ID; refusing firmware access"; exit 1; }
-if [ "$(normalize "$c_id")" = '16 05' ]; then
+normalize "$c_id"
+if [ "$normalized" = '16 05' ]; then
   log "LT6911C bridge; no PCIe firmware update needed"
   exit 0
 fi
 chip_id=$(read_id 0x81 3) || { log "cannot read chip ID; refusing firmware access"; exit 1; }
-chip_id=$(normalize "$chip_id")
+normalize "$chip_id"
+chip_id=$normalized
 case $chip_id in
   '17 04 83') ;;
   17\ 04\ [0-9a-f][0-9a-f])
@@ -171,7 +188,8 @@ case $chip_id in
       log "LT6911D bridge; no PCIe firmware update needed"
       exit 0
     fi
-    log "unknown bridge chip (UXC '$chip_id', D '$(normalize "${d_id-}")'); refusing firmware access"
+    normalize "${d_id-}"
+    log "unknown bridge chip (UXC '$chip_id', D '$normalized'); refusing firmware access"
     exit 1
     ;;
 esac
@@ -183,13 +201,51 @@ expect_2040="04 7e 00 12 54 de 90 b0 9b e0 ff 7e 00 64 80 70 50 90 b0 9c e0 70 4
 expect_5800="64 ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff"
 
 pages="1a60 1a80 1ae0 2040 5800"
+# The firmware tools read every page twice in one process. Each i2ctransfer
+# fork costs tens of milliseconds while units start, so the per-command reads
+# below remain only for tools without the page reader (exit status 2).
+fast=0
+if [ -x "$dump" ]; then
+  set --
+  for name in $pages; do
+    set -- "$@" "0x$name"
+  done
+  status=0
+  page_data=$("$dump" uxc-pages /dev/i2c-4 "$@") || status=$?
+  case $status in
+    0) fast=1 ;;
+    2) ;;
+    *) log "page reader failed with status $status"; exit 1 ;;
+  esac
+fi
+if [ "$fast" -eq 1 ]; then
+  while read -r offset bytes; do
+    case $offset in
+      ''|*[!0-9a-f]*) continue ;;
+    esac
+    eval "page_$offset=\$bytes"
+  done <<PAGES
+$page_data
+PAGES
+else
+  open_flash
+fi
 mismatch=0
 programmable=1
-open_flash
 for name in $pages; do
   eval "expect=\$expect_$name"
-  got=$(normalize "$(read_page "0x$name")")
-  expect_n=$(normalize "$expect")
+  if [ "$fast" -eq 1 ]; then
+    eval "got=\${page_$name-}"
+    if [ -z "$got" ]; then
+      log "page reader returned no data for 0x$name"
+      exit 1
+    fi
+  else
+    normalize "$(read_page "0x$name")"
+    got=$normalized
+  fi
+  normalize "$expect"
+  expect_n=$normalized
   if [ "$got" = "$expect_n" ]; then
     continue
   fi
@@ -217,7 +273,6 @@ fi
 # NOR-compatible bytes alone do not identify firmware. Only the audited
 # program may receive this device-specific patch. Full dump verifies two
 # independent reads and saves a durable backup before any programming.
-dump=/usr/libexec/onekvm/lt6911-flash-dump
 [ -x "$dump" ] || { log "firmware verifier unavailable; left unchanged"; exit 1; }
 backup_dir=/var/lib/onekvm/capture-firmware/lt6911uxc
 mkdir -p "$backup_dir"
@@ -252,8 +307,10 @@ for name in $pages; do
   eval "expect=\$expect_$name"
   # shellcheck disable=SC2086
   program_page "0x$name" $expect
-  got=$(normalize "$(read_page "0x$name")")
-  if [ "$got" != "$(normalize "$expect")" ]; then
+  normalize "$(read_page "0x$name")"
+  got=$normalized
+  normalize "$expect"
+  if [ "$got" != "$normalized" ]; then
     log "verify failed at 0x$name"
     exit 1
   fi

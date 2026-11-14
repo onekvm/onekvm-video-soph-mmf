@@ -27,15 +27,23 @@ case "$1" in
 esac
 ''')
         devmem.chmod(0o755)
+        self.proc = self.work / 'proc'
+        (self.proc / '1').mkdir(parents=True)
+        (self.proc / '1/comm').write_text('systemd\n')
+        self.dump = self.work / 'dump'
         self.hook = self.work / 'hook'
         self.hook.write_text(HOOK.read_text()
                              .replace('/run/onekvm/hardware.json', str(self.hardware))
                              .replace('/dev/i2c-4', str(self.work / 'no-bus'))
-                             .replace('/usr/sbin/i2ctransfer', str(self.work / 'no-transfer')))
+                             .replace('/usr/sbin/i2ctransfer', str(self.work / 'no-transfer'))
+                             .replace('/proc/[0-9]*/comm', str(self.proc) + '/[0-9]*/comm')
+                             .replace('/usr/libexec/onekvm/lt6911-flash-dump', str(self.dump)))
 
     def run_hook(self, **env):
+        # ONEKVM_TEST_SHELL="busybox sh" (or bash, as on the device) picks the shell.
         self.trace.unlink(missing_ok=True)
-        return subprocess.run(['sh', str(self.hook)], capture_output=True, text=True,
+        shell = os.environ.get('ONEKVM_TEST_SHELL', 'sh').split()
+        return subprocess.run(shell + [str(self.hook)], capture_output=True, text=True,
                               env=dict(os.environ, PATH=str(self.work) + ':' + os.environ['PATH'],
                                        TRACE=str(self.trace), **env))
 
@@ -100,9 +108,28 @@ esac
         for name, content in pages.items():
             (self.work / name).write_text(content + '\n')
         (self.work / '0000').write_text('00 ' * 32 + '\n')
+        # The boot path must not wait for PID 1.
         systemctl = self.work / 'systemctl'
-        systemctl.write_text('#!/bin/sh\necho "${CORE_STATE:-inactive}"\n')
+        systemctl.write_text('#!/bin/sh\necho "systemctl $*" >>"$TRACE"\nexit 97\n')
         systemctl.chmod(0o755)
+
+    def page_reader(self, status=0):
+        # Firmware tools with the page reader print "OFFSET BYTE..." lines.
+        self.dump.write_text(f'''#!/bin/sh
+echo "dump $*" >>"$TRACE"
+case "$1" in
+  uxc-pages)
+    [ {status} = 0 ] || exit {status}
+    shift 2
+    for offset; do
+      name=${{offset#0x}}
+      printf '%s %s\\n' "$name" "$(cat "$PAGES/$name")"
+    done ;;
+  uxc) cp "$UNKNOWN_FIRMWARE" "$3" ;;
+  *) exit 99 ;;
+esac
+''')
+        self.dump.chmod(0o755)
 
     def test_non_uxc_and_failed_reads_never_access_flash(self):
         self.enable_bridge()
@@ -133,12 +160,12 @@ esac
 
     def test_starting_or_running_core_owns_the_bridge(self):
         self.enable_bridge()
-        for state in ['active', 'activating', 'reloading', 'deactivating']:
-            with self.subTest(state=state):
-                result = self.run_hook(PAGES=str(self.work), CORE_STATE=state)
-                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-                self.assertIn(f'onekvm.service is {state}', result.stdout)
-                self.assertNotIn('i2c', self.trace.read_text() if self.trace.exists() else '')
+        (self.proc / '635').mkdir()
+        (self.proc / '635/comm').write_text('onekvm-server\n')
+        result = self.run_hook(PAGES=str(self.work))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('onekvm-server is running', result.stdout)
+        self.assertNotIn('i2c', self.trace.read_text() if self.trace.exists() else '')
 
     def test_factory_d_address_map_never_opens_uxc_window(self):
         self.enable_bridge()
@@ -173,18 +200,59 @@ esac
         (self.work / '1a60').write_text('ff ' * 32 + '\n')
         firmware = self.work / 'unrecognized.bin'
         firmware.write_bytes(bytes(131072))
-        dump = self.work / 'dump'
-        dump.write_text('#!/bin/sh\ncp "$UNKNOWN_FIRMWARE" "$3"\n')
-        dump.chmod(0o755)
         self.hook.write_text(self.hook.read_text()
-                             .replace('/usr/libexec/onekvm/lt6911-flash-dump', str(dump))
                              .replace('/var/lib/onekvm/capture-firmware/lt6911uxc',
                                       str(self.work / 'backups')))
-        result = self.run_hook(PAGES=str(self.work), UNKNOWN_FIRMWARE=str(firmware))
+        # Older firmware tools reject the page reader with status 2; the hook
+        # then reads each page itself. Both paths reach the same decision.
+        for status in [2, 0]:
+            with self.subTest(status=status):
+                self.page_reader(status)
+                result = self.run_hook(PAGES=str(self.work), UNKNOWN_FIRMWARE=str(firmware))
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn('page 0x1a60 differs', result.stdout)
+                self.assertIn('unrecognized firmware program', result.stdout)
+                calls = self.trace.read_text()
+                self.assertNotIn('w33@', calls)
+                self.assertEqual('0x5f r32' in calls, status == 2)
+                self.assertFalse((self.work / 'backups/before-stage6.bin').exists())
+
+    def test_page_reader_checks_the_image_in_one_process(self):
+        self.enable_bridge()
+        self.page_reader()
+        result = self.run_hook(PAGES=str(self.work))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn('unrecognized firmware program', result.stdout)
+        self.assertIn('stage6 image already present', result.stdout)
+        calls = self.trace.read_text().splitlines()
+        self.assertEqual([c for c in calls if c.startswith('dump ')],
+                         ['dump uxc-pages %s 0x1a60 0x1a80 0x1ae0 0x2040 0x5800' % (self.work / 'no-bus')])
+        self.assertFalse([c for c in calls if '0x5a' in c or '0x5f' in c or 'w33@' in c])
+        self.assertFalse([c for c in calls if c.startswith('systemctl')])
+
+    def test_page_reader_failures_stop_without_programming(self):
+        self.enable_bridge()
+        self.page_reader(1)
+        result = self.run_hook(PAGES=str(self.work))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('page reader failed with status 1', result.stdout)
+        (self.work / '2040').unlink()
+        self.page_reader()
+        result = self.run_hook(PAGES=str(self.work))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('no data for 0x2040', result.stdout)
         self.assertNotIn('w33@', self.trace.read_text())
-        self.assertFalse((self.work / 'backups/before-stage6.bin').exists())
+
+    def test_tool_without_page_reader_falls_back_to_page_reads(self):
+        # Released firmware tools answer "uxc-pages" with their usage and exit 2.
+        self.enable_bridge()
+        self.page_reader(2)
+        result = self.run_hook(PAGES=str(self.work))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('stage6 image already present', result.stdout)
+        calls = self.trace.read_text()
+        self.assertIn('dump uxc-pages', calls)
+        self.assertIn('0x5a 0x90', calls)
+        self.assertNotIn('w33@', calls)
 
 
 if __name__ == '__main__':
