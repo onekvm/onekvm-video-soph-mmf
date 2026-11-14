@@ -40,8 +40,10 @@ esac
                              .replace('/usr/libexec/onekvm/lt6911-flash-dump', str(self.dump)))
 
     def run_hook(self, **env):
+        # ONEKVM_TEST_SHELL="busybox sh" (or bash, as on the device) picks the shell.
         self.trace.unlink(missing_ok=True)
-        return subprocess.run(['sh', str(self.hook)], capture_output=True, text=True,
+        shell = os.environ.get('ONEKVM_TEST_SHELL', 'sh').split()
+        return subprocess.run(shell + [str(self.hook)], capture_output=True, text=True,
                               env=dict(os.environ, PATH=str(self.work) + ':' + os.environ['PATH'],
                                        TRACE=str(self.trace), **env))
 
@@ -239,6 +241,18 @@ esac
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn('no data for 0x2040', result.stdout)
         self.assertNotIn('w33@', self.trace.read_text())
+
+    def test_tool_without_page_reader_falls_back_to_page_reads(self):
+        # Released firmware tools answer "uxc-pages" with their usage and exit 2.
+        self.enable_bridge()
+        self.page_reader(2)
+        result = self.run_hook(PAGES=str(self.work))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('stage6 image already present', result.stdout)
+        calls = self.trace.read_text()
+        self.assertIn('dump uxc-pages', calls)
+        self.assertIn('0x5a 0x90', calls)
+        self.assertNotIn('w33@', calls)
 
 
 if __name__ == '__main__':
