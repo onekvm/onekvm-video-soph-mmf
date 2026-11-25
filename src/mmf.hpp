@@ -95,6 +95,9 @@ struct RateControl {
    LT6911.  This is intentionally separate from initialize(): the bridge must
    be armed after stale VI teardown but before the new VI starts. */
 int reclaim_stale_runtime(void);
+/* True once the multimedia kernel interface exists. Never touches LT6911,
+   so a caller can poll it while the modules are still loading. */
+bool runtime_present(void);
 int initialize(void);
 int shutdown(void);
 

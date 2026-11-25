@@ -12,6 +12,15 @@ modules="\
     soph_mipi_rx soph_snsr_i2c soph_vi soph_vpss \
     soph_vc_driver"
 
+# Core may already be running. Its video source does not open, and so does
+# not read LT6911, while this lock is held: from the first module until the
+# bridge is prepared below. Firmware tools and EDID writes use the same lock.
+exec 9>/run/lock/onekvm-lt6911-flash.lock
+if ! flock -w 30 9; then
+    log_step "LT6911 lock busy"
+    exit 1
+fi
+
 module_dir=/lib/modules/$(uname -r)/extra/onekvm/nanokvm
 test -d "$module_dir"
 # Image already ships modules.dep. Rewriting it on every boot walks the

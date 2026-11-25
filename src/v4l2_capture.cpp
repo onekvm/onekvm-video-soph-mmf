@@ -754,6 +754,14 @@ using rt::Channel;
 using rt::Frame;
 using rt::g_rt;
 
+bool runtime_present(void)
+{
+	if (g_rt.reference_count != 0 || g_rt.stale_checked)
+		return true;
+	v4l2::Node probe;
+	return probe.open(v4l2::kViNode) >= 0;
+}
+
 int reclaim_stale_runtime(void)
 {
 	/* V4L2 sessions end with the process that owned them; there is no

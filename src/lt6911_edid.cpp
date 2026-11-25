@@ -103,7 +103,7 @@ int read_regs(uint8_t bank, uint8_t reg, uint8_t *data, size_t len)
 
 int open_bus()
 {
-    g_bus_lock_fd = open("/run/lock/onekvm-lt6911-flash.lock", O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+    g_bus_lock_fd = open(kLt6911LockPath, O_CREAT | O_RDWR | O_CLOEXEC, 0600);
     if (g_bus_lock_fd < 0) return -1;
     if (flock(g_bus_lock_fd, LOCK_EX | LOCK_NB) != 0) {
         close(g_bus_lock_fd); g_bus_lock_fd = -1; return -1;

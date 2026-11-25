@@ -6,8 +6,7 @@
 VENC 通道层，不经过 cvi_mpi。它们是后端脱离 cvi_mpi 的编码部分；采集与缩放节点
 另行实现（采集见 [v4l2-capture.md](v4l2-capture.md)）。现有 MMF 流水线（字符设备 + cvi_mpi）保持可用，两者可同时运行。
 
-状态：实验实现，已在 107（6.18.57-onekvm-preempt）完成编码、并发和码流解码验收。
-后端 `soph-v4l2.so` 使用这两个节点，见 [v4l2-backend.md](v4l2-backend.md)。
+状态：实验实现。`soph-v4l2.so` 后端使用此接口，见 [V4L2 视频后端](v4l2-backend.md)。
 
 ## 节点
 
@@ -73,25 +72,6 @@ B 帧固定为 0，参数集固定随 IDR 输出。
 `/sys/class/video4linux/videoN/stats` 给出累计帧数、字节、错误、超时、跳帧、复位，
 编码耗时（SendFrame 到取完码流）和延迟（OUTPUT `QBUF` 到完成）的平均、合计、
 本次最大值及 0.5 ms 直方图。测试窗口的数值用前后差值计算。
-
-## 107 实测（2026-11-11）
-
-`v4l2-encode-smoke`（随模块包安装在 `/usr/libexec/onekvm/`）合成图案，1920×1080，
-OUTPUT 3 缓冲、CAPTURE 4 缓冲，Core 停止时测：
-
-| 场景 | 吞吐 | 延迟（QBUF→DQBUF，ms） |
-| --- | --- | --- |
-| H.264 NV12 不限速 | 103.7 fps | — |
-| H.265 NV12 / UYVY 不限速 | 98.3 / 99.2 fps | — |
-| JPEG NV12 / UYVY 不限速 | 224.6 / 171.5 fps | — |
-| H.264 NV12 60 fps 实时 | 60.0 fps | 平均 9.56，P95 9.65，最大 13.80 |
-| H.265 UYVY 60 fps 实时 | 60.0 fps | 平均 10.10，P95 10.13，最大 14.98 |
-
-排空（`ENC_CMD_STOP`）在 H.264、H.265、JPEG 上均收到 `LAST` 与 `EOS`。
-
-各格式输出均经主机 FFmpeg 完整解码，画面与输入图案一致；JPEG 输出带编码器写入的 2 字节空 APP9 段，FFmpeg 会对此告警。
-Core 以 cvi_mpi 推 1080p60 时并发 V4L2 JPEG 1080p30 与 H.265 720p30，均 0 错误，
-浏览器端仍约 60 fps。
 
 ## 源码
 

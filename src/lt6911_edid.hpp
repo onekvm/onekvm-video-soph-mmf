@@ -7,6 +7,11 @@
 
 namespace onekvm::video_backend {
 
+/* Exclusive LT6911 access: firmware tools and EDID writes take it without
+   waiting, and the NanoKVM module loader holds it while it loads the
+   multimedia modules and prepares the bridge. */
+inline constexpr const char *kLt6911LockPath = "/run/lock/onekvm-lt6911-flash.lock";
+
 enum class Lt6911Chip {
     Unknown,
     UXC,

@@ -6,9 +6,7 @@ This interface accepts compressed access units and outputs raw frames. The
 encoder nodes are described in [v4l2-encoder.md](v4l2-encoder.md); HDMI capture
 and VPSS scaling still use the MMF pipeline.
 
-Status: experimental implementation, with basic validation completed on device
-107 running 6.18.45-onekvm-preempt. A successful build or registered node does
-not establish all stream formats or resource cleanup.
+Status: experimental implementation.
 
 ## Interface
 
@@ -83,9 +81,6 @@ restart counts. Compare its output against software decoding of the identical
 bitstream.
 Validation also needs EOS, close/reopen, resolution changes, invalid input,
 contention and regression checks of the existing WebRTC picture.
-On 107, H.264 640×480 → 640×360 → 1920×1080 (30 frames total), JPEG 4:2:0,
-standard 4:2:2, standard 4:4:4, grayscale, sampling changes, and truncated,
-invalid and oversized inputs were exercised. After restoring Core, the
-existing WebRTC stream remained 1920×1080 H.264 at 60 FPS. A grayscale/color
+A grayscale/color
 CAPTURE plane-count change requires stopping and reallocating the queue as soon
 as the event arrives; old plane-count buffers must not be QBUF'd afterward.
