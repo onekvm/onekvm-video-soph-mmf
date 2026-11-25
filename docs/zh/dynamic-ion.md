@@ -10,19 +10,9 @@
 - 类似 ZFS ARC：调用方释放后先保留，下次直接复用；只有内存压力大、且该区域当前无人使用时，
   才归还给 Linux。正在被硬件使用的缓冲永不回收。
 
-## 现状（107，NanoKVM PCIe，2026-11-05）
+## ION 分配
 
-| 项 | 值 |
-| --- | --- |
-| 预留区 | `ion-region`（`soph_default_memmap.dtsi`），大小由 `CONFIG_ION_SIZE_MIB` 决定，107 为 64 MiB，位于 `0x85000000`；Linux 不可用 |
-| 实际占用 | 40.1 MB，峰值 41.1 MB；约 24–26 MB 从未被分配 |
-| 无视频消费者时 | 仍占 40 MB：`VbPool0`（VI，3×7.4 MB）、`VbPool1`（VPSS，9.3 MB）、VENC 参考帧 2×3 MB、码流 1 MB、H.264 固件 0.75 MB、ISP/VI 命令缓冲等 |
-| 系统内存 | `MemTotal` 175 MB，`MemAvailable` 约 115 MB，zram 16 MB |
-| 内核能力 | `CONFIG_CMA=y`、`CONFIG_ION_CMA_HEAP=y`；cvitek ION 已识别 `cvitek,cma_vpp`／`civtek,cma`（`ION_HEAP_TYPE_DMA`） |
-| 唯一分配入口 | 用户态 `CVI_SYS_IonAlloc` → `SYS_ION_ALLOC` ioctl → `osdrv-sg200x/interdrv/sys/common/sys.c` 的 `_sys_ion_alloc()`，写死 `ION_HEAP_TYPE_CARVEOUT`；内核模块直接调用同一 `sys_ion_alloc()`。视频与 NPU 都经过这里 |
-
-现有 ION CMA 堆每次分配都 `cma_alloc` 并清零整块，释放即 `cma_release`，没有保留缓存与压力回收，
-不能直接满足目标。
+`ion-region` 的大小由 `CONFIG_ION_SIZE_MIB` 决定。视频和 NPU 均通过 `sys_ion_alloc()` 分配连续缓冲。ION CMA 堆使用 `cma_alloc` 与 `cma_release`，每次分配清零整块。
 
 ## 方案
 
@@ -76,19 +66,6 @@ MMF 的恢复序列只调用 `SetChnAttr` 与 `EnableChn`，没有再次 `Enable
 `is_ctrl_inited` 提前返回场景配置。Core 重启或 MMF 完整 `DestroyVi`／`SYS_Exit` 再初始化（分辨率切换已实测可恢复）不受影响，推断与重新打开设备触发重置有关；
 同一打开周期内直接 Disable→Enable 则带着旧状态启动。
 
-### 107 实验（2026-11-05，临时 MMF 调试构建，未提交）
-
-开流后立即 `CVI_VI_DisableChn(0,0)`，首个网页消费者到来时按 MMF 现有序列恢复；变体 2 在
-`SetChnAttr` 前补 `CVI_VI_EnableDev(0)`。均为 1080p60 输入、H.264、登录网页取流约 20 s。
-
-| 变体 | VI 通道 | `IntCnt`／`RecvPic` | 画面 | ION 占用（未建编码器时的读数） |
-| --- | --- | --- | --- | --- |
-| 1：`lt6911_start_csi` + `SetChnAttr` + `EnableChn` | `Enable=N` | 0／0 | 无信号占位 | 关闭期间 31.8 MB（常态 40.1 MB） |
-| 2：再加 `EnableDev` | `Enable=Y` | 1／1 后停止 | 无信号占位 | 关闭期间 31.8 MB |
-
-结论：设备计数归零是第一层原因，已由变体 2 证实（通道重新启用）；补齐后仍只收 1 帧，符合第二层
-「未重置的每轮软件状态」推断，具体是哪一项状态阻止第二帧尚未定位。关闭 VI 只释放约 128 KiB 命令缓冲；VI／VPSS VB 池（约 31 MB）和 VENC 缓冲（约 8 MB）仍需各自释放才能归还。
-
 ### 驱动修复（osdrv `382c705`）
 
 | 改动 | 作用 |
@@ -96,56 +73,11 @@ MMF 的恢复序列只调用 `SetChnAttr` 与 `EnableChn`，没有再次 `Enable
 | `total_dev_num` 由已启用设备标记计算，DisableChn 不再清零，最后一次 release 时清零 | 厂商用户态 `CVI_VI_EnableChn` 只有在设备数等于 1 时才下发 ioctl；之前清零后它直接返回成功，什么也不做 |
 | 新一轮 EnableChn 前调用 `vi_reset_stream_state()` | 清 `isp_streamoff`、帧／触发计数和前后级状态；保留管线配置与已启用设备 |
 
-107 验证（1080p60、H.264、WebRTC，临时实验开关在通道打开后立即 DisableChn，消费者到来时按
-`lt6911_start_csi` + `SetChnAttr` + `EnableChn` 恢复，不调用 EnableDev）：
+MMF 在空闲时调用 `pause_vi_dma()` 关闭 VI，同进程恢复依赖上述 VI 模块。
 
-| 项 | 结果 |
-| --- | --- |
-| 不开实验开关的常规回归 | 60 FPS，`IntCnt` 持续增长，ION 40.1 MB |
-| 同一进程 DisableChn→EnableChn | 4 轮（不重启 Core）均 60 FPS，`IntCnt` 持续增长，无占位 |
-| 重新启用到首个 WebRTC 关键帧 | 约 140、57、58、50 ms |
-| VI 关闭期间 ION | 只释放 `vi_cmdq_buf`（128 KiB），40.1→40.0 MB。先前记录的 31.8 MB 是编码器尚未创建、VENC 参考帧／码流／固件缓冲（约 8 MB）还没分配时的读数，并非 VI 释放 |
+## 空闲释放 VB 池
 
-可行路线：
-
-| 路线 | 做法 | 首帧代价 | 状态 |
-| --- | --- | --- | --- |
-| A | 完整重开（`DestroyVi` + `SYS_Exit`，再 `initialize()`），可释放全部 VB | 约 0.7–1.5 s（含 LT6911 序列） | 已可用，超出预算 |
-| B | 空闲时 VI DisableChn，消费者到来时同进程重新启用 | 36–179 ms（见下） | 已采用：MMF 空闲调用 `pause_vi_dma()` 关闭 VI，与新 VI 模块同批发布 |
-
-### 空闲关闭 VI 的整批回归（107，2026-11-05）
-
-新 VI 模块与 MMF 一起安装并重启加载；H.264 用本机 agent-browser，H.265 用 10.100.99.3 GPU Chromium（本机浏览器无法播放 H.265 WebRTC）。
-
-| 场景 | 结果 |
-| --- | --- |
-| H.264 开关 15 轮（三批，含重启后） | 均 60 FPS、无占位；空闲 VI 关闭；重新启用到首个关键帧 36–106 ms |
-| 空闲截图 | JPEG 200、约 0.8–0.9 s；截图后 VI 仍关闭，再开视频 60 FPS |
-| H.265 VI 直通 3 轮 | 均 60 FPS；空闲 VI 保持开启（设计如此） |
-| H.265 → H.264 | 切回后 5 轮正常，空闲 VI 关闭 |
-| 播放中 1080p→640×480→1080p | 两档均 60 FPS、尺寸正确 |
-| 播放中断信号 8 s 后恢复 | 断开期间 0 FPS，恢复后 60 FPS；重新启用到关键帧 179 ms |
-| Core 重启后开流 | 60 FPS |
-| 空闲时切到 640×480 再开流 | 初测失败（0 FPS、占位），旧模块＋旧 MMF 基线同样失败；占位探测确认新模式后直接重开修复后通过：确认到出帧约 1.2 s，切回 1080p 亦 60 FPS |
-
-VB 池（约 31 MB）与 VENC 缓冲（约 8 MB）仍需按池销毁或关闭编码器才能交给保留式堆，这是阶段 2 的剩余工作。
-
-## 空闲释放 VB 池（107，2026-11-06）
-
-VI 原始帧改用私有池 `vi_raw`（SYS 初始化不建公共池），VPSS 输出池与 `vi_raw` 在各自暂停时销毁、恢复时重建；细节见[视频流水线规范](video-pipeline.md)。配合 onekvm-lazy-cma `e918b27`（≤ 4 MiB 缓冲取普通内存，大块走 64 MiB CMA 池）。数据在工作区 `artifacts/lazy-dma-idle-pools-20261106/`。
-
-| 项 | 改动前 | 改动后 |
-| --- | --- | --- |
-| Core 启动后无人观看 | 31.8 MB | 0.3 MB（仅 ISP） |
-| 看过视频后空闲 | 40.0 MB | 8.5 MB（VENC 参考帧、码流、固件） |
-| H.264 开关 5 轮、截图、播放中切分辨率、断信号、Core 重启 | 60 FPS；重新启用到关键帧 35–169 ms | 60 FPS；44–132 ms |
-| 空闲切到 640×480 | 754 ms | 647 ms（首轮 5.3 s 为计时口径：VI 恢复由模式重建触发，早于浏览器连接） |
-| 空闲切回 1080p | 约 6.1 s（既有行为） | 约 6.4 s |
-| 内存压力（保留块已全部归还、swap 用尽） | — | 5 轮 60 FPS，关键帧 46–390 ms，单次分配最长 309 ms，失败 0、无 OOM |
-
-H.265 VI 直通（GPU Chromium 3 轮 60 FPS）空闲时 VI 按设计保持开启，空闲占用仍为 31.5 MB；切回 H.264 后恢复 8.5 MB。
-
-释放的池进入 lazy-cma 保留池，不立即计入 `MemAvailable`，内存压力下由 shrinker 归还。VENC 缓冲（约 8 MB）仍随编码器常驻，关闭编码器的代价未评估。
+VI 使用私有池 `vi_raw`，VPSS 使用独立输出池，两者在各自暂停时释放并在恢复时重建。释放的块进入 lazy-cma 保留池，内存压力下由 shrinker 归还 Linux。VENC 缓冲随编码器保留，H.265 VI 直通仍持有 VI lease。详见 [视频流水线规范](video-pipeline.md)。
 
 ## 待验证
 

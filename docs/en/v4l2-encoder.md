@@ -8,9 +8,8 @@ encoding part of moving the backend off cvi_mpi; capture and scaling nodes are
 separate work (capture: [v4l2-capture.md](v4l2-capture.md)). The existing MMF pipeline (character devices plus cvi_mpi)
 remains available, and both can run at the same time.
 
-Status: experimental, validated on device 107 (6.18.57-onekvm-preempt) for
-encoding, concurrency and bitstream decoding. The `soph-v4l2.so` backend uses
-both nodes; see [v4l2-backend.md](v4l2-backend.md).
+Status: experimental. The `soph-v4l2.so` backend uses this interface.
+See [V4L2 video backend](v4l2-backend.md).
 
 ## Nodes
 
@@ -85,27 +84,6 @@ errors, timeouts, skipped frames and resets, plus encode time (SendFrame until
 the bitstream is collected) and latency (OUTPUT `QBUF` until done) as average,
 sum, this stream's maximum and a 0.5 ms histogram. Compute a test window from
 before/after deltas.
-
-## Device 107 measurements (2026-11-11)
-
-`v4l2-encode-smoke` (installed with the module package in
-`/usr/libexec/onekvm/`) with a synthetic pattern at 1920×1080, 3 OUTPUT and
-4 CAPTURE buffers, Core stopped:
-
-| Case | Throughput | Latency (QBUF→DQBUF, ms) |
-| --- | --- | --- |
-| H.264 NV12, unthrottled | 103.7 fps | — |
-| H.265 NV12 / UYVY, unthrottled | 98.3 / 99.2 fps | — |
-| JPEG NV12 / UYVY, unthrottled | 224.6 / 171.5 fps | — |
-| H.264 NV12, 60 fps real time | 60.0 fps | avg 9.56, P95 9.65, max 13.80 |
-| H.265 UYVY, 60 fps real time | 60.0 fps | avg 10.10, P95 10.13, max 14.98 |
-
-Draining with `ENC_CMD_STOP` returned `LAST` and `EOS` for H.264, H.265 and JPEG.
-
-Every output decoded completely with host FFmpeg and matched the input pattern;
-for JPEG, FFmpeg warns about the empty 2-byte APP9 segment the encoder writes. With Core streaming 1080p60 through cvi_mpi, concurrent V4L2
-JPEG 1080p30 and H.265 720p30 ran with zero errors and the browser stayed at
-about 60 fps.
 
 ## Source
 

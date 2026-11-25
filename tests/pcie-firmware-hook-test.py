@@ -120,6 +120,8 @@ echo "dump $*" >>"$TRACE"
 case "$1" in
   uxc-pages)
     [ {status} = 0 ] || exit {status}
+    # Like the real tool, read pages only from UXC 17 04 83.
+    [ "${{CHIP_ID-0x17 0x04 0x83}}" = "0x17 0x04 0x83" ] || exit 1
     shift 2
     for offset; do
       name=${{offset#0x}}
@@ -242,6 +244,30 @@ esac
         self.assertIn('no data for 0x2040', result.stdout)
         self.assertNotIn('w33@', self.trace.read_text())
 
+    def test_page_reader_identifies_uxc_without_id_reads(self):
+        self.enable_bridge()
+        self.page_reader()
+        result = self.run_hook(PAGES=str(self.work))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('stage6 image already present', result.stdout)
+        calls = self.trace.read_text()
+        # The reader confirmed the chip; the hook never opened its own window.
+        for write in ['0xff 0x80', '0xff 0xa0', '0xff 0x81', '0xee']:
+            self.assertNotIn(write, calls)
+
+    def test_page_reader_rejection_still_identifies_other_bridges(self):
+        self.enable_bridge()
+        self.page_reader()
+        for env, text in [(dict(C_ID='0x16 0x05', CHIP_ID='0x16 0x05 0x00'), 'LT6911C bridge'),
+                          (dict(CHIP_ID='0x17 0x04 0x84'), 'no audited PCIe image')]:
+            with self.subTest(env=env):
+                result = self.run_hook(PAGES=str(self.work), **env)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn(text, result.stdout)
+                calls = self.trace.read_text()
+                self.assertEqual(calls.count('dump uxc-pages'), 1)
+                self.assertNotIn('0x5f', calls)
+
     def test_tool_without_page_reader_falls_back_to_page_reads(self):
         # Released firmware tools answer "uxc-pages" with their usage and exit 2.
         self.enable_bridge()
@@ -250,7 +276,7 @@ esac
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('stage6 image already present', result.stdout)
         calls = self.trace.read_text()
-        self.assertIn('dump uxc-pages', calls)
+        self.assertEqual(calls.count('dump uxc-pages'), 1)
         self.assertIn('0x5a 0x90', calls)
         self.assertNotIn('w33@', calls)
 

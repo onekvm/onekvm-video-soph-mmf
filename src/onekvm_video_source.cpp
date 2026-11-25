@@ -1,6 +1,10 @@
 #include "onekvm_video_backend_internal.hpp"
 #include "lt6911_edid.hpp"
 
+#include <fcntl.h>
+#include <sys/file.h>
+#include <unistd.h>
+
 #include <exception>
 
 #pragma GCC visibility push(hidden)
@@ -15,6 +19,17 @@ std::atomic<uint64_t> g_mmf_generation{1};
 namespace {
 std::mutex g_edid_source_mutex;
 Source *g_edid_source = nullptr;
+
+/* Someone holds the LT6911 lock: the module loader preparing the bridge or
+   a firmware tool. Probe without waiting and without creating the file. */
+bool lt6911_lock_held() {
+    const int fd = open(kLt6911LockPath, O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+        return false;
+    const bool held = flock(fd, LOCK_SH | LOCK_NB) != 0 && errno == EWOULDBLOCK;
+    close(fd);
+    return held;
+}
 }
 
 void set_error(char *error, uint32_t capacity, const char *format, ...) {
@@ -1154,6 +1169,17 @@ int32_t source_create(const onekvm_video_source_config_v1 *config, void **result
         return -1;
     }
     *result = nullptr;
+    /* Core may start before the multimedia modules are loaded. Report
+       "not yet" without touching LT6911 until they are, and while the
+       loader or a firmware tool still has the bridge. */
+    if (!mmf::runtime_present()) {
+        set_error(error, error_capacity, "multimedia modules are not loaded yet");
+        return -1;
+    }
+    if (lt6911_lock_held()) {
+        set_error(error, error_capacity, "capture bridge is still being prepared");
+        return -1;
+    }
     std::lock_guard<std::mutex> registry(g_edid_source_mutex);
     lt6911_edid_initialize();
     onekvm_video_edid_caps_v1 edid_caps{};
@@ -1414,6 +1440,15 @@ int32_t source_signal_present(void *opaque) {
     auto *source = static_cast<Source *>(opaque);
     if (source != nullptr && source->out_of_range.load(std::memory_order_relaxed))
         return 1;
+    /* After HDMI loss the PCIe passive probe found no timing. The rebuilt
+       receiver still gets one first-AU window with cached_signal=1, which
+       only keeps the watcher off LT6911; no picture has proved a signal.
+       Reporting it as connected made the status flip back for ~5 s while
+       the stream showed nothing. */
+    if (source != nullptr &&
+        source->awaiting_hdmi_timing.load(std::memory_order_relaxed) &&
+        source->hdmi_waiting_for_signal.load(std::memory_order_relaxed))
+        return 0;
     return cached_signal_present(source) > 0 ? 1 : 0;
 }
 

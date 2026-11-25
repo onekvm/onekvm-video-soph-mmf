@@ -155,6 +155,29 @@ probe_d() {
   normalize "$d_id"
   [ "$normalized" = '21 02' ]
 }
+expect_1a60="22 12 52 a6 7f 24 7e 00 12 54 de 90 b0 02 e0 44 08 f0 12 1f 84 90 02 7b e0 70 03 02 1b c9 7f 32"
+expect_1a80="7e 00 12 54 de 90 b0 04 e0 44 20 f0 12 57 30 90 b0 04 e0 54 df f0 7f 24 7e 00 12 54 de 12 57 30"
+expect_1ae0="c3 f9 f8 d3 12 17 c4 40 0a 7f 14 7e 00 12 54 de 12 57 30 90 b0 a2 e0 ff 20 e4 06 20 e0 03 30 e5"
+expect_2040="04 7e 00 12 54 de 90 b0 9b e0 ff 7e 00 64 80 70 50 90 b0 9c e0 70 4a 90 00 31 e0 fd 25 e0 24 4c"
+expect_5800="64 ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff"
+
+pages="1a60 1a80 1ae0 2040 5800"
+
+# The firmware tools read every page twice in one process. Each i2ctransfer
+# fork costs tens of milliseconds while units start, so the per-command reads
+# below remain only for tools without the page reader (exit status 2).
+page_status=2
+read_pages_with_tool() {
+  page_status=2
+  [ -x "$dump" ] || return 0
+  set --
+  for name in $pages; do
+    set -- "$@" "0x$name"
+  done
+  page_status=0
+  page_data=$("$dump" uxc-pages /dev/i2c-4 "$@") || page_status=$?
+}
+
 d_first=false
 if ! present 0x2c && ! present 0x44; then
   d_first=true
@@ -163,61 +186,53 @@ if ! present 0x2c && ! present 0x44; then
     exit 0
   fi
 fi
-bank 0x80
-wr 0xee 0x01
-trap close_flash EXIT
-c_id=$(read_id 0xa0 2) || { log "cannot read chip ID; refusing firmware access"; exit 1; }
-normalize "$c_id"
-if [ "$normalized" = '16 05' ]; then
-  log "LT6911C bridge; no PCIe firmware update needed"
-  exit 0
+# A bridge answering at 0x2c or 0x44 is not probed as LT6911D first. The page
+# reader confirms UXC 17 04 83 before it reads, so when it succeeds the chip
+# is identified as well and the separate ID reads are skipped.
+identified=false
+if [ "$d_first" = false ]; then
+  read_pages_with_tool
+  [ "$page_status" -ne 0 ] || identified=true
 fi
-chip_id=$(read_id 0x81 3) || { log "cannot read chip ID; refusing firmware access"; exit 1; }
-normalize "$chip_id"
-chip_id=$normalized
-case $chip_id in
-  '17 04 83') ;;
-  17\ 04\ [0-9a-f][0-9a-f])
-    log "LT6911UXC revision '$chip_id' has no audited PCIe image; left unchanged"
+if [ "$identified" = false ]; then
+  bank 0x80
+  wr 0xee 0x01
+  trap close_flash EXIT
+  c_id=$(read_id 0xa0 2) || { log "cannot read chip ID; refusing firmware access"; exit 1; }
+  normalize "$c_id"
+  if [ "$normalized" = '16 05' ]; then
+    log "LT6911C bridge; no PCIe firmware update needed"
     exit 0
-    ;;
-  *)
-    close_flash
-    trap - EXIT
-    if [ "$d_first" = false ] && probe_d; then
-      log "LT6911D bridge; no PCIe firmware update needed"
+  fi
+  chip_id=$(read_id 0x81 3) || { log "cannot read chip ID; refusing firmware access"; exit 1; }
+  normalize "$chip_id"
+  chip_id=$normalized
+  case $chip_id in
+    '17 04 83') ;;
+    17\ 04\ [0-9a-f][0-9a-f])
+      log "LT6911UXC revision '$chip_id' has no audited PCIe image; left unchanged"
       exit 0
-    fi
-    normalize "${d_id-}"
-    log "unknown bridge chip (UXC '$chip_id', D '$normalized'); refusing firmware access"
-    exit 1
-    ;;
-esac
-
-expect_1a60="22 12 52 a6 7f 24 7e 00 12 54 de 90 b0 02 e0 44 08 f0 12 1f 84 90 02 7b e0 70 03 02 1b c9 7f 32"
-expect_1a80="7e 00 12 54 de 90 b0 04 e0 44 20 f0 12 57 30 90 b0 04 e0 54 df f0 7f 24 7e 00 12 54 de 12 57 30"
-expect_1ae0="c3 f9 f8 d3 12 17 c4 40 0a 7f 14 7e 00 12 54 de 12 57 30 90 b0 a2 e0 ff 20 e4 06 20 e0 03 30 e5"
-expect_2040="04 7e 00 12 54 de 90 b0 9b e0 ff 7e 00 64 80 70 50 90 b0 9c e0 70 4a 90 00 31 e0 fd 25 e0 24 4c"
-expect_5800="64 ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff"
-
-pages="1a60 1a80 1ae0 2040 5800"
-# The firmware tools read every page twice in one process. Each i2ctransfer
-# fork costs tens of milliseconds while units start, so the per-command reads
-# below remain only for tools without the page reader (exit status 2).
-fast=0
-if [ -x "$dump" ]; then
-  set --
-  for name in $pages; do
-    set -- "$@" "0x$name"
-  done
-  status=0
-  page_data=$("$dump" uxc-pages /dev/i2c-4 "$@") || status=$?
-  case $status in
-    0) fast=1 ;;
-    2) ;;
-    *) log "page reader failed with status $status"; exit 1 ;;
+      ;;
+    *)
+      close_flash
+      trap - EXIT
+      if [ "$d_first" = false ] && probe_d; then
+        log "LT6911D bridge; no PCIe firmware update needed"
+        exit 0
+      fi
+      normalize "${d_id-}"
+      log "unknown bridge chip (UXC '$chip_id', D '$normalized'); refusing firmware access"
+      exit 1
+      ;;
   esac
+  [ "$d_first" = false ] && [ "$page_status" -eq 2 ] || read_pages_with_tool
 fi
+fast=0
+case $page_status in
+  0) fast=1 ;;
+  2) ;;
+  *) log "page reader failed with status $page_status"; exit 1 ;;
+esac
 if [ "$fast" -eq 1 ]; then
   while read -r offset bytes; do
     case $offset in

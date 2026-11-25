@@ -9,10 +9,8 @@ writing. This is the path the LT6911 HDMI bridge feeds.
 in-kernel SDK layer, without cvi_mpi. The bridge (timing, EDID, I2C) stays in
 user space, which sets the current active size with `S_FMT` before `STREAMON`.
 
-Status: experimental, validated on device 107 (6.18.57-onekvm-preempt) for
-capture, start/stop, chaining into the encoder nodes and exclusion against
-cvi_mpi. The `soph-v4l2.so` backend uses this node; see
-[v4l2-backend.md](v4l2-backend.md).
+Status: experimental. The `soph-v4l2.so` backend uses this interface.
+See [V4L2 video backend](v4l2-backend.md).
 
 ## Node
 
@@ -85,59 +83,6 @@ When queuing an exported buffer to an encoder as `V4L2_MEMORY_DMABUF`, set
 `/sys/class/video4linux/videoN/stats`: `frames` (delivered, cumulative),
 `dropped` (VI frame number gaps, cumulative) and `starved` (times VI found no
 free buffer in the current stream).
-
-## Device 107 measurements (2026-11-11)
-
-Host 99 outputs 1920×1080@60, Core stopped, `v4l2-capture-smoke` (installed with
-the module package in `/usr/libexec/onekvm/`):
-
-| Case | Result |
-| --- | --- |
-| 600 frames, 4 buffers | 60.00 fps, interval 16.66–16.68 ms, no sequence gaps |
-| VI frame end → `DQBUF` | avg 0.15 ms, P95 0.16, max 2.00 |
-| First frame (26 starts) | 19.8–34.4 ms after `STREAMON` |
-| 20 start/stop cycles | 20/20 |
-| 3 buffers, each held 40 ms | 25.1 fps, VI waits without overwriting, `STREAMOFF` normal |
-| CPU read of a 4 MB frame | write-combined 102 ms; `NON_COHERENT` 33 ms (`DQBUF` avg 0.82 ms, P95 2.80) |
-| → `soph-venc` H.265 (DMA-BUF), 600 frames | 60 fps, 0 errors; VI frame end → bitstream `DQBUF` avg 10.33 ms, P95 10.30, max 28.06; FFmpeg decodes 600 frames |
-| → `soph-jpegenc`, 120 frames | 60 fps, 0 errors; avg 6.18 ms, P95 8.12, max 9.37; FFmpeg decodes 120 frames |
-| Legacy Core started during a stream | capture continues; 16 user-space releases refused, Core MMF init fails; one 1.74 s pause with one `isp_err_chk` that VI retriggered (frame numbers continuous, cause not identified); capture normal after Core stops |
-| Legacy Core (cvi_mpi) on these modules | logged-in web page 1080p 60 FPS |
-
-One of 27 starts reported `isp_err_chk` (CSIBDG width or height above the
-setting) on the first frame; VI retriggered and delivered frames normally.
-
-### 4:2:0 output and latency comparison
-
-Host 99 outputs 1920×1080@60, Core stopped. Latency runs from VI frame end to
-the bitstream `DQBUF`. Two rounds in one session, 600 frames each (JPEG 300);
-values are "round 1 / round 2".
-
-| Path | P50 (ms) | P95 (ms) | Avg (ms) |
-| --- | --- | --- | --- |
-| `UYVY` → `soph-vpss` NV12 → H.264 | 16.46 / 16.48 | 17.47 / 17.38 | 16.75 / 16.65 |
-| `NV21` → H.264 | 9.78 / 9.79 | 9.85 / 10.75 | 10.21 / 9.86 |
-| `NV12` → H.264 | 9.79 / 9.78 | 9.92 / 9.93 | 10.66 / 9.85 |
-| `UYVY` → `soph-vpss` NV12 → H.265 | 17.44 / 17.43 | 17.69 / 17.48 | 17.56 / 17.33 |
-| `UYVY` → H.265 | 10.25 / 10.26 | 10.30 / 10.33 | 10.26 / 10.32 |
-| `NV21` → H.265 | 10.25 / 10.25 | 10.30 / 10.31 | 10.27 / 10.28 |
-| `UYVY` → JPEG | 5.90 / 5.91 | 8.39 / 8.26 | 10.96 / 6.42 |
-| `NV21` → JPEG | 4.66 / 4.66 | 9.52 / 7.08 | 11.37 / 5.23 |
-
-- Dropping VPSS from same-size H.264 lowers P50 by about 6.7 ms, the VPSS
-  whole-frame time.
-- In round 1, `NV21` and `NV12` → H.264 each had one stall (max 101 / 140 ms,
-  59.6 / 59.4 fps), and both JPEG cases stalled 350–450 ms (UYVY and NV21
-  alike). Round 2 had no stalls and ran at 60 fps. The cause was not found.
-- Bitstreams: FFmpeg decodes every frame. PSNR of H.264 frame 300 against the
-  UYVY reference: 48.6 dB through VPSS, 48.4 dB with `NV21` direct.
-
-| Case | Result |
-| --- | --- |
-| 1920×1080 `NV21` / `NV12` against a `UYVY` frame captured alongside | luma error 0; chroma within 1 of the two-line average |
-| Host 99 temporarily at 1368×768 (stride 1408) | same; H.264, H.265 and JPEG direct all decode correctly |
-| 30 alternating `NV21` / `UYVY` / `NV12` start/stop cycles | 30/30, no sequence gaps |
-| Legacy Core started after an `NV21` session | logged-in web page H.264 1080p 60 FPS, picture correct |
 
 ## Source
 

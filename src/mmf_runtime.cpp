@@ -980,6 +980,11 @@ static int find_unused_capture_channel() {
 	return -1;
 }
 
+bool runtime_present(void)
+{
+	return soph_media_modules_ready();
+}
+
 int reclaim_stale_runtime(void)
 {
 	if (g_runtime.reference_count || g_stale_runtime_reclaimed)

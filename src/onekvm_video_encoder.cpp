@@ -1256,36 +1256,13 @@ int32_t encoder_read_packet(void *opaque, onekvm_video_packet_v1 *packet,
             return fill_bound_empty_packet(encoder, packet);
         }
 
-        /* Once the first-AU window expires, an exclusive VI stream with no
-           packet has not proved the optimistic HDMI-live cache. Let the
-           silent timing watcher attempt a software CSI/MMF rearm. Keep the
-           exclusive VI binding until recovery starts: switching it to the
-           placeholder path freezes the sole CSI destination. */
-        if (last_live == 0 && !awaiting_first_au) {
-            if (mmf::h26x_bound_to_vi(encoder->channel)) {
-                source->cached_signal.store(0, std::memory_order_relaxed);
-                source->failures++;
-                const int rebuilt = maybe_rebuild_for_hdmi_change(
-                    source, error, error_capacity);
-                if (rebuilt != 0) {
-                    encoder->placeholder_frames = false;
-                    invalidate_stale_encoder(encoder);
-                    return -1;
-                }
-                mmf::h26x_reader_force_idr(encoder->channel);
-                const int codec = encoder->codec_type;
-                source_lock.unlock();
-                lock.unlock();
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                packet->data = nullptr;
-                packet->data_size = 0;
-                packet->codec = public_codec(codec);
-                packet->key_frame = 0;
-                packet->pts_ns = monotonic_ns();
-                return 0;
-            }
+        /* Once the first-AU window expires, a stream with no packet has not
+           proved the optimistic HDMI-live cache. HEVC VI-direct takes the
+           same path as VPSS: try a rebuild, otherwise rebind to VPSS and show
+           the no-signal still. Holding VI-direct here waited forever when
+           the host had no signal at Core start. */
+        if (last_live == 0 && !awaiting_first_au)
             missing_signal = true;
-        }
 
         if (!missing_signal && !venc_stale) {
             source->failures++;
